@@ -92,7 +92,6 @@ export const AgentRow = z.object({
   description: z.string().nullable(),
   git_repo_url: z.string().nullable(),
   git_branch: z.string(),
-  github_installation_id: z.string().nullable(),
   composio_toolkits: z.array(z.string()),
   model: z.string(),
   allowed_tools: z.array(z.string()),
