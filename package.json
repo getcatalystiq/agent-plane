@@ -15,11 +15,18 @@
   "dependencies": {
     "@composio/core": "^0.6.3",
     "@neondatabase/serverless": "^1.0.2",
+    "@tailwindcss/postcss": "^4.1.18",
     "@vercel/blob": "^2.2.0",
     "@vercel/sandbox": "^1.5.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.564.0",
     "next": "16.1.6",
+    "postcss": "^8.5.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "tailwind-merge": "^3.4.1",
+    "tailwindcss": "^4.1.18",
     "uuid": "^13.0.0",
     "zod": "^4.3.6"
   },

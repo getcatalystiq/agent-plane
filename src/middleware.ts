@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { authenticateAdminFromCookie } from "@/lib/admin-auth";
 
 // Paths that don't require authentication
 const PUBLIC_PATHS = ["/api/health", "/api/cron/"];
@@ -11,7 +12,36 @@ function isPublicPath(pathname: string): boolean {
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Only protect /api/* routes
+  // --- Admin UI pages ---
+  if (pathname.startsWith("/admin")) {
+    // Login page is always accessible
+    if (pathname === "/admin/login") {
+      return NextResponse.next();
+    }
+    // All other admin pages require cookie auth
+    if (!authenticateAdminFromCookie(request)) {
+      const loginUrl = new URL("/admin/login", request.url);
+      return NextResponse.redirect(loginUrl);
+    }
+    return NextResponse.next();
+  }
+
+  // --- Admin API routes ---
+  if (pathname.startsWith("/api/admin")) {
+    // Login API is public
+    if (pathname === "/api/admin/login") {
+      return NextResponse.next();
+    }
+    if (!authenticateAdminFromCookie(request)) {
+      return NextResponse.json(
+        { error: { code: "unauthorized", message: "Admin authentication required" } },
+        { status: 401 },
+      );
+    }
+    return NextResponse.next();
+  }
+
+  // --- Tenant API routes ---
   if (!pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
@@ -50,5 +80,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/api/:path*"],
+  matcher: ["/api/:path*", "/admin/:path*"],
 };
