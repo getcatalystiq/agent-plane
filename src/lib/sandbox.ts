@@ -1,3 +1,4 @@
+import { Sandbox, type Command } from "@vercel/sandbox";
 import { logger } from "./logger";
 
 export interface SandboxConfig {
@@ -28,21 +29,7 @@ export interface SandboxInstance {
   logs: () => AsyncIterable<string>;
 }
 
-// Dynamic import to avoid build errors when @vercel/sandbox isn't installed locally
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getSandboxSDK(): Promise<any> {
-  try {
-    // @ts-expect-error -- @vercel/sandbox is only available in Vercel runtime
-    return await import("@vercel/sandbox");
-  } catch {
-    throw new Error(
-      "@vercel/sandbox is not available. This code must run on Vercel.",
-    );
-  }
-}
-
 export async function createSandbox(config: SandboxConfig): Promise<SandboxInstance> {
-  const { Sandbox } = await getSandboxSDK();
 
   const sourceConfig = config.agent.git_repo_url
     ? {
@@ -79,14 +66,20 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   const runnerScript = buildRunnerScript(config);
 
   // Write runner to sandbox
-  await sandbox.files.write("/tmp/runner.mjs", runnerScript);
+  await sandbox.writeFiles([
+    { path: "/tmp/runner.mjs", content: Buffer.from(runnerScript) },
+  ]);
 
-  // Install Claude Agent SDK if not from snapshot
-  const installCmd = await sandbox.commands.run({
-    cmd: "npm install @anthropic-ai/claude-agent-sdk 2>&1 || true",
-    timeout: 60_000,
+  // Install Claude Agent SDK
+  const installCmd = await sandbox.runCommand({
+    cmd: "npm",
+    args: ["install", "@anthropic-ai/claude-agent-sdk"],
   });
-  logger.debug("SDK install output", { output: installCmd.stdout?.slice(0, 500) });
+  const installOutput = await installCmd.stdout();
+  logger.debug("SDK install output", {
+    output: installOutput.slice(0, 500),
+    exitCode: installCmd.exitCode,
+  });
 
   // Build env vars for the runner command
   const env: Record<string, string> = {
@@ -110,25 +103,26 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   }
 
   // Start the runner in detached mode
-  const command = await sandbox.commands.run({
-    cmd: "node /tmp/runner.mjs",
+  const command = await sandbox.runCommand({
+    cmd: "node",
+    args: ["/tmp/runner.mjs"],
     env,
-    background: true,
+    detached: true,
   });
 
   logger.info("Sandbox started", {
     run_id: config.runId,
-    sandbox_id: sandbox.id,
+    sandbox_id: sandbox.sandboxId,
   });
 
   return {
-    id: sandbox.id,
+    id: sandbox.sandboxId,
     stop: async () => {
       try {
         await sandbox.stop();
       } catch (err) {
         logger.warn("Failed to stop sandbox", {
-          sandbox_id: sandbox.id,
+          sandbox_id: sandbox.sandboxId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -137,9 +131,9 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   };
 }
 
-async function* streamLogs(command: { logs: () => AsyncIterable<string> }): AsyncIterable<string> {
-  for await (const line of command.logs()) {
-    yield line;
+async function* streamLogs(command: Command): AsyncIterable<string> {
+  for await (const log of command.logs()) {
+    yield log.data;
   }
 }
 
@@ -243,10 +237,9 @@ main().catch(err => {
 
 export async function reconnectSandbox(sandboxId: string): Promise<SandboxInstance | null> {
   try {
-    const { Sandbox } = await getSandboxSDK();
-    const sandbox = await Sandbox.get(sandboxId);
+    const sandbox = await Sandbox.get({ sandboxId });
     return {
-      id: sandbox.id,
+      id: sandbox.sandboxId,
       stop: () => sandbox.stop(),
       logs: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: "" }) }) }),
     };
