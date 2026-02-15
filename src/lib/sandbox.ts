@@ -57,6 +57,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
         "api.anthropic.com",
         "backend.composio.dev",
         "*.githubusercontent.com",
+        "registry.npmjs.org",
         new URL(config.platformApiUrl).hostname,
       ],
     },
@@ -76,10 +77,18 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
     args: ["install", "@anthropic-ai/claude-agent-sdk"],
   });
   const installOutput = await installCmd.stdout();
-  logger.debug("SDK install output", {
-    output: installOutput.slice(0, 500),
+  const installErrors = await installCmd.stderr();
+  logger.info("SDK install result", {
     exitCode: installCmd.exitCode,
+    stdout: installOutput.slice(0, 500),
+    stderr: installErrors.slice(0, 500),
   });
+  if (installCmd.exitCode !== 0) {
+    logger.error("SDK install failed", {
+      exitCode: installCmd.exitCode,
+      stderr: installErrors.slice(0, 1000),
+    });
+  }
 
   // Build env vars for the runner command
   const env: Record<string, string> = {
