@@ -210,13 +210,19 @@ async function main() {
     agent_id: process.env.AGENTPLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
+    debug_mcp: {
+      composio_url_present: !!process.env.COMPOSIO_MCP_URL,
+      composio_url_prefix: (process.env.COMPOSIO_MCP_URL || '').slice(0, 60),
+      mcp_server_count: Object.keys(mcpServers).length,
+      mcp_server_names: Object.keys(mcpServers),
+    },
   });
 
   try {
     const options = {
       model: config.model,
       permissionMode: config.permissionMode,
-      allowedTools: config.allowedTools,
+      ...(config.allowedTools ? { allowedTools: config.allowedTools } : {}),
       maxTurns: config.maxTurns,
       maxBudgetUsd: config.maxBudgetUsd,
       ...(config.settingSources ? { settingSources: config.settingSources } : {}),
