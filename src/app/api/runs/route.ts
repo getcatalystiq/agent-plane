@@ -31,7 +31,10 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 
   try {
     // Build MCP config for Composio toolkits
-    const mcpServers = await buildMcpConfig(agent, auth.tenantId);
+    const mcpResult = await buildMcpConfig(agent, auth.tenantId);
+    if (mcpResult.errors.length > 0) {
+      logger.warn("MCP config errors", { run_id: runId, errors: mcpResult.errors });
+    }
 
     // Create and start sandbox
     const sandbox = await createSandbox({
@@ -41,7 +44,8 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       prompt: input.prompt,
       platformApiUrl: new URL(request.url).origin,
       aiGatewayApiKey: process.env.AI_GATEWAY_API_KEY!,
-      ...(mcpServers.composio ? { composioMcpUrl: mcpServers.composio.url } : {}),
+      ...(mcpResult.servers.composio ? { composioMcpUrl: mcpResult.servers.composio.url } : {}),
+      mcpErrors: mcpResult.errors,
     });
 
     // Transition to running

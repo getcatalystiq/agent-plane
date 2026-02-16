@@ -22,6 +22,7 @@ export interface SandboxConfig {
   aiGatewayApiKey: string;
   composioMcpUrl?: string;
   composioMcpHeaders?: Record<string, string>;
+  mcpErrors?: string[];
 }
 
 export interface SandboxInstance {
@@ -215,6 +216,7 @@ async function main() {
       composio_url_prefix: (process.env.COMPOSIO_MCP_URL || '').slice(0, 60),
       mcp_server_count: Object.keys(mcpServers).length,
       mcp_server_names: Object.keys(mcpServers),
+      mcp_errors: ${JSON.stringify(config.mcpErrors || [])},
     },
   });
 

@@ -56,12 +56,16 @@ export async function createComposioMcpUrl(
 
     return { url: mcpUrl };
   } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    const errorStack = err instanceof Error ? err.stack?.slice(0, 500) : undefined;
     logger.error("Composio MCP URL generation failed", {
       user_id: userId,
       toolkits,
-      error: err instanceof Error ? err.message : String(err),
+      error: errorMsg,
+      stack: errorStack,
     });
-    return null;
+    // Re-throw so callers can surface the error
+    throw new Error(`Composio MCP setup failed: ${errorMsg}`);
   }
 }
 
