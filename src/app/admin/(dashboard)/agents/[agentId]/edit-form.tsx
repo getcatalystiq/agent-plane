@@ -50,14 +50,22 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         <CardTitle className="text-base">Edit Agent</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-5 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Model</label>
-            <Input value={model} onChange={(e) => setModel(e.target.value)} />
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+            >
+              <option value="claude-opus-4-6">claude-opus-4-6</option>
+              <option value="claude-sonnet-4-5-20250929">claude-sonnet-4-5-20250929</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+            </select>
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Permission Mode</label>

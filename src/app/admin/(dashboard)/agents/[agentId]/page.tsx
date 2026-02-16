@@ -45,18 +45,18 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Model</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Budget</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm font-mono">{agent.model}</p>
+            <p className="text-2xl font-bold font-mono">${agent.max_budget_usd.toFixed(2)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Budget / Turns</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Max Turns</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold font-mono">${agent.max_budget_usd.toFixed(2)} <span className="text-sm text-muted-foreground font-normal">/ {agent.max_turns}</span></p>
+            <p className="text-2xl font-bold">{agent.max_turns}</p>
           </CardContent>
         </Card>
         <Card>
