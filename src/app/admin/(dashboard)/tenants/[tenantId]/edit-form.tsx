@@ -65,7 +65,7 @@ export function TenantEditForm({ tenant }: { tenant: Tenant }) {
             </select>
           </div>
         </div>
-        <div className="mt-4">
+        <div className="mt-4 flex justify-end">
           <Button onClick={handleSave} disabled={saving} size="sm">
             {saving ? "Saving..." : "Save Changes"}
           </Button>

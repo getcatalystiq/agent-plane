@@ -43,7 +43,7 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ t
         <Badge variant={tenant.status === "active" ? "default" : "destructive"}>{tenant.status}</Badge>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Monthly Budget</CardTitle>
@@ -62,10 +62,18 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ t
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Agents / Runs</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Agents</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold">{agents.length} / {recentRuns.length}</p>
+            <p className="text-2xl font-bold">{agents.length}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Runs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-bold">{recentRuns.length}</p>
           </CardContent>
         </Card>
       </div>
