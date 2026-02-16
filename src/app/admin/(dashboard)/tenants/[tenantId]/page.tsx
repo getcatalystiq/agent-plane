@@ -3,8 +3,9 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { queryOne, query } from "@/db";
-import { TenantRow, AgentRow, RunRow } from "@/lib/validation";
+import { TenantRow, AgentRow, RunRow, ApiKeyRow } from "@/lib/validation";
 import { TenantEditForm } from "./edit-form";
+import { ApiKeysSection } from "./api-keys";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,13 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ t
   const recentRuns = await query(
     RunRow,
     "SELECT * FROM runs WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20",
+    [tenantId],
+  );
+
+  const apiKeys = await query(
+    ApiKeyRow.omit({ key_hash: true }),
+    `SELECT id, tenant_id, name, key_prefix, scopes, last_used_at, expires_at, revoked_at, created_at
+     FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC`,
     [tenantId],
   );
 
@@ -63,6 +71,8 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ t
       </div>
 
       <TenantEditForm tenant={tenant} />
+
+      <ApiKeysSection tenantId={tenantId} initialKeys={apiKeys} />
 
       {/* Agents table */}
       <div>
