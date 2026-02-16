@@ -56,7 +56,8 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
     networkPolicy: {
       allow: [
         "ai-gateway.vercel.sh",
-        "backend.composio.dev",
+        "*.composio.dev",
+        "*.firecrawl.dev",
         "*.githubusercontent.com",
         "registry.npmjs.org",
         new URL(config.platformApiUrl).hostname,
@@ -158,10 +159,13 @@ async function* streamLogs(command: Command): AsyncIterable<string> {
 
 function buildRunnerScript(config: SandboxConfig): string {
   const hasSkills = config.agent.skills.length > 0;
+  const hasMcp = !!config.composioMcpUrl;
   const agentConfig = {
     model: config.agent.model,
     permissionMode: config.agent.permission_mode,
-    allowedTools: config.agent.allowed_tools,
+    // Don't restrict allowedTools when MCP servers are present,
+    // otherwise MCP tool names (mcp__*) get blocked
+    ...(hasMcp ? {} : { allowedTools: config.agent.allowed_tools }),
     maxTurns: config.agent.max_turns,
     maxBudgetUsd: config.agent.max_budget_usd,
     ...(hasSkills ? { settingSources: ["project"] } : {}),
