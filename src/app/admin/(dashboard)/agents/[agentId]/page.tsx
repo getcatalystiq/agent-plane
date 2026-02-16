@@ -31,12 +31,12 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
           <span className="text-muted-foreground">/</span>
           <h1 className="text-2xl font-semibold">{agent.name}</h1>
         </div>
-        <p className="text-sm text-muted-foreground mt-1 ml-[70px]">
+        <p className="text-sm text-muted-foreground mt-1">
           Tenant: <Link href={`/admin/tenants/${agent.tenant_id}`} className="text-primary hover:underline">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</Link>
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Budget</CardTitle>
@@ -55,10 +55,18 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Skills / Runs</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Skills</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold">{agent.skills.length} / {recentRuns.length}</p>
+            <p className="text-2xl font-bold">{agent.skills.length}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Runs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-bold">{recentRuns.length}</p>
           </CardContent>
         </Card>
       </div>
