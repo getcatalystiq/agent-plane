@@ -32,7 +32,26 @@ export const CreateAgentSchema = z.object({
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
 });
 
-export const UpdateAgentSchema = CreateAgentSchema.partial();
+// Strip defaults before .partial() so omitted fields stay undefined (not default values)
+export const UpdateAgentSchema = z.object({
+  name: z.string().min(1).max(255),
+  description: z.string().max(2000).nullable(),
+  git_repo_url: z.string().url().regex(/^https:\/\/github\.com\//).max(2048).nullable(),
+  git_branch: z.string().min(1).max(255),
+  composio_toolkits: z.array(z.string().min(1).max(100)),
+  skills: z.array(z.object({
+    folder: z.string().min(1).max(255),
+    files: z.array(z.object({
+      path: z.string().min(1).max(500),
+      content: z.string().max(100_000),
+    })).min(1),
+  })),
+  model: z.string().min(1).max(100),
+  allowed_tools: z.array(z.string().min(1).max(100)),
+  permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),
+  max_turns: z.number().int().min(1).max(1000),
+  max_budget_usd: z.number().min(0.01).max(100.0),
+}).partial();
 
 export type CreateAgentInput = z.infer<typeof CreateAgentSchema>;
 export type UpdateAgentInput = z.infer<typeof UpdateAgentSchema>;
