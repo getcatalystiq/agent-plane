@@ -31,9 +31,12 @@ export async function createComposioMcpUrl(
   if (!client) return null;
 
   try {
-    // Create an MCP server with managed auth and the requested toolkits
+    // Create an MCP server with managed auth and the requested toolkits.
+    // Use a unique name per call to avoid MCP_DuplicateServerName errors,
+    // since Composio doesn't provide a get-or-create API.
+    const suffix = Date.now().toString(36);
     const server = await client.mcp.create({
-      name: `ap-${userId.slice(0, 20)}`,
+      name: `ap-${userId.slice(0, 12)}-${suffix}`,
       auth_config_ids: [],
       managed_auth_via_composio: true,
       no_auth_apps: toolkits.map((t) => t.toLowerCase()),
