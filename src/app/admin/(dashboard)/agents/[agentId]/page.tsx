@@ -76,13 +76,11 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
 
       <AgentEditForm agent={agent} />
 
-      <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
-
-      {/* Composio MCP info (read-only) */}
+      {/* Connectors Server (read-only) */}
       {agent.composio_toolkits.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Composio MCP Server</CardTitle>
+            <CardTitle className="text-base">Connectors Server</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
@@ -112,6 +110,8 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
           </CardContent>
         </Card>
       )}
+
+      <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
 
       {/* Recent runs */}
       <div>
