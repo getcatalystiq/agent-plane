@@ -7,6 +7,7 @@ import { AgentRow, RunRow, TenantRow } from "@/lib/validation";
 import { AgentEditForm } from "./edit-form";
 import { SkillsEditor } from "./skills-editor";
 import { ConnectorsManager } from "./connectors-manager";
+import { AgentHeaderActions } from "./header-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -27,10 +28,13 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
   return (
     <div className="space-y-6">
       <div>
-        <div className="flex items-center gap-3">
-          <Link href="/admin/agents" className="text-muted-foreground hover:text-foreground text-sm">&larr; Agents</Link>
-          <span className="text-muted-foreground">/</span>
-          <h1 className="text-2xl font-semibold">{agent.name}</h1>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Link href="/admin/agents" className="text-muted-foreground hover:text-foreground text-sm">&larr; Agents</Link>
+            <span className="text-muted-foreground">/</span>
+            <h1 className="text-2xl font-semibold">{agent.name}</h1>
+          </div>
+          <AgentHeaderActions agentId={agent.id} tenantId={agent.tenant_id} />
         </div>
         <p className="text-sm text-muted-foreground mt-1">
           Tenant: <Link href={`/admin/tenants/${agent.tenant_id}`} className="text-primary hover:underline">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</Link>
