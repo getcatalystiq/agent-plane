@@ -194,10 +194,24 @@ function SystemItem({ item }: { item: ConversationItem }) {
 }
 
 function AssistantItem({ item }: { item: ConversationItem }) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = item.text?.split("\n")[0]?.slice(0, 120) ?? "";
+
   return (
-    <div className="pl-4 border-l-2 border-primary/30">
-      <div className="text-xs text-muted-foreground mb-1 font-medium">Assistant</div>
-      <div className="text-sm whitespace-pre-wrap">{item.text}</div>
+    <div className="rounded-md border border-border overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-muted/30 transition-colors"
+      >
+        <Badge variant="outline" className="text-[10px]">assistant</Badge>
+        <span className="text-sm text-muted-foreground truncate flex-1">{preview}</span>
+        <span className="text-xs text-muted-foreground flex-shrink-0">{expanded ? "▲" : "▼"}</span>
+      </button>
+      {expanded && (
+        <div className="px-4 py-3 border-t border-border bg-muted/10">
+          <div className="text-sm whitespace-pre-wrap">{item.text}</div>
+        </div>
+      )}
     </div>
   );
 }
