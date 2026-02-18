@@ -105,12 +105,11 @@ export default async function RunDetailPage({
             <CardTitle className="text-sm font-medium text-muted-foreground">Tokens</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm">
-              <span className="font-mono">{run.total_input_tokens.toLocaleString()}</span>
-              <span className="text-muted-foreground"> in</span>
-              {" / "}
-              <span className="font-mono">{run.total_output_tokens.toLocaleString()}</span>
-              <span className="text-muted-foreground"> out</span>
+            <p className="text-2xl font-bold font-mono">
+              {(run.total_input_tokens + run.total_output_tokens).toLocaleString()}
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {run.total_input_tokens.toLocaleString()} in / {run.total_output_tokens.toLocaleString()} out
             </p>
           </CardContent>
         </Card>
