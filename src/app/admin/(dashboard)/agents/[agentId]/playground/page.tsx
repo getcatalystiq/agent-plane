@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState, useRef, useEffect } from "react";
+import { use, useState, useRef } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -8,27 +8,6 @@ import { Textarea } from "@/components/ui/textarea";
 interface PlaygroundEvent {
   type: string;
   [key: string]: unknown;
-}
-
-function TypewriterText({ text }: { text: string }) {
-  const [displayed, setDisplayed] = useState("");
-
-  useEffect(() => {
-    let i = 0;
-    setDisplayed("");
-    const interval = setInterval(() => {
-      i += 4;
-      if (i >= text.length) {
-        setDisplayed(text);
-        clearInterval(interval);
-      } else {
-        setDisplayed(text.slice(0, i));
-      }
-    }, 16);
-    return () => clearInterval(interval);
-  }, [text]);
-
-  return <>{displayed}</>;
 }
 
 function renderEvent(event: PlaygroundEvent, idx: number) {
@@ -44,9 +23,7 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
     return (
       <div key={idx} className="space-y-1">
         <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
-        <p className="text-sm whitespace-pre-wrap text-foreground">
-          <TypewriterText text={texts} />
-        </p>
+        <p className="text-sm whitespace-pre-wrap text-foreground">{texts}</p>
       </div>
     );
   }
