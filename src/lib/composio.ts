@@ -74,10 +74,6 @@ async function splitToolkitsForMcp(
 /**
  * Get an existing auth config for `slug`, or create one if none exists.
  * Returns the auth config ID, or null on error.
- *
- * If the env var `COMPOSIO_CREDENTIALS_<SLUG_UPPER>` is set to a JSON object
- * (e.g. `{"api_key":"fca-xxx"}`), it is passed as `shared_credentials` so that
- * all connected accounts automatically inherit those credentials.
  */
 async function getOrCreateAuthConfig(
   client: InstanceType<typeof ComposioClient>,
@@ -92,24 +88,9 @@ async function getOrCreateAuthConfig(
       return enabled.id;
     }
 
-    // Resolve optional shared credentials from env
-    const envKey = `COMPOSIO_CREDENTIALS_${slug.toUpperCase().replace(/-/g, "_")}`;
-    let sharedCredentials: Record<string, unknown> | undefined;
-    const envVal = process.env[envKey];
-    if (envVal) {
-      try {
-        sharedCredentials = JSON.parse(envVal) as Record<string, unknown>;
-      } catch {
-        logger.warn("Invalid JSON in toolkit credentials env var", { envKey });
-      }
-    }
-
     const result = await client.authConfigs.create({
       toolkit: { slug },
-      auth_config: {
-        type: "use_composio_managed_auth",
-        ...(sharedCredentials ? { shared_credentials: sharedCredentials } : {}),
-      },
+      auth_config: { type: "use_composio_managed_auth" },
     });
 
     logger.info("Created Composio auth config", { slug, id: result.auth_config.id });
