@@ -1,6 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
-import { LayoutDashboard, Users, Bot, Play, Plug } from "lucide-react";
+import { LayoutDashboard, Users, Bot, Play, Plug, Store } from "lucide-react";
 import { LogoutButton } from "./logout-button";
 
 const navItems = [
@@ -9,6 +9,7 @@ const navItems = [
   { href: "/admin/agents", label: "Agents", icon: Bot },
   { href: "/admin/runs", label: "Runs", icon: Play },
   { href: "/admin/mcp-servers", label: "Custom Connectors", icon: Plug },
+  { href: "/admin/plugin-marketplaces", label: "Plugins", icon: Store },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
