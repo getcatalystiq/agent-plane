@@ -6,6 +6,7 @@ import { queryOne, query } from "@/db";
 import { AgentRow, RunRow, TenantRow } from "@/lib/validation";
 import { AgentEditForm } from "./edit-form";
 import { SkillsEditor } from "./skills-editor";
+import { ConnectorsManager } from "./connectors-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -76,32 +77,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
 
       <AgentEditForm agent={agent} />
 
-      {/* Connectors Server (read-only) */}
-      {agent.composio_toolkits.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Connectors Server</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {agent.composio_mcp_server_id ? (
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-xs font-medium text-muted-foreground mb-1">Server Name</p>
-                  <p className="font-mono text-sm">{agent.composio_mcp_server_name}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium text-muted-foreground mb-1">Server ID</p>
-                  <p className="font-mono text-sm">{agent.composio_mcp_server_id}</p>
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                No MCP server provisioned yet — one will be created on the first run.
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      <ConnectorsManager agentId={agent.id} toolkits={agent.composio_toolkits} />
 
       <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
 

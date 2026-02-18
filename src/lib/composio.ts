@@ -229,6 +229,188 @@ export async function getOrCreateComposioMcpServer(
   }
 }
 
+// ─── Connector management (admin) ─────────────────────────────────────────────
+
+export type AuthScheme = "OAUTH2" | "OAUTH1" | "API_KEY" | "NO_AUTH" | "OTHER";
+
+export interface ConnectorStatus {
+  slug: string;
+  name: string;
+  logo: string;
+  authScheme: AuthScheme;
+  authConfigId: string | null;
+  connectedAccountId: string | null;
+  connectionStatus: string | null; // ACTIVE | INITIATED | FAILED | etc.
+}
+
+/**
+ * For each toolkit in `slugs`, return its auth scheme and whether the given
+ * tenant has an active connected account.
+ */
+export async function getConnectorStatuses(
+  tenantId: string,
+  slugs: string[],
+): Promise<ConnectorStatus[]> {
+  const client = getClient();
+  if (!client || slugs.length === 0) return [];
+
+  const results = await Promise.all(
+    slugs.map(async (slug): Promise<ConnectorStatus> => {
+      const slugLower = slug.toLowerCase();
+      try {
+        // Toolkit info
+        const tkRes = await client.toolkits.list({ search: slugLower, limit: 10 });
+        const tk = tkRes.items.find((t) => t.slug === slugLower);
+
+        let authScheme: AuthScheme = "OTHER";
+        if (tk?.no_auth) {
+          authScheme = "NO_AUTH";
+        } else if (tk?.auth_schemes?.includes("API_KEY")) {
+          authScheme = "API_KEY";
+        } else if (tk?.auth_schemes?.includes("OAUTH2")) {
+          authScheme = "OAUTH2";
+        } else if (tk?.auth_schemes?.includes("OAUTH1")) {
+          authScheme = "OAUTH1";
+        }
+
+        // Auth config
+        const acRes = await client.authConfigs.list({ toolkit_slug: slugLower, limit: 10 });
+        const ac = acRes.items.find((c) => c.status === "ENABLED") ?? acRes.items[0] ?? null;
+
+        // Connected account for this tenant
+        const caRes = ac
+          ? await client.connectedAccounts.list({
+              toolkit_slugs: [slugLower],
+              user_ids: [tenantId],
+              limit: 5,
+            })
+          : null;
+        const ca = caRes?.items[0] ?? null;
+
+        return {
+          slug: slugLower,
+          name: tk?.name ?? slug,
+          logo: tk?.meta.logo ?? "",
+          authScheme,
+          authConfigId: ac?.id ?? null,
+          connectedAccountId: ca?.id ?? null,
+          connectionStatus: ca?.status ?? null,
+        };
+      } catch (err) {
+        logger.error("getConnectorStatuses failed for toolkit", {
+          slug: slugLower,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return {
+          slug: slugLower,
+          name: slug,
+          logo: "",
+          authScheme: "OTHER",
+          authConfigId: null,
+          connectedAccountId: null,
+          connectionStatus: null,
+        };
+      }
+    }),
+  );
+
+  return results;
+}
+
+/**
+ * Save an API key for a toolkit by:
+ * 1. Getting or creating an auth config with `shared_credentials: { api_key }`
+ * 2. Creating a connected account for the tenant linked to that auth config
+ */
+export async function saveApiKeyConnector(
+  tenantId: string,
+  slug: string,
+  apiKey: string,
+): Promise<{ authConfigId: string; connectedAccountId: string }> {
+  const client = getClient();
+  if (!client) throw new Error("Composio not configured");
+
+  const slugLower = slug.toLowerCase();
+
+  // Get or create auth config with shared credentials
+  const acRes = await client.authConfigs.list({ toolkit_slug: slugLower, limit: 10 });
+  let authConfigId = (acRes.items.find((c) => c.status === "ENABLED") ?? acRes.items[0])?.id ?? null;
+
+  if (authConfigId) {
+    // Update existing config with new shared credentials
+    await client.authConfigs.update(authConfigId, {
+      type: "custom",
+      shared_credentials: { api_key: apiKey },
+    });
+    logger.info("Updated auth config shared credentials", { slug: slugLower, id: authConfigId });
+  } else {
+    const created = await client.authConfigs.create({
+      toolkit: { slug: slugLower },
+      auth_config: {
+        type: "use_composio_managed_auth",
+        shared_credentials: { api_key: apiKey },
+      },
+    });
+    authConfigId = created.auth_config.id;
+    logger.info("Created auth config with shared credentials", { slug: slugLower, id: authConfigId });
+  }
+
+  // Create (or reuse) a connected account for this tenant
+  const caRes = await client.connectedAccounts.list({
+    toolkit_slugs: [slugLower],
+    user_ids: [tenantId],
+    limit: 5,
+  });
+  const existingCa = caRes.items[0];
+  if (existingCa) {
+    logger.info("Reusing existing connected account", { slug: slugLower, id: existingCa.id });
+    return { authConfigId, connectedAccountId: existingCa.id };
+  }
+
+  const ca = await client.connectedAccounts.create({
+    auth_config: { id: authConfigId },
+    connection: { user_id: tenantId },
+    validate_credentials: true,
+  });
+  logger.info("Created connected account", { slug: slugLower, id: ca.id });
+  return { authConfigId, connectedAccountId: ca.id };
+}
+
+/**
+ * Initiate an OAuth connection for a toolkit via the Composio SDK.
+ * Returns the URL to redirect the user to.
+ */
+export async function initiateOAuthConnector(
+  tenantId: string,
+  slug: string,
+  callbackUrl: string,
+): Promise<{ redirectUrl: string; connectedAccountId: string } | null> {
+  const client = getClient();
+  if (!client) return null;
+
+  const slugLower = slug.toLowerCase();
+
+  // Ensure auth config exists
+  const authConfigId = await getOrCreateAuthConfig(client, slugLower);
+  if (!authConfigId) return null;
+
+  const ca = await client.connectedAccounts.create({
+    auth_config: { id: authConfigId },
+    connection: {
+      user_id: tenantId,
+      callback_url: callbackUrl,
+    },
+  });
+
+  const redirectUrl = ca.redirect_url ?? (ca.connectionData as { redirectUrl?: string } | null)?.redirectUrl ?? null;
+  if (!redirectUrl) {
+    logger.error("No redirect URL from connectedAccounts.create", { slug: slugLower });
+    return null;
+  }
+
+  return { redirectUrl, connectedAccountId: ca.id };
+}
+
 /**
  * Initiate an OAuth connection for a toolkit via Composio REST API.
  */
