@@ -88,13 +88,23 @@ async function getOrCreateAuthConfig(
       return enabled.id;
     }
 
-    const result = await client.authConfigs.create({
-      toolkit: { slug },
-      auth_config: { type: "use_composio_managed_auth" },
-    });
-
-    logger.info("Created Composio auth config", { slug, id: result.auth_config.id });
-    return result.auth_config.id;
+    try {
+      const result = await client.authConfigs.create({
+        toolkit: { slug },
+        auth_config: { type: "use_composio_managed_auth" },
+      });
+      logger.info("Created Composio auth config", { slug, id: result.auth_config.id });
+      return result.auth_config.id;
+    } catch (createErr) {
+      const msg = createErr instanceof Error ? createErr.message : String(createErr);
+      // Composio doesn't have managed credentials for this toolkit (e.g. API_KEY-only services).
+      // The admin must supply credentials via the ConnectorsManager UI before this toolkit works.
+      if (msg.includes("DefaultAuthConfigNotFound") || msg.includes("managed credentials")) {
+        logger.warn("Composio has no managed auth for toolkit — admin must set credentials via UI", { slug });
+        return null;
+      }
+      throw createErr;
+    }
   } catch (err) {
     logger.error("Failed to get/create auth config", {
       slug,
@@ -318,22 +328,25 @@ export async function saveApiKeyConnector(
   let authConfigId = (acRes.items.find((c) => c.status === "ENABLED") ?? acRes.items[0])?.id ?? null;
 
   if (authConfigId) {
-    // Update existing config with new shared credentials
+    // Update existing config's shared credentials
     await client.authConfigs.update(authConfigId, {
       type: "custom",
       shared_credentials: { api_key: apiKey },
     });
     logger.info("Updated auth config shared credentials", { slug: slugLower, id: authConfigId });
   } else {
+    // Create a custom auth config with API_KEY scheme + shared credentials.
+    // Must use `use_custom_auth` — Composio has no managed credentials for API-key toolkits.
     const created = await client.authConfigs.create({
       toolkit: { slug: slugLower },
       auth_config: {
-        type: "use_composio_managed_auth",
+        type: "use_custom_auth",
+        authScheme: "API_KEY",
         shared_credentials: { api_key: apiKey },
       },
     });
     authConfigId = created.auth_config.id;
-    logger.info("Created auth config with shared credentials", { slug: slugLower, id: authConfigId });
+    logger.info("Created custom API_KEY auth config", { slug: slugLower, id: authConfigId });
   }
 
   // Create (or reuse) a connected account for this tenant
@@ -351,7 +364,6 @@ export async function saveApiKeyConnector(
   const ca = await client.connectedAccounts.create({
     auth_config: { id: authConfigId },
     connection: { user_id: tenantId },
-    validate_credentials: true,
   });
   logger.info("Created connected account", { slug: slugLower, id: ca.id });
   return { authConfigId, connectedAccountId: ca.id };

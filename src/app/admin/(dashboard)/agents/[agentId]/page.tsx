@@ -43,10 +43,10 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
       <div className="grid grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Budget</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Runs</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold font-mono">${agent.max_budget_usd.toFixed(2)}</p>
+            <p className="text-2xl font-bold">{recentRuns.length}</p>
           </CardContent>
         </Card>
         <Card>
@@ -59,18 +59,18 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Skills</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Budget</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold">{agent.skills.length}</p>
+            <p className="text-2xl font-bold font-mono">${agent.max_budget_usd.toFixed(2)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Runs</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Skills</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold">{recentRuns.length}</p>
+            <p className="text-2xl font-bold">{agent.skills.length}</p>
           </CardContent>
         </Card>
       </div>

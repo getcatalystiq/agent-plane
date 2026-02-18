@@ -33,6 +33,7 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
   const [loading, setLoading] = useState(true);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   async function load() {
     setLoading(true);
@@ -51,15 +52,23 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
     const key = apiKeys[slug];
     if (!key) return;
     setSaving((s) => ({ ...s, [slug]: true }));
+    setErrors((e) => ({ ...e, [slug]: "" }));
     try {
-      await fetch(`/api/admin/agents/${agentId}/connectors`, {
+      const res = await fetch(`/api/admin/agents/${agentId}/connectors`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ toolkit: slug, api_key: key }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setErrors((e) => ({ ...e, [slug]: data?.error ?? `Error ${res.status}` }));
+        return;
+      }
       setApiKeys((k) => ({ ...k, [slug]: "" }));
       await load();
       router.refresh();
+    } catch (err) {
+      setErrors((e) => ({ ...e, [slug]: err instanceof Error ? err.message : "Unknown error" }));
     } finally {
       setSaving((s) => ({ ...s, [slug]: false }));
     }
@@ -70,7 +79,7 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Connectors</CardTitle>
+        <CardTitle className="text-base">Connector Configuration</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {loading ? (
@@ -107,23 +116,28 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
 
               {/* Action: API_KEY input */}
               {c.authScheme === "API_KEY" && (
-                <div className="flex items-center gap-2 ml-auto">
-                  <Input
-                    type="password"
-                    placeholder={c.connectionStatus === "ACTIVE" ? "Update API key…" : "Enter API key…"}
-                    value={apiKeys[c.slug] ?? ""}
-                    onChange={(e) => setApiKeys((k) => ({ ...k, [c.slug]: e.target.value }))}
-                    className="h-7 text-xs w-56"
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    disabled={!apiKeys[c.slug] || saving[c.slug]}
-                    onClick={() => handleSaveKey(c.slug)}
-                  >
-                    {saving[c.slug] ? "Saving…" : "Save"}
-                  </Button>
+                <div className="flex flex-col gap-1 ml-auto items-end">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="password"
+                      placeholder={c.connectionStatus === "ACTIVE" ? "Update API key…" : "Enter API key…"}
+                      value={apiKeys[c.slug] ?? ""}
+                      onChange={(e) => setApiKeys((k) => ({ ...k, [c.slug]: e.target.value }))}
+                      className="h-7 text-xs w-56"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      disabled={!apiKeys[c.slug] || saving[c.slug]}
+                      onClick={() => handleSaveKey(c.slug)}
+                    >
+                      {saving[c.slug] ? "Saving…" : "Save"}
+                    </Button>
+                  </div>
+                  {errors[c.slug] && (
+                    <p className="text-xs text-red-500">{errors[c.slug]}</p>
+                  )}
                 </div>
               )}
 

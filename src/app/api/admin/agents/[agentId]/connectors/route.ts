@@ -30,7 +30,13 @@ export async function POST(request: NextRequest, context: RouteContext) {
   const body = await request.json();
   const { toolkit, api_key } = SaveKeySchema.parse(body);
 
-  const result = await saveApiKeyConnector(agent.tenant_id, toolkit, api_key);
+  let result: Awaited<ReturnType<typeof saveApiKeyConnector>>;
+  try {
+    result = await saveApiKeyConnector(agent.tenant_id, toolkit, api_key);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: msg }, { status: 400 });
+  }
 
   // Clear the MCP cache so the next run rebuilds the server with proper auth configs
   await execute(
