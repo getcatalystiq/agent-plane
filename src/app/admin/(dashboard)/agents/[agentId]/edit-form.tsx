@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { ToolkitMultiselect } from "@/components/toolkit-multiselect";
 
 const MODELS = [
   { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
@@ -18,7 +17,6 @@ interface Agent {
   id: string;
   name: string;
   description: string | null;
-  composio_toolkits: string[];
   model: string;
   permission_mode: string;
   max_turns: number;
@@ -29,7 +27,6 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
   const router = useRouter();
   const [name, setName] = useState(agent.name);
   const [description, setDescription] = useState(agent.description ?? "");
-  const [composioToolkits, setComposioToolkits] = useState<string[]>(agent.composio_toolkits);
   const [model, setModel] = useState(agent.model);
   const [permissionMode, setPermissionMode] = useState(agent.permission_mode);
   const [maxTurns, setMaxTurns] = useState(agent.max_turns.toString());
@@ -45,7 +42,6 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         body: JSON.stringify({
           name,
           description: description || null,
-          composio_toolkits: composioToolkits,
           model,
           permission_mode: permissionMode,
           max_turns: parseInt(maxTurns),
@@ -61,10 +57,10 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Edit Agent</CardTitle>
+        <CardTitle className="text-base">Details</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -76,10 +72,6 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               onChange={(e) => setDescription(e.target.value)}
               placeholder="What does this agent do?"
             />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Connectors</label>
-            <ToolkitMultiselect value={composioToolkits} onChange={setComposioToolkits} />
           </div>
         </div>
         <div className="grid grid-cols-4 gap-4">

@@ -6,6 +6,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { ToolkitMultiselect } from "@/components/toolkit-multiselect";
 import type { AuthScheme, ConnectorStatus } from "@/lib/composio";
 
 interface Props {
@@ -27,10 +28,14 @@ function statusColor(status: string | null) {
   return "text-muted-foreground";
 }
 
-export function ConnectorsManager({ agentId, toolkits }: Props) {
+export function ConnectorsManager({ agentId, toolkits: initialToolkits }: Props) {
   const router = useRouter();
+  const [localToolkits, setLocalToolkits] = useState<string[]>(initialToolkits);
   const [connectors, setConnectors] = useState<ConnectorStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [pendingToolkits, setPendingToolkits] = useState<string[]>(initialToolkits);
+  const [applyingToolkits, setApplyingToolkits] = useState(false);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -46,7 +51,31 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
     }
   }
 
-  useEffect(() => { load(); }, [agentId, toolkits.join(",")]);
+  useEffect(() => { load(); }, [agentId, localToolkits.join(",")]);
+
+  async function patchToolkits(newToolkits: string[]) {
+    await fetch(`/api/admin/agents/${agentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ composio_toolkits: newToolkits }),
+    });
+    setLocalToolkits(newToolkits);
+    router.refresh();
+  }
+
+  async function handleApplyAdd() {
+    setApplyingToolkits(true);
+    try {
+      await patchToolkits(pendingToolkits);
+      setShowAdd(false);
+    } finally {
+      setApplyingToolkits(false);
+    }
+  }
+
+  async function handleDelete(slug: string) {
+    await patchToolkits(localToolkits.filter((t) => t !== slug));
+  }
 
   async function handleSaveKey(slug: string) {
     const key = apiKeys[slug];
@@ -74,21 +103,39 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
     }
   }
 
-  if (toolkits.length === 0) return null;
-
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">Connector Configuration</CardTitle>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => { setPendingToolkits(localToolkits); setShowAdd(true); }}
+        >
+          Add
+        </Button>
       </CardHeader>
       <CardContent>
+        {showAdd && (
+          <div className="mb-4 flex items-start gap-2">
+            <div className="flex-1">
+              <ToolkitMultiselect value={pendingToolkits} onChange={setPendingToolkits} />
+            </div>
+            <Button size="sm" onClick={handleApplyAdd} disabled={applyingToolkits}>
+              {applyingToolkits ? "Saving..." : "Apply"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancel</Button>
+          </div>
+        )}
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading...</p>
+        ) : localToolkits.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No connectors added. Click Add to configure connectors.</p>
         ) : (
           <div className="grid grid-cols-3 gap-3">
             {connectors.map((c) => (
               <div key={c.slug} className="rounded-lg border border-border p-3 flex flex-col gap-2">
-                {/* Logo + name + badge */}
+                {/* Logo + name + badge + delete */}
                 <div className="flex items-center gap-2">
                   {c.logo && (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -98,6 +145,14 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
                   <Badge variant={schemeBadgeVariant(c.authScheme)} className="text-xs flex-shrink-0">
                     {c.authScheme}
                   </Badge>
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(c.slug)}
+                    className="text-muted-foreground hover:text-red-500 flex-shrink-0 ml-1 text-base leading-none"
+                    title="Remove connector"
+                  >
+                    ×
+                  </button>
                 </div>
 
                 {/* Status */}
