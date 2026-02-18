@@ -17,6 +17,9 @@ const AgentWithTenant = z.object({
   created_at: z.coerce.string(),
   run_count: z.coerce.number(),
   last_run_at: z.coerce.string().nullable(),
+  mcp_total: z.coerce.number(),
+  mcp_active: z.coerce.number(),
+  mcp_unhealthy: z.coerce.number(),
 });
 
 export const dynamic = "force-dynamic";
@@ -26,11 +29,15 @@ export default async function AgentsPage() {
     AgentWithTenant,
     `SELECT a.id, a.tenant_id, t.name AS tenant_name, a.name, a.description, a.model,
        a.permission_mode, a.composio_toolkits, a.max_turns, a.max_budget_usd, a.created_at,
-       COUNT(r.id)::int AS run_count,
-       MAX(r.created_at) AS last_run_at
+       COUNT(DISTINCT r.id)::int AS run_count,
+       MAX(r.created_at) AS last_run_at,
+       COUNT(DISTINCT mc.id)::int AS mcp_total,
+       COUNT(DISTINCT mc.id) FILTER (WHERE mc.status = 'active')::int AS mcp_active,
+       COUNT(DISTINCT mc.id) FILTER (WHERE mc.status IN ('expired', 'failed'))::int AS mcp_unhealthy
      FROM agents a
      JOIN tenants t ON t.id = a.tenant_id
      LEFT JOIN runs r ON r.agent_id = a.id
+     LEFT JOIN mcp_connections mc ON mc.agent_id = a.id
      GROUP BY a.id, t.name
      ORDER BY a.created_at DESC`,
     [],
@@ -48,6 +55,7 @@ export default async function AgentsPage() {
               <th className="text-left p-3 font-medium">Tenant</th>
               <th className="text-left p-3 font-medium">Model</th>
               <th className="text-left p-3 font-medium">Toolkits</th>
+              <th className="text-left p-3 font-medium">MCP</th>
               <th className="text-right p-3 font-medium">Runs</th>
               <th className="text-left p-3 font-medium">Last Run</th>
               <th className="text-left p-3 font-medium">Created</th>
@@ -81,6 +89,21 @@ export default async function AgentsPage() {
                     <span className="text-muted-foreground text-xs">—</span>
                   )}
                 </td>
+                <td className="p-3">
+                  {a.mcp_total > 0 ? (
+                    a.mcp_unhealthy > 0 ? (
+                      <Badge variant="destructive" className="text-xs">
+                        {a.mcp_unhealthy} unhealthy
+                      </Badge>
+                    ) : (
+                      <Badge variant="default" className="text-xs">
+                        {a.mcp_active} active
+                      </Badge>
+                    )
+                  ) : (
+                    <span className="text-muted-foreground text-xs">—</span>
+                  )}
+                </td>
                 <td className="p-3 text-right">{a.run_count}</td>
                 <td className="p-3 text-muted-foreground text-xs">
                   {a.last_run_at ? new Date(a.last_run_at).toLocaleString() : "—"}
@@ -92,7 +115,7 @@ export default async function AgentsPage() {
             ))}
             {agents.length === 0 && (
               <tr>
-                <td colSpan={7} className="p-8 text-center text-muted-foreground">No agents found</td>
+                <td colSpan={9} className="p-8 text-center text-muted-foreground">No agents found</td>
               </tr>
             )}
           </tbody>
