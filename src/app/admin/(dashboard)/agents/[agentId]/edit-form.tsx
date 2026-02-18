@@ -33,6 +33,14 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
   const [maxBudget, setMaxBudget] = useState(agent.max_budget_usd.toString());
   const [saving, setSaving] = useState(false);
 
+  const isDirty =
+    name !== agent.name ||
+    description !== (agent.description ?? "") ||
+    model !== agent.model ||
+    permissionMode !== agent.permission_mode ||
+    maxTurns !== agent.max_turns.toString() ||
+    maxBudget !== agent.max_budget_usd.toString();
+
   async function handleSave() {
     setSaving(true);
     try {
@@ -103,7 +111,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           </div>
         </div>
         <div className="flex justify-end">
-          <Button onClick={handleSave} disabled={saving} size="sm">
+          <Button onClick={handleSave} disabled={saving || !isDirty} size="sm">
             {saving ? "Saving..." : "Save Changes"}
           </Button>
         </div>
