@@ -46,7 +46,7 @@ export function ConnectorsManager({ agentId, toolkits }: Props) {
     }
   }
 
-  useEffect(() => { load(); }, [agentId]);
+  useEffect(() => { load(); }, [agentId, toolkits.join(",")]);
 
   async function handleSaveKey(slug: string) {
     const key = apiKeys[slug];
