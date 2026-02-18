@@ -33,10 +33,17 @@ interface McpConnection {
   server_base_url: string;
 }
 
+interface PluginSuggestion {
+  connector_name: string;
+  composio_slug: string;
+  suggested_by_plugin: string;
+}
+
 interface Props {
   agentId: string;
   toolkits: string[];
   composioAllowedTools: string[];
+  hasPlugins?: boolean;
 }
 
 function schemeBadgeVariant(scheme: AuthScheme) {
@@ -57,7 +64,7 @@ function isExpiringSoon(expiresAt: string | null): boolean {
   return ms > 0 && ms < 24 * 60 * 60 * 1000;
 }
 
-export function ConnectorsManager({ agentId, toolkits: initialToolkits, composioAllowedTools: initialAllowedTools }: Props) {
+export function ConnectorsManager({ agentId, toolkits: initialToolkits, composioAllowedTools: initialAllowedTools, hasPlugins }: Props) {
   const router = useRouter();
 
   // Composio state
@@ -84,6 +91,9 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   const [confirmMcpDisconnect, setConfirmMcpDisconnect] = useState<McpConnection | null>(null);
   const [mcpDisconnecting, setMcpDisconnecting] = useState(false);
   const [mcpToolsModal, setMcpToolsModal] = useState<McpConnection | null>(null);
+
+  // Plugin suggestion state
+  const [pluginSuggestions, setPluginSuggestions] = useState<PluginSuggestion[]>([]);
 
   // Load Composio connectors
   const loadComposio = useCallback(async () => {
@@ -112,6 +122,15 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   const toolkitsKey = localToolkits.join(",");
   useEffect(() => { loadComposio(); }, [loadComposio, toolkitsKey]);
   useEffect(() => { loadMcp(); }, [loadMcp]);
+
+  // Load plugin connector suggestions
+  useEffect(() => {
+    if (!hasPlugins) return;
+    fetch(`/api/admin/agents/${agentId}/plugin-suggestions`)
+      .then((r) => r.json())
+      .then((data) => setPluginSuggestions(data.data ?? []))
+      .catch(() => {});
+  }, [agentId, hasPlugins]);
 
   // Fetch total tool count per Composio toolkit
   useEffect(() => {
@@ -519,6 +538,29 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
           </div>
           )}
           </>
+        )}
+
+        {/* Plugin-suggested connectors (informational) */}
+        {pluginSuggestions.length > 0 && (
+          <div className="mt-4 rounded-md border border-dashed border-border p-3">
+            <p className="text-xs font-medium text-muted-foreground mb-2">Suggested by plugins</p>
+            <div className="flex flex-wrap gap-2">
+              {pluginSuggestions.map((s) => (
+                <div
+                  key={`${s.composio_slug}-${s.suggested_by_plugin}`}
+                  className="flex items-center gap-1.5 rounded-md border border-border px-2 py-1"
+                >
+                  <span className="text-xs font-medium">{s.connector_name}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    via {s.suggested_by_plugin}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] text-muted-foreground mt-1.5">
+              These connectors are recommended by enabled plugins. Add them above to unlock plugin features.
+            </p>
+          </div>
         )}
       </CardContent>
     </Card>

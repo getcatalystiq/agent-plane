@@ -103,7 +103,7 @@ export default async function AgentDetailPage({
 
       <AgentEditForm agent={agent} />
 
-      <ConnectorsManager agentId={agent.id} toolkits={agent.composio_toolkits} composioAllowedTools={agent.composio_allowed_tools} />
+      <ConnectorsManager agentId={agent.id} toolkits={agent.composio_toolkits} composioAllowedTools={agent.composio_allowed_tools} hasPlugins={agent.plugins.length > 0} />
 
       <PluginsManager agentId={agent.id} initialPlugins={agent.plugins} />
 
