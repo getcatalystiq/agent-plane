@@ -63,7 +63,7 @@ export const CreateAgentSchema = z.object({
   permission_mode: z
     .enum(["default", "acceptEdits", "bypassPermissions", "plan"])
     .default("bypassPermissions"),
-  max_turns: z.number().int().min(1).max(1000).default(100),
+  max_turns: z.number().int().min(1).max(1000).default(10),
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
 });
 
