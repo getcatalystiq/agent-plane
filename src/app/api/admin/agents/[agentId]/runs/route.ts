@@ -66,10 +66,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
         prompt,
         platformApiUrl: new URL(request.url).origin,
         aiGatewayApiKey: getEnv().AI_GATEWAY_API_KEY,
-        ...(mcpResult.servers.composio ? {
-          composioMcpUrl: mcpResult.servers.composio.url,
-          composioMcpHeaders: mcpResult.servers.composio.headers,
-        } : {}),
+        mcpServers: mcpResult.servers,
         mcpErrors: mcpResult.errors,
       });
 

@@ -1,6 +1,7 @@
 import path from "path";
 import { Sandbox, type Command } from "@vercel/sandbox";
 import { logger } from "./logger";
+import type { McpServerConfig } from "./mcp";
 
 export interface SandboxConfig {
   agent: {
@@ -21,8 +22,7 @@ export interface SandboxConfig {
   platformApiUrl: string;
   runToken?: string;
   aiGatewayApiKey: string;
-  composioMcpUrl?: string;
-  composioMcpHeaders?: Record<string, string>;
+  mcpServers?: Record<string, McpServerConfig>;
   mcpErrors?: string[];
 }
 
@@ -50,6 +50,11 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
     has_git_source: !!config.agent.git_repo_url,
   });
 
+  // Extract hostnames from custom MCP servers for network policy
+  const mcpHostnames = Object.values(config.mcpServers ?? {}).map(
+    (s) => new URL(s.url).hostname,
+  );
+
   const sandbox = await Sandbox.create({
     runtime: "node22",
     resources: { vcpus: 2 },
@@ -63,6 +68,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
         "*.githubusercontent.com",
         "registry.npmjs.org",
         new URL(config.platformApiUrl).hostname,
+        ...mcpHostnames,
       ],
     },
   });
@@ -122,11 +128,8 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   if (config.runToken) {
     env.AGENTPLANE_RUN_TOKEN = config.runToken;
   }
-  if (config.composioMcpUrl) {
-    env.COMPOSIO_MCP_URL = config.composioMcpUrl;
-  }
-  if (config.composioMcpHeaders) {
-    env.COMPOSIO_MCP_HEADERS = JSON.stringify(config.composioMcpHeaders);
+  if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+    env.MCP_SERVERS_JSON = JSON.stringify(config.mcpServers);
   }
 
   // Start the runner in detached mode
@@ -173,7 +176,7 @@ async function* streamLogs(command: Command): AsyncIterable<string> {
 
 function buildRunnerScript(config: SandboxConfig): string {
   const hasSkills = config.agent.skills.length > 0;
-  const hasMcp = !!config.composioMcpUrl;
+  const hasMcp = config.mcpServers && Object.keys(config.mcpServers).length > 0;
   const agentConfig = {
     model: config.agent.model,
     permissionMode: config.agent.permission_mode,
@@ -195,18 +198,10 @@ const runId = process.env.AGENTPLANE_RUN_ID;
 const platformUrl = process.env.AGENTPLANE_PLATFORM_URL;
 const runToken = process.env.AGENTPLANE_RUN_TOKEN;
 
-// Build MCP servers config
-const mcpServers = {};
-if (process.env.COMPOSIO_MCP_URL) {
-  const headers = process.env.COMPOSIO_MCP_HEADERS
-    ? JSON.parse(process.env.COMPOSIO_MCP_HEADERS)
-    : {};
-  mcpServers.composio = {
-    type: 'http',
-    url: process.env.COMPOSIO_MCP_URL,
-    headers,
-  };
-}
+// Build MCP servers config from JSON env var
+const mcpServers = process.env.MCP_SERVERS_JSON
+  ? JSON.parse(process.env.MCP_SERVERS_JSON)
+  : {};
 
 const transcriptPath = '/vercel/sandbox/transcript.ndjson';
 writeFileSync(transcriptPath, '');
