@@ -34,6 +34,9 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
         <p className="text-sm text-muted-foreground mt-1">
           Tenant: <Link href={`/admin/tenants/${agent.tenant_id}`} className="text-primary hover:underline">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</Link>
         </p>
+        {agent.description && (
+          <p className="text-sm text-muted-foreground mt-2 max-w-2xl">{agent.description}</p>
+        )}
       </div>
 
       <div className="grid grid-cols-4 gap-4">
@@ -81,9 +84,17 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
           <CardHeader>
             <CardTitle className="text-base">Composio MCP Server</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-4">
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-2">Toolkits</p>
+              <div className="flex flex-wrap gap-2">
+                {agent.composio_toolkits.map((t) => (
+                  <Badge key={t} variant="secondary">{t}</Badge>
+                ))}
+              </div>
+            </div>
             {agent.composio_mcp_server_id ? (
-              <>
+              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <p className="text-xs font-medium text-muted-foreground mb-1">Server Name</p>
                   <p className="font-mono text-sm">{agent.composio_mcp_server_name}</p>
@@ -92,7 +103,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
                   <p className="text-xs font-medium text-muted-foreground mb-1">Server ID</p>
                   <p className="font-mono text-sm">{agent.composio_mcp_server_id}</p>
                 </div>
-              </>
+              </div>
             ) : (
               <p className="text-sm text-muted-foreground">
                 No MCP server provisioned yet — one will be created on the first run.

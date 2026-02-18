@@ -21,7 +21,7 @@ export const CreateAgentSchema = z.object({
       content: z.string().max(100_000),
     })).min(1),
   })).default([]),
-  model: z.string().min(1).max(100).default("claude-sonnet-4-5-20250929"),
+  model: z.string().min(1).max(100).default("claude-sonnet-4-6"),
   allowed_tools: z
     .array(z.string().min(1).max(100))
     .default(["Read", "Edit", "Write", "Glob", "Grep", "Bash", "WebSearch"]),
