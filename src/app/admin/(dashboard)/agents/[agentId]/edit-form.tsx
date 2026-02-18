@@ -60,12 +60,12 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         <CardTitle className="text-base">Details</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-6 gap-4">
-          <div className="space-y-1">
+        <div className="grid grid-cols-12 gap-4">
+          <div className="col-span-2 space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
           </div>
-          <div className="space-y-1">
+          <div className="col-span-4 space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Description</label>
             <Input
               value={description}
@@ -73,7 +73,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               placeholder="What does this agent do?"
             />
           </div>
-          <div className="space-y-1">
+          <div className="col-span-2 space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Model</label>
             <Select value={model} onChange={(e) => setModel(e.target.value)}>
               {MODELS.map((m) => (
@@ -81,7 +81,15 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               ))}
             </Select>
           </div>
-          <div className="space-y-1">
+          <div className="col-span-1 space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Max Turns</label>
+            <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
+          </div>
+          <div className="col-span-1 space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Max Budget (USD)</label>
+            <Input type="number" step="0.01" min="0.01" max="100" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} />
+          </div>
+          <div className="col-span-2 space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Permission Mode</label>
             <Select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value)}>
               <option value="default">default</option>
@@ -89,14 +97,6 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               <option value="bypassPermissions">bypassPermissions</option>
               <option value="plan">plan</option>
             </Select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Max Turns</label>
-            <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Max Budget (USD)</label>
-            <Input type="number" step="0.01" min="0.01" max="100" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} />
           </div>
         </div>
         <div className="flex justify-end">
