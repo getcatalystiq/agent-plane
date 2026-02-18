@@ -94,10 +94,6 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               {MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
-              {/* Show current value if not in the list (e.g. old model IDs) */}
-              {!MODELS.find((m) => m.value === model) && (
-                <option value={model}>{model}</option>
-              )}
             </select>
           </div>
           <div className="space-y-1">
