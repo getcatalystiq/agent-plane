@@ -37,6 +37,24 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
+  // Validate marketplace_id references exist before writing
+  if (input.plugins !== undefined && input.plugins.length > 0) {
+    const marketplaceIds = [...new Set(input.plugins.map(p => p.marketplace_id))];
+    const existing = await query(
+      z.object({ id: z.string() }),
+      "SELECT id FROM plugin_marketplaces WHERE id = ANY($1)",
+      [marketplaceIds],
+    );
+    const existingIds = new Set(existing.map(r => r.id));
+    const missing = marketplaceIds.filter(id => !existingIds.has(id));
+    if (missing.length > 0) {
+      return NextResponse.json(
+        { error: { message: `Unknown marketplace_id(s): ${missing.join(", ")}` } },
+        { status: 422 },
+      );
+    }
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
