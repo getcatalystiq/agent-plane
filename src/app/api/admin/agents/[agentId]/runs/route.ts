@@ -73,7 +73,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
         for await (const line of sandbox.logs()) {
           const trimmed = line.trim();
           if (trimmed) {
-            transcriptChunks.push(trimmed);
+            // text_delta events are streaming-only — not stored in transcript
+            const isTextDelta = trimmed.includes('"type":"text_delta"');
+            if (!isTextDelta) transcriptChunks.push(trimmed);
             await emit(JSON.parse(trimmed));
           }
         }

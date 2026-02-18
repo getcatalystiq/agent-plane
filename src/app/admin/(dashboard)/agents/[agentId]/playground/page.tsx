@@ -12,6 +12,7 @@ interface PlaygroundEvent {
 
 function renderEvent(event: PlaygroundEvent, idx: number) {
   if (event.type === "heartbeat") return null;
+  if (event.type === "text_delta") return null; // rendered separately as streaming text
 
   if (event.type === "assistant") {
     const content = event.message as { content?: Array<{ type: string; text?: string }> };
@@ -112,6 +113,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
   const { agentId } = use(params);
   const [prompt, setPrompt] = useState("");
   const [events, setEvents] = useState<PlaygroundEvent[]>([]);
+  const [streamingText, setStreamingText] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -121,6 +123,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
     setRunning(true);
     setEvents([]);
+    setStreamingText("");
     setError(null);
 
     const abort = new AbortController();
@@ -157,7 +160,12 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           if (!trimmed) continue;
           try {
             const event = JSON.parse(trimmed) as PlaygroundEvent;
-            setEvents((prev) => [...prev, event]);
+            if (event.type === "text_delta") {
+              setStreamingText((prev) => prev + (event.text as string ?? ""));
+            } else {
+              if (event.type === "assistant") setStreamingText("");
+              setEvents((prev) => [...prev, event]);
+            }
           } catch {
             // Skip non-JSON lines
           }
@@ -216,7 +224,16 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       {(running || events.length > 0) && (
         <div className="rounded-lg border border-border bg-muted/20 p-4 space-y-4 min-h-32 max-h-[60vh] overflow-y-auto">
           {events.map((ev, i) => renderEvent(ev, i))}
-          {running && (
+          {streamingText && (
+            <div className="space-y-1">
+              <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
+              <p className="text-sm whitespace-pre-wrap text-foreground">
+                {streamingText}
+                <span className="animate-pulse">▎</span>
+              </p>
+            </div>
+          )}
+          {running && !streamingText && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="animate-pulse">●</span> Running…
             </div>

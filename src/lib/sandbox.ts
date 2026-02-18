@@ -229,11 +229,19 @@ async function main() {
       maxBudgetUsd: config.maxBudgetUsd,
       ...(config.settingSources ? { settingSources: config.settingSources } : {}),
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+      includePartialMessages: true,
     };
 
-
     for await (const message of query({ prompt, options })) {
-      emit(message);
+      if (message.type === 'stream_event') {
+        const ev = message.event;
+        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+          // Stream text deltas to stdout only — not written to transcript
+          console.log(JSON.stringify({ type: 'text_delta', text: ev.delta.text }));
+        }
+      } else {
+        emit(message);
+      }
     }
   } catch (err) {
     emit({
