@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { RunStatusBadge } from "@/components/ui/run-status-badge";
 import { queryOne } from "@/db";
 import { RunRow } from "@/lib/validation";
 import { TranscriptViewer } from "./transcript-viewer";
@@ -44,11 +45,6 @@ export default async function RunDetailPage({
     }
   }
 
-  const statusVariant = run.status === "completed" ? "default"
-    : run.status === "running" ? "secondary"
-    : run.status === "failed" || run.status === "timed_out" ? "destructive"
-    : "outline";
-
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -59,7 +55,7 @@ export default async function RunDetailPage({
         )}
         <span className="text-muted-foreground">/</span>
         <h1 className="text-2xl font-semibold font-mono">{run.id.slice(0, 12)}...</h1>
-        <Badge variant={statusVariant}>{run.status}</Badge>
+        <RunStatusBadge status={run.status} />
       </div>
 
       {/* Metadata cards */}

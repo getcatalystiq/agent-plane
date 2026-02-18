@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { Badge } from "@/components/ui/badge";
 import { PaginationBar, parsePaginationParams } from "@/components/ui/pagination-bar";
+import { RunStatusBadge } from "@/components/ui/run-status-badge";
 import { query, queryOne } from "@/db";
 import { z } from "zod";
 
@@ -122,10 +122,3 @@ export default async function RunsPage({
   );
 }
 
-function RunStatusBadge({ status }: { status: string }) {
-  const variant = status === "completed" ? "default"
-    : status === "running" ? "secondary"
-    : status === "failed" || status === "timed_out" ? "destructive"
-    : "outline";
-  return <Badge variant={variant}>{status}</Badge>;
-}

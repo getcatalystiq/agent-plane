@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { RunStatusBadge } from "@/components/ui/run-status-badge";
 import { PaginationBar, parsePaginationParams } from "@/components/ui/pagination-bar";
 import { queryOne, query } from "@/db";
 import { AgentRow, RunRow, TenantRow } from "@/lib/validation";
@@ -151,10 +152,3 @@ export default async function AgentDetailPage({
   );
 }
 
-function RunStatusBadge({ status }: { status: string }) {
-  const variant = status === "completed" ? "default"
-    : status === "running" ? "secondary"
-    : status === "failed" ? "destructive"
-    : "outline";
-  return <Badge variant={variant}>{status}</Badge>;
-}
