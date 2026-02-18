@@ -3,6 +3,7 @@ import { withErrorHandler } from "@/lib/api";
 import { CreateMcpServerSchema } from "@/lib/validation";
 import { listMcpServers, registerMcpServer, getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { validatePublicUrl } from "@/lib/mcp-oauth";
+import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,9 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
   // SSRF validation on base_url
   await validatePublicUrl(input.base_url);
 
+  const callbackBaseUrl = getCallbackBaseUrl();
+  logger.info("Registering MCP server", { slug: input.slug, base_url: input.base_url, callbackBaseUrl });
+
   const server = await registerMcpServer(
     {
       name: input.name,
@@ -27,7 +31,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       baseUrl: input.base_url,
       mcpEndpointPath: input.mcp_endpoint_path,
     },
-    getCallbackBaseUrl(),
+    callbackBaseUrl,
   );
 
   return NextResponse.json(server, { status: 201 });

@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { queryOne, execute, query } from "@/db";
+import { queryOne, execute } from "@/db";
 import { McpServerRow, UpdateMcpServerSchema } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
-import { NotFoundError, ConflictError } from "@/lib/errors";
+import { NotFoundError } from "@/lib/errors";
 import { clearServerCache } from "@/lib/mcp-connections";
-import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
@@ -67,23 +66,11 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   return NextResponse.json(server);
 });
 
-const ActiveConnectionCount = z.object({ count: z.coerce.number() });
-
 export const DELETE = withErrorHandler(async (_request: NextRequest, context) => {
   const { mcpServerId } = await (context as RouteContext).params;
 
-  // Check for active connections before deleting
-  const result = await queryOne(
-    ActiveConnectionCount,
-    "SELECT COUNT(*)::int AS count FROM mcp_connections WHERE mcp_server_id = $1 AND status = 'active'",
-    [mcpServerId],
-  );
-
-  if (result && result.count > 0) {
-    throw new ConflictError(
-      `Cannot delete MCP server: ${result.count} active connection(s) exist. Disconnect agents first.`,
-    );
-  }
+  // Delete all connections first, then the server
+  await execute("DELETE FROM mcp_connections WHERE mcp_server_id = $1", [mcpServerId]);
 
   const { rowCount } = await execute("DELETE FROM mcp_servers WHERE id = $1", [mcpServerId]);
   if (rowCount === 0) throw new NotFoundError("MCP server not found");

@@ -53,7 +53,7 @@ export function DeleteServerButton({ serverId, serverName, hasConnections }: Pro
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Delete <span className="font-medium text-foreground">{serverName}</span>?
-            {hasConnections && " This server has active connections that will be removed."}
+            {hasConnections && " All agent connections to this server will also be removed."}
           </p>
           {error && <p className="text-xs text-red-500">{error}</p>}
           <div className="flex justify-end gap-2">
