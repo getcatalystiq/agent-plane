@@ -116,6 +116,68 @@ async function getOrCreateAuthConfig(
 }
 
 /**
+ * Resolve the full allowed_tools whitelist. When some toolkits have explicit
+ * tool filters and others don't, fetch all tools for unfiltered toolkits so
+ * they aren't inadvertently blocked by the whitelist.
+ */
+async function resolveAllowedTools(
+  client: InstanceType<typeof ComposioClient>,
+  toolkits: string[],
+  allowedTools?: string[],
+): Promise<string[]> {
+  if (!allowedTools || allowedTools.length === 0) return [];
+
+  // Determine which toolkits have no explicit filter
+  const unfilteredToolkits = toolkits.filter((slug) => {
+    const prefix = slug.toUpperCase() + "_";
+    return !allowedTools.some((t) => t.startsWith(prefix));
+  });
+
+  // All toolkits have explicit filters — use as-is
+  if (unfilteredToolkits.length === 0) return allowedTools;
+
+  // Fetch all tools for unfiltered toolkits so they aren't blocked
+  const additionalTools: string[] = [];
+  await Promise.all(
+    unfilteredToolkits.map(async (slug) => {
+      const slugLower = slug.toLowerCase();
+      try {
+        let cursor: string | undefined;
+        do {
+          const response = await client.tools.list({
+            toolkit_slug: slugLower,
+            limit: 200,
+            important: "false",
+            toolkit_versions: "latest",
+            ...(cursor ? { cursor } : {}),
+          });
+          for (const t of response.items) {
+            additionalTools.push(t.slug);
+          }
+          cursor = response.next_cursor ?? undefined;
+        } while (cursor);
+      } catch (err) {
+        logger.warn("Failed to fetch tools for unfiltered toolkit, skipping filter", {
+          slug: slugLower,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }),
+  );
+
+  if (additionalTools.length === 0 && unfilteredToolkits.length > 0) {
+    // Could not fetch tools for any unfiltered toolkit — safer to send no
+    // whitelist at all than to accidentally block entire toolkits.
+    logger.warn("Skipping allowed_tools whitelist — could not resolve unfiltered toolkits", {
+      unfiltered: unfilteredToolkits,
+    });
+    return [];
+  }
+
+  return [...allowedTools, ...additionalTools];
+}
+
+/**
  * Get or create a Composio MCP server for the given toolkits.
  * If existingServerId is provided, updates the server with the current toolkit
  * list (so newly-added toolkits are picked up) and generates a fresh URL.
@@ -130,6 +192,10 @@ export async function getOrCreateComposioMcpServer(
   if (!client) return null;
 
   try {
+    // Resolve the full whitelist — fills in all tools for unfiltered toolkits
+    // so that a per-toolkit filter doesn't block other toolkits entirely.
+    const resolvedAllowedTools = await resolveAllowedTools(client, toolkits, allowedTools);
+
     let serverId: string;
     let serverName: string;
 
@@ -147,7 +213,7 @@ export async function getOrCreateComposioMcpServer(
       await client.mcp.update(serverId, {
         auth_config_ids: authConfigIds,
         toolkits: toolkits.map((t) => t.toLowerCase()),
-        ...(allowedTools && allowedTools.length > 0 ? { allowed_tools: allowedTools } : {}),
+        ...(resolvedAllowedTools.length > 0 ? { allowed_tools: resolvedAllowedTools } : {}),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any);
       logger.info("Composio MCP server updated with current toolkits", {
@@ -155,7 +221,7 @@ export async function getOrCreateComposioMcpServer(
         server_id: serverId,
         toolkits,
         auth_config_ids: authConfigIds,
-        allowed_tools: allowedTools,
+        allowed_tools: resolvedAllowedTools,
       });
     } else {
       // Resolve auth configs before creating the server
@@ -183,7 +249,7 @@ export async function getOrCreateComposioMcpServer(
         await client.mcp.update(existingByName.id, {
           auth_config_ids: authConfigIds,
           toolkits: toolkits.map((t) => t.toLowerCase()),
-          ...(allowedTools && allowedTools.length > 0 ? { allowed_tools: allowedTools } : {}),
+          ...(resolvedAllowedTools.length > 0 ? { allowed_tools: resolvedAllowedTools } : {}),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any);
         server = existingByName;
@@ -201,7 +267,7 @@ export async function getOrCreateComposioMcpServer(
           auth_config_ids: authConfigIds,
           managed_auth_via_composio: true,
           no_auth_apps: noAuthApps,
-          ...(allowedTools && allowedTools.length > 0 ? { allowed_tools: allowedTools } : {}),
+          ...(resolvedAllowedTools.length > 0 ? { allowed_tools: resolvedAllowedTools } : {}),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any);
       }
