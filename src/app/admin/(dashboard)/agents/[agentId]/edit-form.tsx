@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { ToolkitMultiselect } from "@/components/toolkit-multiselect";
 
@@ -84,28 +85,26 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         <div className="grid grid-cols-4 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Model</label>
-            <select
+            <Select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-            >
+                          >
               {MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
-            </select>
+            </Select>
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Permission Mode</label>
-            <select
+            <Select
               value={permissionMode}
               onChange={(e) => setPermissionMode(e.target.value)}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-            >
+                          >
               <option value="default">default</option>
               <option value="acceptEdits">acceptEdits</option>
               <option value="bypassPermissions">bypassPermissions</option>
               <option value="plan">plan</option>
-            </select>
+            </Select>
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Max Turns</label>

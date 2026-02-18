@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
 interface Tenant {
@@ -55,14 +56,10 @@ export function TenantEditForm({ tenant }: { tenant: Tenant }) {
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Status</label>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-            >
+            <Select value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="active">active</option>
               <option value="suspended">suspended</option>
-            </select>
+            </Select>
           </div>
         </div>
         <div className="mt-4 flex justify-end">
