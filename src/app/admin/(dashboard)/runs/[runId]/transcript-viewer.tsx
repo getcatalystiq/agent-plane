@@ -209,7 +209,7 @@ function AssistantItem({ item }: { item: ConversationItem }) {
       </button>
       {expanded && (
         <div className="px-4 py-3 border-t border-border bg-muted/10">
-          <div className="text-sm whitespace-pre-wrap">{item.text}</div>
+          <pre className="text-xs font-mono whitespace-pre-wrap">{item.text}</pre>
         </div>
       )}
     </div>
