@@ -10,6 +10,7 @@ import { AgentRow, RunRow, TenantRow } from "@/lib/validation";
 import { AgentEditForm } from "./edit-form";
 import { SkillsEditor } from "./skills-editor";
 import { ConnectorsManager } from "./connectors-manager";
+import { PluginsManager } from "./plugins-manager";
 import { AgentHeaderActions } from "./header-actions";
 
 export const dynamic = "force-dynamic";
@@ -57,7 +58,7 @@ export default async function AgentDetailPage({
         </p>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-5 gap-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Runs</CardTitle>
@@ -90,11 +91,21 @@ export default async function AgentDetailPage({
             <p className="text-2xl font-bold">{agent.skills.length}</p>
           </CardContent>
         </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Plugins</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-bold">{agent.plugins.length}</p>
+          </CardContent>
+        </Card>
       </div>
 
       <AgentEditForm agent={agent} />
 
       <ConnectorsManager agentId={agent.id} toolkits={agent.composio_toolkits} composioAllowedTools={agent.composio_allowed_tools} />
+
+      <PluginsManager agentId={agent.id} initialPlugins={agent.plugins} />
 
       <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
 

@@ -51,6 +51,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     ["composio_toolkits", "composio_toolkits"],
     ["composio_allowed_tools", "composio_allowed_tools"],
     ["skills", "skills", (v) => JSON.stringify(v)],
+    ["plugins", "plugins", (v) => JSON.stringify(v)],
   ];
 
   for (const [field, col, transform] of fieldMap) {
