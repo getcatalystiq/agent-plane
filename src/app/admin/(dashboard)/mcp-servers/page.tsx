@@ -36,7 +36,7 @@ export default async function McpServersPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">MCP Servers</h1>
+        <h1 className="text-2xl font-semibold">Custom Connectors</h1>
         <AddMcpServerForm />
       </div>
 
@@ -92,7 +92,7 @@ export default async function McpServersPage() {
             {servers.length === 0 && (
               <tr>
                 <td colSpan={8} className="p-8 text-center text-muted-foreground">
-                  No MCP servers registered. Click &quot;Register Server&quot; to add one.
+                  No custom connectors registered. Click &quot;Register Connector&quot; to add one.
                 </td>
               </tr>
             )}

@@ -65,11 +65,11 @@ export function AddMcpServerForm() {
 
   return (
     <>
-      <Button size="sm" onClick={() => setOpen(true)}>Register Server</Button>
+      <Button size="sm" onClick={() => setOpen(true)}>Register Connector</Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Register MCP Server</DialogTitle>
+            <DialogTitle>Register Custom Connector</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-3">
             <div>
@@ -77,7 +77,7 @@ export function AddMcpServerForm() {
               <Input
                 value={form.name}
                 onChange={(e) => updateField("name", e.target.value)}
-                placeholder="My MCP Server"
+                placeholder="My Custom Connector"
                 required
               />
             </div>

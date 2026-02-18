@@ -49,7 +49,7 @@ export function DeleteServerButton({ serverId, serverName, hasConnections }: Pro
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Delete MCP Server</DialogTitle>
+            <DialogTitle>Delete Custom Connector</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Delete <span className="font-medium text-foreground">{serverName}</span>?

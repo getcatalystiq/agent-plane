@@ -277,7 +277,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     <Dialog open={!!confirmMcpDisconnect} onOpenChange={(open) => { if (!open) setConfirmMcpDisconnect(null); }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Disconnect Custom MCP Server</DialogTitle>
+          <DialogTitle>Disconnect Custom Connector</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground mb-4">
           Disconnect <span className="font-medium text-foreground">{confirmMcpDisconnect?.server_name}</span> from this agent?
@@ -320,10 +320,10 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
 
             {/* MCP servers picker */}
             <div className="rounded-lg border border-border p-3">
-              <p className="text-xs font-medium text-muted-foreground mb-2">Custom MCP Servers</p>
+              <p className="text-xs font-medium text-muted-foreground mb-2">Custom Connectors</p>
               {availableMcpServers.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
-                  {mcpServers.length === 0 ? "No custom MCP servers registered." : "All servers are already connected."}
+                  {mcpServers.length === 0 ? "No custom connectors registered." : "All servers are already connected."}
                 </p>
               ) : (
                 <div className="grid grid-cols-4 gap-2">

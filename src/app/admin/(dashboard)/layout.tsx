@@ -8,7 +8,7 @@ const navItems = [
   { href: "/admin/tenants", label: "Tenants", icon: Users },
   { href: "/admin/agents", label: "Agents", icon: Bot },
   { href: "/admin/runs", label: "Runs", icon: Play },
-  { href: "/admin/mcp-servers", label: "MCP Servers", icon: Plug },
+  { href: "/admin/mcp-servers", label: "Custom Connectors", icon: Plug },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
