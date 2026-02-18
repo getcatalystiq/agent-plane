@@ -77,7 +77,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Composio Toolkits</label>
+            <label className="text-xs font-medium text-muted-foreground">Connectors</label>
             <ToolkitMultiselect value={composioToolkits} onChange={setComposioToolkits} />
           </div>
         </div>
