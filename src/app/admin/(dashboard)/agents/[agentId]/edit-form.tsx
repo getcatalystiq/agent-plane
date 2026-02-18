@@ -60,7 +60,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         <CardTitle className="text-base">Details</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-6 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -73,14 +73,9 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               placeholder="What does this agent do?"
             />
           </div>
-        </div>
-        <div className="grid grid-cols-4 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Model</label>
-            <Select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-                          >
+            <Select value={model} onChange={(e) => setModel(e.target.value)}>
               {MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -88,10 +83,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Permission Mode</label>
-            <Select
-              value={permissionMode}
-              onChange={(e) => setPermissionMode(e.target.value)}
-                          >
+            <Select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value)}>
               <option value="default">default</option>
               <option value="acceptEdits">acceptEdits</option>
               <option value="bypassPermissions">bypassPermissions</option>
