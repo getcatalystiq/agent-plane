@@ -86,11 +86,21 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
     );
   }
 
+  if (event.type === "queued") {
+    return (
+      <div key={idx} className="text-xs text-muted-foreground">Queued…</div>
+    );
+  }
+
+  if (event.type === "sandbox_starting") {
+    return (
+      <div key={idx} className="text-xs text-muted-foreground">Starting sandbox…</div>
+    );
+  }
+
   if (event.type === "run_started") {
     return (
-      <div key={idx} className="text-xs text-muted-foreground">
-        Run started…
-      </div>
+      <div key={idx} className="text-xs text-muted-foreground">Agent started</div>
     );
   }
 
@@ -203,7 +213,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         {error && <p className="text-sm text-red-500">{error}</p>}
       </div>
 
-      {events.length > 0 && (
+      {(running || events.length > 0) && (
         <div className="rounded-lg border border-border bg-muted/20 p-4 space-y-4 min-h-32 max-h-[60vh] overflow-y-auto">
           {events.map((ev, i) => renderEvent(ev, i))}
           {running && (
