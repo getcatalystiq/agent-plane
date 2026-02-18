@@ -40,6 +40,80 @@ const SkillsSchema = z
     { message: "Total skills content must be under 5MB" },
   );
 
+// --- Plugin Marketplace Validation ---
+
+export const CreatePluginMarketplaceSchema = z.object({
+  name: z.string().min(1).max(100),
+  github_repo: z.string()
+    .regex(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/, "Must be owner/repo format"),
+});
+
+export const PluginMarketplaceRow = z.object({
+  id: z.string(),
+  name: z.string(),
+  github_repo: z.string(),
+  created_at: z.coerce.date(),
+  updated_at: z.coerce.date(),
+});
+
+export type PluginMarketplace = z.infer<typeof PluginMarketplaceRow>;
+
+// Agent plugin config (stored in agents.plugins JSONB)
+export const AgentPluginSchema = z.object({
+  marketplace_id: z.string().uuid(),
+  plugin_name: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/),
+});
+
+export const AgentPluginsSchema = z.array(AgentPluginSchema)
+  .max(20)
+  .refine(
+    (plugins) => {
+      const keys = plugins.map(p => `${p.marketplace_id}:${p.plugin_name}`);
+      return new Set(keys).size === keys.length;
+    },
+    { message: "Duplicate plugin entries are not allowed" },
+  );
+
+// Plugin manifest (fetched from GitHub plugin.json)
+export const PluginManifestSchema = z.object({
+  name: z.string().min(1).max(100),
+  version: z.string().max(50).optional(),
+  description: z.string().max(2000).optional(),
+  author: z.object({ name: z.string().max(200) }).optional(),
+});
+
+// Plugin .mcp.json (fetched from GitHub)
+export const PluginMcpJsonSchema = z.object({
+  mcpServers: z.record(
+    z.string().min(1).max(100),
+    z.object({
+      type: z.string().min(1).max(50),
+      url: z.string().url(),
+    }),
+  ).optional(),
+});
+
+// GitHub API response schemas
+export const GitHubTreeEntrySchema = z.object({
+  path: z.string(),
+  mode: z.string(),
+  type: z.enum(["blob", "tree"]),
+  sha: z.string(),
+  size: z.number().optional(),
+  url: z.string(),
+});
+
+export const GitHubTreeResponseSchema = z.object({
+  sha: z.string(),
+  tree: z.array(GitHubTreeEntrySchema),
+  truncated: z.boolean(),
+});
+
+// Safe filename for plugin files from GitHub
+export const SafePluginFilename = z.string()
+  .min(1).max(255)
+  .regex(/^[a-zA-Z0-9_-]+\.md$/, "Must be a .md file with safe characters only");
+
 // --- Agent Validation ---
 
 export const CreateAgentSchema = z.object({
@@ -56,6 +130,7 @@ export const CreateAgentSchema = z.object({
   composio_toolkits: z.array(z.string().min(1).max(100)).default([]),
   composio_allowed_tools: z.array(z.string().min(1).max(100)).default([]),
   skills: SkillsSchema.default([]),
+  plugins: AgentPluginsSchema.default([]),
   model: z.string().min(1).max(100).default("claude-sonnet-4-6"),
   allowed_tools: z
     .array(z.string().min(1).max(100))
@@ -76,6 +151,7 @@ export const UpdateAgentSchema = z.object({
   composio_toolkits: z.array(z.string().min(1).max(100)),
   composio_allowed_tools: z.array(z.string().min(1).max(100)),
   skills: SkillsSchema,
+  plugins: AgentPluginsSchema,
   model: z.string().min(1).max(100),
   allowed_tools: z.array(z.string().min(1).max(100)),
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),
@@ -159,6 +235,7 @@ export const AgentRow = z.object({
   composio_mcp_server_name: z.string().nullable(),
   composio_allowed_tools: z.array(z.string()).default([]),
   skills: z.array(AgentSkillSchema).default([]).catch([]),
+  plugins: z.array(AgentPluginSchema).default([]).catch([]),
   model: z.string(),
   allowed_tools: z.array(z.string()),
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),

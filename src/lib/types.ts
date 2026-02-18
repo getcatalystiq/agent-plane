@@ -4,6 +4,12 @@ export type AgentId = string & { readonly __brand: "AgentId" };
 export type RunId = string & { readonly __brand: "RunId" };
 export type McpServerId = string & { readonly __brand: "McpServerId" };
 export type McpConnectionId = string & { readonly __brand: "McpConnectionId" };
+export type PluginMarketplaceId = string & { readonly __brand: "PluginMarketplaceId" };
+
+export interface AgentPlugin {
+  marketplace_id: PluginMarketplaceId;
+  plugin_name: string;
+}
 
 export type RunStatus =
   | "pending"

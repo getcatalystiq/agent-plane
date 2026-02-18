@@ -19,6 +19,9 @@ const EnvSchema = z.object({
   // Composio
   COMPOSIO_API_KEY: z.string().optional(),
 
+  // GitHub (for plugin marketplace API calls — 5000 req/hr vs 60 unauthenticated)
+  GITHUB_TOKEN: z.string().min(1).optional(),
+
   // Vercel AI Gateway
   AI_GATEWAY_API_KEY: z.string().min(1, "AI_GATEWAY_API_KEY is required"),
 
