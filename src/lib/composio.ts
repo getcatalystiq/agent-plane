@@ -256,12 +256,12 @@ export async function getConnectorStatuses(
         let authScheme: AuthScheme = "OTHER";
         if (tk?.no_auth) {
           authScheme = "NO_AUTH";
-        } else if (tk?.auth_schemes?.includes("API_KEY")) {
-          authScheme = "API_KEY";
         } else if (tk?.auth_schemes?.includes("OAUTH2")) {
           authScheme = "OAUTH2";
         } else if (tk?.auth_schemes?.includes("OAUTH1")) {
           authScheme = "OAUTH1";
+        } else if (tk?.auth_schemes?.includes("API_KEY")) {
+          authScheme = "API_KEY";
         }
 
         // Auth config
