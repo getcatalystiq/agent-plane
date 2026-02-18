@@ -161,23 +161,14 @@ function ConversationView({ items }: { items: ConversationItem[] }) {
 function SystemItem({ item }: { item: ConversationItem }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <div className="rounded-md border border-border bg-muted/30 px-4 py-2">
-      <button onClick={() => setExpanded(!expanded)} className="w-full text-left">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Badge variant="outline" className="text-[10px]">system</Badge>
-          <span>Model: <span className="font-mono">{item.model}</span></span>
-          <span>&middot;</span>
-          <span>{item.tools?.length || 0} tools</span>
-          {(item.skills?.length || 0) > 0 && (
-            <>
-              <span>&middot;</span>
-              <span>{item.skills!.length} skills</span>
-            </>
-          )}
-        </div>
+    <div className="rounded-md border border-border bg-muted/30 overflow-hidden">
+      <button onClick={() => setExpanded(!expanded)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-muted/50 transition-colors">
+        <Badge variant="outline" className="text-[10px]">system</Badge>
+        <span className="text-xs text-muted-foreground flex-1">Model: <span className="font-mono">{item.model}</span> &middot; {item.tools?.length || 0} tools{(item.skills?.length || 0) > 0 ? ` · ${item.skills!.length} skills` : ""}</span>
+        <span className="text-xs text-muted-foreground flex-shrink-0">{expanded ? "▲" : "▼"}</span>
       </button>
       {expanded && (
-        <div className="mt-2 text-xs text-muted-foreground space-y-1">
+        <div className="px-4 py-3 border-t border-border bg-muted/10 text-xs text-muted-foreground space-y-1">
           {item.tools && item.tools.length > 0 && (
             <div><span className="font-medium">Tools:</span> {item.tools.join(", ")}</div>
           )}
