@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import ReactMarkdown from "react-markdown";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -107,7 +108,7 @@ function buildConversation(events: TranscriptEvent[]): ConversationItem[] {
 }
 
 export function TranscriptViewer({ transcript }: { transcript: TranscriptEvent[] }) {
-  const [showRaw, setShowRaw] = useState(false);
+  const [formatted, setFormatted] = useState(true);
   const conversation = useMemo(() => buildConversation(transcript), [transcript]);
 
   if (transcript.length === 0) {
@@ -125,17 +126,28 @@ export function TranscriptViewer({ transcript }: { transcript: TranscriptEvent[]
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">Transcript</CardTitle>
-        <Button variant="ghost" size="sm" onClick={() => setShowRaw(!showRaw)}>
-          {showRaw ? "Conversation view" : "Raw events"}
-        </Button>
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+          <button
+            onClick={() => setFormatted(true)}
+            className={`px-3 py-1 text-xs rounded transition-colors ${formatted ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            Formatted
+          </button>
+          <button
+            onClick={() => setFormatted(false)}
+            className={`px-3 py-1 text-xs rounded transition-colors ${!formatted ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            Raw
+          </button>
+        </div>
       </CardHeader>
       <CardContent>
-        {showRaw ? (
-          <RawView transcript={transcript} />
-        ) : (
+        {formatted ? (
           <ConversationView items={conversation} />
+        ) : (
+          <RawView transcript={transcript} />
         )}
       </CardContent>
     </Card>
@@ -143,6 +155,9 @@ export function TranscriptViewer({ transcript }: { transcript: TranscriptEvent[]
 }
 
 function ConversationView({ items }: { items: ConversationItem[] }) {
+  // Find the index of the last result item
+  const lastResultIdx = items.reduce((last, item, i) => item.role === "result" ? i : last, -1);
+
   return (
     <div className="space-y-3">
       {items.map((item, i) => {
@@ -154,7 +169,7 @@ function ConversationView({ items }: { items: ConversationItem[] }) {
           case "tool":
             return <ToolItem key={i} item={item} />;
           case "result":
-            return <ResultItem key={i} item={item} />;
+            return <ResultItem key={i} item={item} defaultExpanded={i === lastResultIdx} />;
           case "error":
             return <ErrorItem key={i} item={item} />;
           default:
@@ -201,7 +216,9 @@ function AssistantItem({ item }: { item: ConversationItem }) {
   return (
     <div className="pl-4 border-l-2 border-primary/30">
       <div className="text-xs text-muted-foreground mb-1 font-medium">Assistant</div>
-      <div className="text-sm whitespace-pre-wrap">{item.text}</div>
+      <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
+        <ReactMarkdown>{item.text ?? ""}</ReactMarkdown>
+      </div>
     </div>
   );
 }
@@ -249,8 +266,8 @@ function ToolItem({ item }: { item: ConversationItem }) {
   );
 }
 
-function ResultItem({ item }: { item: ConversationItem }) {
-  const [showFull, setShowFull] = useState(false);
+function ResultItem({ item, defaultExpanded = false }: { item: ConversationItem; defaultExpanded?: boolean }) {
+  const [showFull, setShowFull] = useState(defaultExpanded);
   return (
     <div className="rounded-md border border-green-500/30 bg-green-500/5 px-4 py-3">
       <div className="flex items-center gap-3 text-sm">
@@ -267,9 +284,9 @@ function ResultItem({ item }: { item: ConversationItem }) {
             {showFull ? "Hide result" : "Show result"}
           </button>
           {showFull && (
-            <pre className="mt-1 text-xs font-mono whitespace-pre-wrap max-h-96 overflow-y-auto">
-              {item.text}
-            </pre>
+            <div className="mt-2 text-sm prose prose-sm dark:prose-invert max-w-none">
+              <ReactMarkdown>{item.text}</ReactMarkdown>
+            </div>
           )}
         </div>
       )}
@@ -288,7 +305,7 @@ function ErrorItem({ item }: { item: ConversationItem }) {
   );
 }
 
-// Raw events view (previous implementation)
+// Raw events view
 function RawView({ transcript }: { transcript: TranscriptEvent[] }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [showAll, setShowAll] = useState(false);
