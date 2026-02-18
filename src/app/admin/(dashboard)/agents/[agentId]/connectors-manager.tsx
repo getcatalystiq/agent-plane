@@ -133,7 +133,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits }: Props)
     </Dialog>
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-base">Connector Configuration</CardTitle>
+        <CardTitle className="text-base">Connectors</CardTitle>
         <Button
           size="sm"
           variant="outline"

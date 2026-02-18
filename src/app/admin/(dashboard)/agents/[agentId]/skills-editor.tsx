@@ -158,7 +158,7 @@ export function SkillsEditor({ agentId, initialSkills }: { agentId: string; init
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <div className="flex items-center gap-3">
-          <CardTitle className="text-base">Skills Editor</CardTitle>
+          <CardTitle className="text-base">Skills</CardTitle>
           {isDirty && <Badge variant="destructive" className="text-xs">Unsaved changes</Badge>}
         </div>
         <Button onClick={handleSave} disabled={saving || !isDirty} size="sm">
