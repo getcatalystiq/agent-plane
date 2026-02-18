@@ -39,6 +39,7 @@ async function getSessionKey(): Promise<CryptoKey> {
 
 export async function createAdminSession(): Promise<string> {
   const payload = JSON.stringify({
+    jti: crypto.randomUUID(),
     iat: Date.now(),
     exp: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
   });
