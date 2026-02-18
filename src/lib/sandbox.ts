@@ -24,6 +24,7 @@ export interface SandboxConfig {
   aiGatewayApiKey: string;
   mcpServers?: Record<string, McpServerConfig>;
   mcpErrors?: string[];
+  pluginFiles?: Array<{ path: string; content: string }>;
 }
 
 export interface SandboxInstance {
@@ -89,10 +90,21 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
     }),
   );
 
-  // Write runner + skill files to sandbox
+  // Resolve plugin files (pre-fetched paths like .claude/skills/plugin-name-file.md)
+  const sandboxRoot = "/vercel/sandbox";
+  const pluginFiles = (config.pluginFiles ?? []).map((f) => {
+    const resolved = path.resolve(sandboxRoot, f.path);
+    if (!resolved.startsWith(sandboxRoot + "/")) {
+      throw new Error(`Plugin path escapes sandbox root: ${f.path}`);
+    }
+    return { path: resolved, content: Buffer.from(f.content) };
+  });
+
+  // Write runner + skill + plugin files to sandbox
   await sandbox.writeFiles([
     { path: "/vercel/sandbox/runner.mjs", content: Buffer.from(runnerScript) },
     ...skillFiles,
+    ...pluginFiles,
   ]);
 
   // Install Claude Agent SDK
@@ -176,6 +188,7 @@ async function* streamLogs(command: Command): AsyncIterable<string> {
 
 function buildRunnerScript(config: SandboxConfig): string {
   const hasSkills = config.agent.skills.length > 0;
+  const hasPluginContent = (config.pluginFiles ?? []).length > 0;
   const hasMcp = config.mcpServers && Object.keys(config.mcpServers).length > 0;
   const agentConfig = {
     model: config.agent.model,
@@ -185,7 +198,7 @@ function buildRunnerScript(config: SandboxConfig): string {
     ...(hasMcp ? {} : { allowedTools: config.agent.allowed_tools }),
     maxTurns: config.agent.max_turns,
     maxBudgetUsd: config.agent.max_budget_usd,
-    ...(hasSkills ? { settingSources: ["project"] } : {}),
+    ...((hasSkills || hasPluginContent) ? { settingSources: ["project"] } : {}),
   };
 
   return `

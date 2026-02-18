@@ -6,6 +6,7 @@ import { CreateRunSchema, PaginationSchema, RunStatusSchema } from "@/lib/valida
 import { createRun, transitionRunStatus, listRuns } from "@/lib/runs";
 import { createSandbox } from "@/lib/sandbox";
 import { buildMcpConfig } from "@/lib/mcp";
+import { fetchPluginContent } from "@/lib/plugins";
 import { createNdjsonStream, ndjsonHeaders } from "@/lib/streaming";
 import { uploadTranscript } from "@/lib/transcripts";
 import { processLineAssets } from "@/lib/assets";
@@ -43,10 +44,16 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
   const transcriptChunks: string[] = [];
 
   try {
-    // Build MCP config for Composio toolkits
-    const mcpResult = await buildMcpConfig(agent, auth.tenantId);
+    // Build MCP config and fetch plugin content in parallel
+    const [mcpResult, pluginResult] = await Promise.all([
+      buildMcpConfig(agent, auth.tenantId),
+      fetchPluginContent(agent.plugins ?? []),
+    ]);
     if (mcpResult.errors.length > 0) {
       logger.warn("MCP config errors", { run_id: runId, errors: mcpResult.errors });
+    }
+    if (pluginResult.warnings.length > 0) {
+      logger.warn("Plugin fetch warnings", { run_id: runId, warnings: pluginResult.warnings });
     }
 
     // Create and start sandbox with effective budget/turns
@@ -59,6 +66,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       aiGatewayApiKey: getEnv().AI_GATEWAY_API_KEY,
       mcpServers: mcpResult.servers,
       mcpErrors: mcpResult.errors,
+      pluginFiles: [...pluginResult.skillFiles, ...pluginResult.commandFiles],
     });
 
     // Transition to running

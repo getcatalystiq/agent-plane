@@ -4,6 +4,7 @@ import { AgentRowInternal } from "@/lib/validation";
 import { createRun, transitionRunStatus } from "@/lib/runs";
 import { createSandbox } from "@/lib/sandbox";
 import { buildMcpConfig } from "@/lib/mcp";
+import { fetchPluginContent } from "@/lib/plugins";
 import { uploadTranscript } from "@/lib/transcripts";
 import { processLineAssets } from "@/lib/assets";
 import { logger } from "@/lib/logger";
@@ -57,7 +58,10 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
 
       await emit({ type: "sandbox_starting", run_id: runId, timestamp: new Date().toISOString() });
 
-      const mcpResult = await buildMcpConfig(agentInternal, tenantId);
+      const [mcpResult, pluginResult] = await Promise.all([
+        buildMcpConfig(agentInternal, tenantId),
+        fetchPluginContent(agentInternal.plugins ?? []),
+      ]);
 
       const sandbox = await createSandbox({
         agent: { ...agentInternal, max_budget_usd: effectiveBudget },
@@ -68,6 +72,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
         aiGatewayApiKey: getEnv().AI_GATEWAY_API_KEY,
         mcpServers: mcpResult.servers,
         mcpErrors: mcpResult.errors,
+        pluginFiles: [...pluginResult.skillFiles, ...pluginResult.commandFiles],
       });
 
       await transitionRunStatus(runId, tenantId, "pending", "running", {
