@@ -479,6 +479,67 @@ export async function initiateOAuthConnection(
 }
 
 /**
+ * When toolkits are removed from an agent, clean up the Composio resources for
+ * the given tenant:
+ * 1. Delete connected accounts that belong to this tenant for each removed toolkit.
+ * 2. Delete any auth config for the toolkit that now has zero connected accounts
+ *    (i.e. no other tenant is using it either).
+ */
+export async function removeToolkitConnections(
+  tenantId: string,
+  removedSlugs: string[],
+): Promise<void> {
+  const client = getClient();
+  if (!client || removedSlugs.length === 0) return;
+
+  await Promise.all(
+    removedSlugs.map(async (slug) => {
+      const slugLower = slug.toLowerCase();
+      try {
+        // 1. Delete this tenant's connected accounts for the toolkit.
+        const caRes = await client.connectedAccounts.list({
+          toolkit_slugs: [slugLower],
+          user_ids: [tenantId],
+          limit: 20,
+        });
+        await Promise.all(caRes.items.map((ca) => client.connectedAccounts.delete(ca.id)));
+        if (caRes.items.length > 0) {
+          logger.info("Deleted connected accounts for removed toolkit", {
+            tenant_id: tenantId,
+            slug: slugLower,
+            count: caRes.items.length,
+          });
+        }
+
+        // 2. Delete auth configs for this toolkit that have no remaining connected accounts.
+        const acRes = await client.authConfigs.list({ toolkit_slug: slugLower, limit: 20 });
+        await Promise.all(
+          acRes.items.map(async (ac) => {
+            const remaining = await client.connectedAccounts.list({
+              auth_config_ids: [ac.id],
+              limit: 1,
+            });
+            if (remaining.items.length === 0) {
+              await client.authConfigs.delete(ac.id);
+              logger.info("Deleted orphaned auth config for removed toolkit", {
+                slug: slugLower,
+                auth_config_id: ac.id,
+              });
+            }
+          }),
+        );
+      } catch (err) {
+        logger.error("Failed to clean up Composio resources for removed toolkit", {
+          tenant_id: tenantId,
+          slug: slugLower,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }),
+  );
+}
+
+/**
  * Check the status of a connected account.
  */
 export async function getConnectionStatus(

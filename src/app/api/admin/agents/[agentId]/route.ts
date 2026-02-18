@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { queryOne, query, execute } from "@/db";
 import { AgentRow, RunRow, UpdateAgentSchema } from "@/lib/validation";
+import { removeToolkitConnections } from "@/lib/composio";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,12 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   const { agentId } = await context.params;
   const body = await request.json();
   const input = UpdateAgentSchema.parse(body);
+
+  // Fetch current agent to detect removed toolkits before applying the update.
+  const current = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
+  if (!current) {
+    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+  }
 
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -65,6 +72,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   sets.push(`updated_at = NOW()`);
   params.push(agentId);
   await execute(`UPDATE agents SET ${sets.join(", ")} WHERE id = $${idx}`, params);
+
+  // Fire-and-forget: clean up Composio resources for removed toolkits.
+  if (input.composio_toolkits !== undefined) {
+    const newSet = new Set(input.composio_toolkits.map((t) => t.toLowerCase()));
+    const removed = current.composio_toolkits.filter((t) => !newSet.has(t.toLowerCase()));
+    if (removed.length > 0) {
+      removeToolkitConnections(current.tenant_id, removed).catch(() => {});
+    }
+  }
 
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   return NextResponse.json(agent);
