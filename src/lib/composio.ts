@@ -156,23 +156,41 @@ export async function getOrCreateComposioMcpServer(
         auth_config_ids: authConfigIds,
       });
 
-      // Create a new MCP server with a stable name derived from the user ID.
+      // Use a stable name derived from the user ID so we can recover if the DB
+      // write fails and we try again (avoid duplicate-name errors).
       const name = `ap-${userId.slice(0, 16)}`;
-      const server = await client.mcp.create({
-        name,
-        auth_config_ids: authConfigIds,
-        managed_auth_via_composio: true,
-        no_auth_apps: noAuthApps,
-      });
+
+      // Check if a server with this name already exists (e.g. from a previous
+      // run where the DB write failed).
+      const existing = await client.mcp.list({ name, limit: 5 });
+      const existingByName = existing.items.find((s) => s.name === name);
+
+      let server: { id: string; name: string };
+      if (existingByName) {
+        server = existingByName;
+        logger.info("Composio MCP server recovered by name", {
+          user_id: userId,
+          server_id: server.id,
+          name: server.name,
+        });
+      } else {
+        server = await client.mcp.create({
+          name,
+          auth_config_ids: authConfigIds,
+          managed_auth_via_composio: true,
+          no_auth_apps: noAuthApps,
+        });
+      }
       serverId = server.id;
       serverName = server.name;
-      logger.info("Composio MCP server created", {
+      logger.info("Composio MCP server ready", {
         user_id: userId,
         toolkits,
         server_id: serverId,
         name: serverName,
         auth_config_ids: authConfigIds,
         no_auth_apps: noAuthApps,
+        recovered: !!existingByName,
       });
     }
 
