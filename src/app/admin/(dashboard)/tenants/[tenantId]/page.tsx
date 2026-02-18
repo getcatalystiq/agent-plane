@@ -9,6 +9,8 @@ import { queryOne, query } from "@/db";
 import { TenantRow, AgentRow, ApiKeyRow } from "@/lib/validation";
 import { TenantEditForm } from "./edit-form";
 import { ApiKeysSection } from "./api-keys";
+import { AddAgentForm } from "../../agents/add-agent-form";
+import { DeleteAgentButton } from "../../agents/delete-agent-button";
 
 export const dynamic = "force-dynamic";
 
@@ -108,7 +110,10 @@ export default async function TenantDetailPage({
 
       {/* Agents table */}
       <div>
-        <h2 className="text-lg font-semibold mb-3">Agents</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold">Agents</h2>
+          <AddAgentForm tenants={[{ id: tenant.id, name: tenant.name }]} defaultTenantId={tenant.id} />
+        </div>
         <div className="rounded-lg border border-border">
           <table className="w-full text-sm">
             <thead>
@@ -117,6 +122,7 @@ export default async function TenantDetailPage({
                 <th className="text-left p-3 font-medium">Model</th>
                 <th className="text-left p-3 font-medium">Permission Mode</th>
                 <th className="text-left p-3 font-medium">Created</th>
+                <th className="text-right p-3 font-medium"></th>
               </tr>
             </thead>
             <tbody>
@@ -130,10 +136,13 @@ export default async function TenantDetailPage({
                   <td className="p-3 font-mono text-xs text-muted-foreground">{a.model}</td>
                   <td className="p-3"><Badge variant="outline">{a.permission_mode}</Badge></td>
                   <td className="p-3 text-muted-foreground text-xs">{new Date(a.created_at).toLocaleDateString()}</td>
+                  <td className="p-3 text-right">
+                    <DeleteAgentButton agentId={a.id} agentName={a.name} />
+                  </td>
                 </tr>
               ))}
               {agents.length === 0 && (
-                <tr><td colSpan={4} className="p-6 text-center text-muted-foreground">No agents</td></tr>
+                <tr><td colSpan={5} className="p-6 text-center text-muted-foreground">No agents</td></tr>
               )}
             </tbody>
           </table>

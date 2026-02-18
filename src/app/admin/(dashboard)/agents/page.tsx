@@ -1,7 +1,10 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { query } from "@/db";
+import { TenantRow } from "@/lib/validation";
 import { z } from "zod";
+import { AddAgentForm } from "./add-agent-form";
+import { DeleteAgentButton } from "./delete-agent-button";
 
 const AgentWithTenant = z.object({
   id: z.string(),
@@ -25,7 +28,8 @@ const AgentWithTenant = z.object({
 export const dynamic = "force-dynamic";
 
 export default async function AgentsPage() {
-  const agents = await query(
+  const [agents, tenants] = await Promise.all([
+    query(
     AgentWithTenant,
     `SELECT a.id, a.tenant_id, t.name AS tenant_name, a.name, a.description, a.model,
        a.permission_mode, a.composio_toolkits, a.max_turns, a.max_budget_usd, a.created_at,
@@ -41,11 +45,16 @@ export default async function AgentsPage() {
      GROUP BY a.id, t.name
      ORDER BY a.created_at DESC`,
     [],
-  );
+  ),
+    query(TenantRow, "SELECT * FROM tenants ORDER BY name ASC", []),
+  ]);
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold mb-6">Agents</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Agents</h1>
+        <AddAgentForm tenants={tenants.map((t) => ({ id: t.id, name: t.name }))} />
+      </div>
       <div className="rounded-lg border border-border">
         <table className="w-full text-sm">
           <thead>
@@ -59,6 +68,7 @@ export default async function AgentsPage() {
               <th className="text-right p-3 font-medium">Runs</th>
               <th className="text-left p-3 font-medium">Last Run</th>
               <th className="text-left p-3 font-medium">Created</th>
+              <th className="text-right p-3 font-medium"></th>
             </tr>
           </thead>
           <tbody>
@@ -111,11 +121,14 @@ export default async function AgentsPage() {
                 <td className="p-3 text-muted-foreground text-xs">
                   {new Date(a.created_at).toLocaleDateString()}
                 </td>
+                <td className="p-3 text-right">
+                  <DeleteAgentButton agentId={a.id} agentName={a.name} />
+                </td>
               </tr>
             ))}
             {agents.length === 0 && (
               <tr>
-                <td colSpan={9} className="p-8 text-center text-muted-foreground">No agents found</td>
+                <td colSpan={10} className="p-8 text-center text-muted-foreground">No agents found</td>
               </tr>
             )}
           </tbody>

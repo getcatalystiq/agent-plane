@@ -3,6 +3,7 @@ import { queryOne, query, execute } from "@/db";
 import { AgentRow, RunRow, UpdateAgentSchema } from "@/lib/validation";
 import { removeToolkitConnections } from "@/lib/composio";
 import { withErrorHandler } from "@/lib/api";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
@@ -79,4 +80,38 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
 
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   return NextResponse.json(agent);
+});
+
+export const DELETE = withErrorHandler(async (_request: NextRequest, context) => {
+  const { agentId } = await (context as RouteContext).params;
+
+  const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
+  if (!agent) {
+    return NextResponse.json({ error: { message: "Agent not found" } }, { status: 404 });
+  }
+
+  const runCount = await queryOne(
+    z.object({ count: z.coerce.number() }),
+    "SELECT COUNT(*)::int AS count FROM runs WHERE agent_id = $1 AND status IN ('queued', 'running')",
+    [agentId],
+  );
+
+  if (runCount && runCount.count > 0) {
+    return NextResponse.json(
+      { error: { message: "Cannot delete agent with active runs" } },
+      { status: 409 },
+    );
+  }
+
+  // Clean up Composio connections
+  if (agent.composio_toolkits.length > 0) {
+    removeToolkitConnections(agent.tenant_id, agent.composio_toolkits).catch(() => {});
+  }
+
+  // Delete related data then the agent
+  await execute("DELETE FROM mcp_connections WHERE agent_id = $1", [agentId]);
+  await execute("DELETE FROM runs WHERE agent_id = $1", [agentId]);
+  await execute("DELETE FROM agents WHERE id = $1", [agentId]);
+
+  return NextResponse.json({ deleted: true });
 });
