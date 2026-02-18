@@ -4,6 +4,26 @@ import { use, useState, useRef } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+function MarkdownContent({ children }: { children: string }) {
+  return (
+    <div className="text-sm text-foreground [&_p]:my-1 [&_h1]:text-lg [&_h1]:font-bold [&_h1]:my-2 [&_h2]:text-base [&_h2]:font-semibold [&_h2]:my-2 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 [&_li]:my-0.5 [&_pre]:bg-muted [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:text-xs [&_pre]:my-2 [&_code:not(pre_code)]:bg-muted [&_code:not(pre_code)]:px-1 [&_code:not(pre_code)]:py-0.5 [&_code:not(pre_code)]:rounded [&_code:not(pre_code)]:text-xs [&_code:not(pre_code)]:font-mono [&_a]:text-blue-400 [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_blockquote]:my-2 [&_hr]:border-border [&_hr]:my-3 [&_table]:border-collapse [&_table]:text-xs [&_table]:w-full [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_th]:bg-muted [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_strong]:font-semibold [&_em]:italic">
+      <ReactMarkdown
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        remarkPlugins={[remarkGfm as any]}
+        components={{
+          a: ({ href, children }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+          ),
+        }}
+      >
+        {children}
+      </ReactMarkdown>
+    </div>
+  );
+}
 
 interface PlaygroundEvent {
   type: string;
@@ -24,7 +44,7 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
     return (
       <div key={idx} className="space-y-1">
         <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
-        <p className="text-sm whitespace-pre-wrap text-foreground">{texts}</p>
+        <MarkdownContent>{texts}</MarkdownContent>
       </div>
     );
   }
@@ -227,10 +247,8 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           {streamingText && (
             <div className="space-y-1">
               <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
-              <p className="text-sm whitespace-pre-wrap text-foreground">
-                {streamingText}
-                <span className="animate-pulse">▎</span>
-              </p>
+              <MarkdownContent>{streamingText}</MarkdownContent>
+              <span className="inline-block w-0.5 h-4 bg-foreground animate-pulse align-text-bottom" />
             </div>
           )}
           {running && !streamingText && (
