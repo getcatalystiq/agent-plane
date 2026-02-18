@@ -10,7 +10,6 @@ import { AgentRow, RunRow, TenantRow } from "@/lib/validation";
 import { AgentEditForm } from "./edit-form";
 import { SkillsEditor } from "./skills-editor";
 import { ConnectorsManager } from "./connectors-manager";
-import { McpConnectionsManager } from "./mcp-connections-manager";
 import { AgentHeaderActions } from "./header-actions";
 
 export const dynamic = "force-dynamic";
@@ -96,8 +95,6 @@ export default async function AgentDetailPage({
       <AgentEditForm agent={agent} />
 
       <ConnectorsManager agentId={agent.id} toolkits={agent.composio_toolkits} composioAllowedTools={agent.composio_allowed_tools} />
-
-      <McpConnectionsManager agentId={agent.id} />
 
       <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
 

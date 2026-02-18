@@ -9,7 +9,29 @@ import { Badge } from "@/components/ui/badge";
 import { ToolkitMultiselect } from "@/components/toolkit-multiselect";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ToolsModal } from "./tools-modal";
+import { McpToolsModal } from "./mcp-tools-modal";
 import type { AuthScheme, ConnectorStatus } from "@/lib/composio";
+
+interface McpServer {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  logo_url: string | null;
+  base_url: string;
+}
+
+interface McpConnection {
+  id: string;
+  mcp_server_id: string;
+  status: string;
+  allowed_tools: string[];
+  token_expires_at: string | null;
+  server_name: string;
+  server_slug: string;
+  server_logo_url: string | null;
+  server_base_url: string;
+}
 
 interface Props {
   agentId: string;
@@ -19,8 +41,6 @@ interface Props {
 
 function schemeBadgeVariant(scheme: AuthScheme) {
   if (scheme === "NO_AUTH") return "secondary";
-  if (scheme === "API_KEY") return "outline";
-  if (scheme === "OAUTH2" || scheme === "OAUTH1") return "outline";
   return "outline";
 }
 
@@ -31,8 +51,16 @@ function statusColor(status: string | null) {
   return "text-muted-foreground";
 }
 
+function isExpiringSoon(expiresAt: string | null): boolean {
+  if (!expiresAt) return false;
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  return ms > 0 && ms < 24 * 60 * 60 * 1000;
+}
+
 export function ConnectorsManager({ agentId, toolkits: initialToolkits, composioAllowedTools: initialAllowedTools }: Props) {
   const router = useRouter();
+
+  // Composio state
   const [localToolkits, setLocalToolkits] = useState<string[]>(initialToolkits);
   const [connectors, setConnectors] = useState<ConnectorStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,7 +76,17 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
   const [toolsModalToolkit, setToolsModalToolkit] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  // MCP state
+  const [mcpConnections, setMcpConnections] = useState<McpConnection[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+  const [mcpLoading, setMcpLoading] = useState(true);
+  const [mcpConnecting, setMcpConnecting] = useState<string | null>(null);
+  const [confirmMcpDisconnect, setConfirmMcpDisconnect] = useState<McpConnection | null>(null);
+  const [mcpDisconnecting, setMcpDisconnecting] = useState(false);
+  const [mcpToolsModal, setMcpToolsModal] = useState<McpConnection | null>(null);
+
+  // Load Composio connectors
+  const loadComposio = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`/api/admin/agents/${agentId}/connectors`);
@@ -59,10 +97,23 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     }
   }, [agentId]);
 
-  const toolkitsKey = localToolkits.join(",");
-  useEffect(() => { load(); }, [load, toolkitsKey]);
+  // Load MCP connections
+  const loadMcp = useCallback(async () => {
+    setMcpLoading(true);
+    try {
+      const res = await fetch(`/api/admin/agents/${agentId}/mcp-connections`);
+      const data = await res.json();
+      setMcpConnections(data.data ?? []);
+    } finally {
+      setMcpLoading(false);
+    }
+  }, [agentId]);
 
-  // Fetch total tool count per toolkit
+  const toolkitsKey = localToolkits.join(",");
+  useEffect(() => { loadComposio(); }, [loadComposio, toolkitsKey]);
+  useEffect(() => { loadMcp(); }, [loadMcp]);
+
+  // Fetch total tool count per Composio toolkit
   useEffect(() => {
     if (localToolkits.length === 0) return;
     for (const slug of localToolkits) {
@@ -74,9 +125,17 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     }
   }, [toolkitsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Load available MCP servers (for Add panel)
+  async function loadMcpServers() {
+    const res = await fetch("/api/admin/mcp-servers");
+    const data = await res.json();
+    setMcpServers(data.data ?? []);
+  }
+
+  // --- Composio handlers ---
+
   async function handleToolsSave(toolkit: string, selectedSlugs: string[]) {
     const prefix = toolkit.toUpperCase() + "_";
-    // Remove old tools for this toolkit, add newly selected ones
     const otherTools = allowedTools.filter((t) => !t.startsWith(prefix));
     const updated = [...otherTools, ...selectedSlugs];
     await fetch(`/api/admin/agents/${agentId}`, {
@@ -137,7 +196,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
         return;
       }
       setApiKeys((k) => ({ ...k, [slug]: "" }));
-      await load();
+      await loadComposio();
       router.refresh();
     } catch (err) {
       setErrors((e) => ({ ...e, [slug]: err instanceof Error ? err.message : "Unknown error" }));
@@ -146,8 +205,57 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     }
   }
 
+  // --- MCP handlers ---
+
+  async function handleMcpConnect(serverId: string) {
+    setMcpConnecting(serverId);
+    try {
+      const res = await fetch(`/api/admin/agents/${agentId}/mcp-connections/${serverId}/initiate-oauth`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (data.redirectUrl) {
+        const popup = window.open(data.redirectUrl, "mcp-oauth", "width=600,height=700");
+        const handler = (event: MessageEvent) => {
+          if (event.data?.type === "mcp-oauth-complete") {
+            popup?.close();
+            window.removeEventListener("message", handler);
+            loadMcp();
+            setShowAdd(false);
+            router.refresh();
+          }
+        };
+        window.addEventListener("message", handler);
+      }
+    } finally {
+      setMcpConnecting(null);
+    }
+  }
+
+  async function handleMcpDisconnect() {
+    if (!confirmMcpDisconnect) return;
+    setMcpDisconnecting(true);
+    try {
+      await fetch(`/api/admin/agents/${agentId}/mcp-connections/${confirmMcpDisconnect.mcp_server_id}`, {
+        method: "DELETE",
+      });
+      setConfirmMcpDisconnect(null);
+      await loadMcp();
+      router.refresh();
+    } finally {
+      setMcpDisconnecting(false);
+    }
+  }
+
+  const connectedMcpServerIds = new Set(mcpConnections.map((c) => c.mcp_server_id));
+  const availableMcpServers = mcpServers.filter((s) => !connectedMcpServerIds.has(s.id));
+
+  const isAllLoading = loading || mcpLoading;
+  const isEmpty = localToolkits.length === 0 && mcpConnections.length === 0;
+
   return (
     <>
+    {/* Composio remove confirmation */}
     <Dialog open={!!confirmDelete} onOpenChange={(open) => { if (!open) setConfirmDelete(null); }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
@@ -164,38 +272,105 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
         </div>
       </DialogContent>
     </Dialog>
+
+    {/* MCP disconnect confirmation */}
+    <Dialog open={!!confirmMcpDisconnect} onOpenChange={(open) => { if (!open) setConfirmMcpDisconnect(null); }}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Disconnect MCP Server</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground mb-4">
+          Disconnect <span className="font-medium text-foreground">{confirmMcpDisconnect?.server_name}</span> from this agent?
+        </p>
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setConfirmMcpDisconnect(null)} disabled={mcpDisconnecting}>Cancel</Button>
+          <Button size="sm" variant="destructive" onClick={handleMcpDisconnect} disabled={mcpDisconnecting}>
+            {mcpDisconnecting ? "Disconnecting..." : "Disconnect"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">Connectors</CardTitle>
         <Button
           size="sm"
           variant="outline"
-          onClick={() => { setPendingToolkits(localToolkits); setShowAdd(true); }}
+          onClick={() => { setPendingToolkits(localToolkits); loadMcpServers(); setShowAdd(true); }}
         >
           Add
         </Button>
       </CardHeader>
       <CardContent>
         {showAdd && (
-          <div className="mb-4 flex items-start gap-2">
-            <div className="flex-1">
-              <ToolkitMultiselect value={pendingToolkits} onChange={setPendingToolkits} />
+          <div className="mb-4 space-y-3">
+            {/* Composio toolkit picker */}
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1.5">Composio Toolkits</p>
+              <div className="flex items-start gap-2">
+                <div className="flex-1">
+                  <ToolkitMultiselect value={pendingToolkits} onChange={setPendingToolkits} />
+                </div>
+                <Button size="sm" onClick={handleApplyAdd} disabled={applyingToolkits}>
+                  {applyingToolkits ? "Saving..." : "Apply"}
+                </Button>
+              </div>
             </div>
-            <Button size="sm" onClick={handleApplyAdd} disabled={applyingToolkits}>
-              {applyingToolkits ? "Saving..." : "Apply"}
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancel</Button>
+
+            {/* MCP servers picker */}
+            <div className="rounded-lg border border-border p-3">
+              <p className="text-xs font-medium text-muted-foreground mb-2">MCP Servers</p>
+              {availableMcpServers.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  {mcpServers.length === 0 ? "No MCP servers registered." : "All servers are already connected."}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {availableMcpServers.map((s) => (
+                    <div key={s.id} className="flex items-center justify-between gap-2 p-2 rounded border border-border">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {s.logo_url && (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={s.logo_url} alt="" className="w-5 h-5 rounded-sm object-contain flex-shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <span className="text-sm font-medium">{s.name}</span>
+                          {s.description && (
+                            <p className="text-xs text-muted-foreground truncate">{s.description}</p>
+                          )}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs flex-shrink-0"
+                        disabled={mcpConnecting === s.id}
+                        onClick={() => handleMcpConnect(s.id)}
+                      >
+                        {mcpConnecting === s.id ? "Connecting..." : "Connect"}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end">
+              <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Close</Button>
+            </div>
           </div>
         )}
-        {loading ? (
+
+        {isAllLoading ? (
           <p className="text-sm text-muted-foreground">Loading...</p>
-        ) : localToolkits.length === 0 ? (
+        ) : isEmpty ? (
           <p className="text-sm text-muted-foreground">No connectors added. Click Add to configure connectors.</p>
         ) : (
           <div className="grid grid-cols-3 gap-3">
+            {/* Composio connector cards */}
             {connectors.map((c) => (
-              <div key={c.slug} className="rounded-lg border border-border p-3 flex flex-col gap-2">
-                {/* Logo + name + badge + delete */}
+              <div key={`composio-${c.slug}`} className="rounded-lg border border-border p-3 flex flex-col gap-2">
                 <div className="flex items-center gap-2">
                   {c.logo && (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -215,7 +390,6 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
                   </button>
                 </div>
 
-                {/* Status */}
                 {c.authScheme === "NO_AUTH" ? (
                   <span className="text-xs text-muted-foreground">No auth required</span>
                 ) : c.connectionStatus === "ACTIVE" ? (
@@ -224,7 +398,6 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
                   <span className={`text-xs ${statusColor(c.connectionStatus)}`}>{c.connectionStatus.toLowerCase()}</span>
                 ) : null}
 
-                {/* Tool count */}
                 {(() => {
                   const total = toolCounts[c.slug];
                   if (total === undefined) return null;
@@ -242,7 +415,6 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
                   );
                 })()}
 
-                {/* Action: API_KEY input */}
                 {c.authScheme === "API_KEY" && (
                   <div className="flex flex-col gap-1 mt-auto">
                     <div className="flex items-center gap-2">
@@ -269,14 +441,12 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
                   </div>
                 )}
 
-                {/* Action: OAuth connect */}
                 {(c.authScheme === "OAUTH2" || c.authScheme === "OAUTH1") && c.connectionStatus !== "ACTIVE" && (
                   <a href={`/api/admin/agents/${agentId}/connectors/${c.slug}`} className="mt-auto">
                     <Button size="sm" variant="outline" className="h-7 text-xs w-full">Connect</Button>
                   </a>
                 )}
 
-                {/* Reconnect for OAuth if active */}
                 {(c.authScheme === "OAUTH2" || c.authScheme === "OAUTH1") && c.connectionStatus === "ACTIVE" && (
                   <a href={`/api/admin/agents/${agentId}/connectors/${c.slug}`} className="mt-auto">
                     <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground w-full">Reconnect</Button>
@@ -284,10 +454,73 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
                 )}
               </div>
             ))}
+
+            {/* MCP connection cards */}
+            {mcpConnections.map((c) => (
+              <div key={`mcp-${c.id}`} className="rounded-lg border border-border p-3 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  {c.server_logo_url && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={c.server_logo_url} alt="" className="w-5 h-5 rounded-sm object-contain flex-shrink-0" />
+                  )}
+                  <span className="text-sm font-medium truncate flex-1">{c.server_name}</span>
+                  <Badge variant="outline" className="text-xs flex-shrink-0">
+                    OAUTH
+                  </Badge>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmMcpDisconnect(c)}
+                    className="text-muted-foreground hover:text-red-500 flex-shrink-0 ml-1 text-base leading-none"
+                    title="Disconnect"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                {c.status === "active" ? (
+                  <>
+                    <span className="text-xs font-medium text-green-600">✓ Connected</span>
+                    {isExpiringSoon(c.token_expires_at) && (
+                      <span className="text-xs text-yellow-500">Token expires soon</span>
+                    )}
+                  </>
+                ) : (
+                  <span className={`text-xs ${c.status === "expired" || c.status === "failed" ? "text-red-500" : "text-muted-foreground"}`}>
+                    {c.status}
+                  </span>
+                )}
+
+                {c.status === "active" && (
+                  <button
+                    type="button"
+                    className="text-xs text-primary hover:underline text-left"
+                    onClick={() => setMcpToolsModal(c)}
+                  >
+                    {c.allowed_tools.length > 0
+                      ? `${c.allowed_tools.length} tools selected`
+                      : "All tools (no filter)"}
+                  </button>
+                )}
+
+                {(c.status === "expired" || c.status === "failed") && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs mt-auto"
+                    disabled={mcpConnecting === c.mcp_server_id}
+                    onClick={() => handleMcpConnect(c.mcp_server_id)}
+                  >
+                    {mcpConnecting === c.mcp_server_id ? "Reconnecting..." : "Reconnect"}
+                  </Button>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </CardContent>
     </Card>
+
+    {/* Composio tools modal */}
     {toolsModalToolkit && (
       <ToolsModal
         agentId={agentId}
@@ -297,6 +530,28 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
         open={!!toolsModalToolkit}
         onOpenChange={(open) => { if (!open) setToolsModalToolkit(null); }}
         onSave={handleToolsSave}
+      />
+    )}
+
+    {/* MCP tools modal */}
+    {mcpToolsModal && (
+      <McpToolsModal
+        agentId={agentId}
+        mcpServerId={mcpToolsModal.mcp_server_id}
+        serverName={mcpToolsModal.server_name}
+        serverLogo={mcpToolsModal.server_logo_url}
+        allowedTools={mcpToolsModal.allowed_tools}
+        open={!!mcpToolsModal}
+        onOpenChange={(open) => { if (!open) setMcpToolsModal(null); }}
+        onSave={async (selectedTools) => {
+          await fetch(`/api/admin/agents/${agentId}/mcp-connections/${mcpToolsModal.mcp_server_id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allowed_tools: selectedTools }),
+          });
+          setMcpToolsModal(null);
+          await loadMcp();
+        }}
       />
     )}
     </>
