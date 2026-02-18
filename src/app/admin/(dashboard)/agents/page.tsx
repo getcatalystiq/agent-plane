@@ -8,6 +8,7 @@ const AgentWithTenant = z.object({
   tenant_id: z.string(),
   tenant_name: z.string(),
   name: z.string(),
+  description: z.string().nullable(),
   model: z.string(),
   permission_mode: z.string(),
   composio_toolkits: z.array(z.string()),
@@ -23,7 +24,7 @@ export const dynamic = "force-dynamic";
 export default async function AgentsPage() {
   const agents = await query(
     AgentWithTenant,
-    `SELECT a.id, a.tenant_id, t.name AS tenant_name, a.name, a.model,
+    `SELECT a.id, a.tenant_id, t.name AS tenant_name, a.name, a.description, a.model,
        a.permission_mode, a.composio_toolkits, a.max_turns, a.max_budget_usd, a.created_at,
        COUNT(r.id)::int AS run_count,
        MAX(r.created_at) AS last_run_at
@@ -43,9 +44,9 @@ export default async function AgentsPage() {
           <thead>
             <tr className="border-b border-border bg-muted/50">
               <th className="text-left p-3 font-medium">Name</th>
+              <th className="text-left p-3 font-medium">Description</th>
               <th className="text-left p-3 font-medium">Tenant</th>
               <th className="text-left p-3 font-medium">Model</th>
-              <th className="text-left p-3 font-medium">Mode</th>
               <th className="text-left p-3 font-medium">Toolkits</th>
               <th className="text-right p-3 font-medium">Runs</th>
               <th className="text-left p-3 font-medium">Last Run</th>
@@ -60,13 +61,15 @@ export default async function AgentsPage() {
                     {a.name}
                   </Link>
                 </td>
+                <td className="p-3 text-muted-foreground text-xs max-w-xs truncate" title={a.description ?? undefined}>
+                  {a.description ?? "—"}
+                </td>
                 <td className="p-3">
                   <Link href={`/admin/tenants/${a.tenant_id}`} className="text-primary hover:underline text-xs">
                     {a.tenant_name}
                   </Link>
                 </td>
                 <td className="p-3 font-mono text-xs text-muted-foreground">{a.model}</td>
-                <td className="p-3"><Badge variant="outline">{a.permission_mode}</Badge></td>
                 <td className="p-3">
                   {a.composio_toolkits.length > 0 ? (
                     <div className="flex gap-1 flex-wrap">
@@ -89,7 +92,7 @@ export default async function AgentsPage() {
             ))}
             {agents.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-8 text-center text-muted-foreground">No agents found</td>
+                <td colSpan={7} className="p-8 text-center text-muted-foreground">No agents found</td>
               </tr>
             )}
           </tbody>

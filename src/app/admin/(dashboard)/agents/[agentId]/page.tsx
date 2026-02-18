@@ -54,9 +54,6 @@ export default async function AgentDetailPage({
         <p className="text-sm text-muted-foreground mt-1">
           Tenant: <Link href={`/admin/tenants/${agent.tenant_id}`} className="text-primary hover:underline">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</Link>
         </p>
-        {agent.description && (
-          <p className="text-sm text-muted-foreground mt-2 max-w-2xl">{agent.description}</p>
-        )}
       </div>
 
       <div className="grid grid-cols-4 gap-4">
