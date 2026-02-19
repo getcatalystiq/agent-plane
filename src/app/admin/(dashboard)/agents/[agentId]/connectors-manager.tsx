@@ -501,8 +501,8 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
                 {(c.status === "expired" || c.status === "failed") && (
                   <Button
                     size="sm"
-                    variant="outline"
-                    className="h-7 text-xs mt-auto"
+                    variant="ghost"
+                    className="h-7 text-xs text-muted-foreground mt-auto"
                     disabled={mcpConnecting === c.mcp_server_id}
                     onClick={() => handleMcpConnect(c.mcp_server_id)}
                   >
