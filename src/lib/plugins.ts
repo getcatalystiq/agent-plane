@@ -251,12 +251,14 @@ export async function fetchPluginContent(
           return null;
         }
 
-        // Use the subdirectory name as part of the filename for skills (e.g., account-research/SKILL.md -> account-research-SKILL.md)
-        const pathParts = entry.path.replace(`${pluginName}/skills/`, "").split("/");
-        const flatName = pathParts.join("-");
+        // Preserve subdirectory structure for skill discovery (Claude Code expects <folder>/SKILL.md)
+        const relativePath = entry.path.replace(`${pluginName}/skills/`, "");
+        const parts = relativePath.split("/");
+        const fileName = parts.pop()!;
+        const folderName = [pluginName, ...parts].join("-");
 
         return {
-          path: `.claude/skills/${pluginName}-${flatName}`,
+          path: `.claude/skills/${folderName}/${fileName}`,
           content: contentResult.data,
         };
       });
