@@ -4,7 +4,7 @@ import { PluginMarketplaceRow, PluginMcpJsonSchema, SafePluginFilename } from "@
 import { withErrorHandler } from "@/lib/api";
 import { NotFoundError, ForbiddenError, ConflictError, ValidationError } from "@/lib/errors";
 import { fetchRepoTree, fetchRawContent, pushFiles, getDefaultBranch } from "@/lib/github";
-import { clearPluginCache } from "@/lib/plugins";
+import { clearPluginCache, cacheRecentPush } from "@/lib/plugins";
 import { decrypt } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 import { z } from "zod";
@@ -184,8 +184,9 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
     return NextResponse.json({ error: `Failed to push: ${result.message}` }, { status: 502 });
   }
 
-  // Clear plugin cache so next fetch picks up the changes
+  // Clear tree cache and cache pushed content so page reloads don't hit stale CDN
   clearPluginCache(marketplace.github_repo);
+  cacheRecentPush(marketplace.github_repo, files);
 
   return NextResponse.json({ commitSha: result.data.commitSha });
 });

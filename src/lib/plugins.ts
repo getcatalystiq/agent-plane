@@ -75,6 +75,34 @@ export function clearPluginCache(githubRepo?: string): void {
   }
 }
 
+// --- Recent-push content cache (survives GitHub CDN staleness) ---
+
+interface ContentCacheEntry {
+  files: Map<string, string>; // path → content
+  cachedAt: number;
+}
+
+const contentCache = new Map<string, ContentCacheEntry>();
+const CONTENT_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes (enough for CDN to catch up)
+
+/** Cache file contents after a successful push so page reloads don't hit stale CDN. */
+export function cacheRecentPush(githubRepo: string, files: Array<{ path: string; content: string }>): void {
+  const fileMap = new Map<string, string>();
+  for (const f of files) fileMap.set(f.path, f.content);
+  contentCache.set(githubRepo, { files: fileMap, cachedAt: Date.now() });
+}
+
+/** Get recently-pushed content for a file, or null if not cached / expired. */
+export function getCachedContent(githubRepo: string, filePath: string): string | null {
+  const entry = contentCache.get(githubRepo);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > CONTENT_CACHE_TTL_MS) {
+    contentCache.delete(githubRepo);
+    return null;
+  }
+  return entry.files.get(filePath) ?? null;
+}
+
 // --- Helpers ---
 
 function parseGithubRepo(githubRepo: string): { owner: string; repo: string } {

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { queryOne } from "@/db";
 import { PluginMarketplaceRow, PluginManifestSchema } from "@/lib/validation";
 import { fetchRepoTree, fetchRawContent } from "@/lib/github";
+import { getCachedContent } from "@/lib/plugins";
 import { Badge } from "@/components/ui/badge";
 import { getEnv } from "@/lib/env";
 import { decrypt } from "@/lib/crypto";
@@ -71,14 +72,24 @@ export default async function PluginEditorPage({
     } catch { /* use pluginName */ }
   }
 
+  const githubRepo = marketplace.github_repo;
+
+  // Helper: use recently-pushed content cache before falling back to GitHub CDN
+  async function getContent(filePath: string): Promise<string | null> {
+    const cached = getCachedContent(githubRepo, filePath);
+    if (cached !== null) return cached;
+    const result = await fetchRawContent(owner, repo, filePath, token);
+    return result.ok ? result.data : null;
+  }
+
   // Fetch skill files
   const skillEntries = tree.filter(
     e => e.type === "blob" && e.path.startsWith(`${pluginName}/skills/`),
   );
   const skillResults = await Promise.all(skillEntries.map(async (entry) => {
-    const contentResult = await fetchRawContent(owner, repo, entry.path, token);
-    if (!contentResult.ok) return null;
-    return { path: entry.path.replace(`${pluginName}/skills/`, ""), content: contentResult.data };
+    const content = await getContent(entry.path);
+    if (content === null) return null;
+    return { path: entry.path.replace(`${pluginName}/skills/`, ""), content };
   }));
 
   // Fetch command files
@@ -86,17 +97,16 @@ export default async function PluginEditorPage({
     e => e.type === "blob" && e.path.startsWith(`${pluginName}/commands/`) && e.path.endsWith(".md"),
   );
   const commandResults = await Promise.all(commandEntries.map(async (entry) => {
-    const contentResult = await fetchRawContent(owner, repo, entry.path, token);
-    if (!contentResult.ok) return null;
-    return { path: entry.path.replace(`${pluginName}/commands/`, ""), content: contentResult.data };
+    const content = await getContent(entry.path);
+    if (content === null) return null;
+    return { path: entry.path.replace(`${pluginName}/commands/`, ""), content };
   }));
 
   // Fetch .mcp.json
   const mcpJsonEntry = tree.find(e => e.type === "blob" && e.path === `${pluginName}/.mcp.json`);
   let mcpJson: string | null = null;
   if (mcpJsonEntry) {
-    const mcpResult = await fetchRawContent(owner, repo, mcpJsonEntry.path, token);
-    if (mcpResult.ok) mcpJson = mcpResult.data;
+    mcpJson = await getContent(mcpJsonEntry.path);
   }
 
   const skills = skillResults.filter(Boolean) as Array<{ path: string; content: string }>;
