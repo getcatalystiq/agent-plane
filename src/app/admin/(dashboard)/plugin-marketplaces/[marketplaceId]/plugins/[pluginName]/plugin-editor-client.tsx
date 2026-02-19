@@ -101,35 +101,35 @@ export function PluginEditorClient({
   ];
   return (
     <div className="space-y-4">
-      {/* Save All button for owned plugins */}
-      {!readOnly && (
-        <div className="flex items-center gap-3">
-          <Button onClick={handleSaveAll} disabled={saving}>
-            {saving ? "Pushing to GitHub..." : "Save All to GitHub"}
-          </Button>
-          {error && <span className="text-xs text-red-500">{error}</span>}
-          {success && <span className="text-xs text-green-500">{success}</span>}
+      {/* Tab bar + Save button */}
+      <div className="flex items-end border-b border-border">
+        <div className="flex gap-1">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/50"
+              }`}
+            >
+              {tab.label}
+              {tab.count > 0 && (
+                <span className="ml-1.5 text-xs text-muted-foreground">({tab.count})</span>
+              )}
+            </button>
+          ))}
         </div>
-      )}
-
-      {/* Tab bar */}
-      <div className="flex gap-1 border-b border-border">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === tab.id
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/50"
-            }`}
-          >
-            {tab.label}
-            {tab.count > 0 && (
-              <span className="ml-1.5 text-xs text-muted-foreground">({tab.count})</span>
-            )}
-          </button>
-        ))}
+        {!readOnly && (
+          <div className="flex items-center gap-3 ml-auto pb-2">
+            {error && <span className="text-xs text-red-500">{error}</span>}
+            {success && <span className="text-xs text-green-500">{success}</span>}
+            <Button size="sm" onClick={handleSaveAll} disabled={saving}>
+              {saving ? "Pushing to GitHub..." : "Save All to GitHub"}
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Tab content */}
