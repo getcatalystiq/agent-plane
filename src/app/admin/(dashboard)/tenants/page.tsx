@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { query } from "@/db";
 import { z } from "zod";
+import { AddTenantForm } from "./add-tenant-form";
 
 const TenantWithStats = z.object({
   id: z.string(),
@@ -32,8 +33,11 @@ export default async function TenantsPage() {
   );
 
   return (
-    <div>
-      <h1 className="text-2xl font-semibold mb-6">Tenants</h1>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Tenants</h1>
+        <AddTenantForm />
+      </div>
       <div className="rounded-lg border border-border">
         <table className="w-full text-sm">
           <thead>
