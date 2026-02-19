@@ -20,7 +20,8 @@ import { z } from "zod";
 // --- Types ---
 
 export interface PluginListItem {
-  name: string;
+  name: string;          // directory name in the repo (used as identifier for fetching)
+  displayName: string;   // human-readable name from plugin.json manifest
   description: string | null;
   version: string | null;
   author: string | null;
@@ -143,7 +144,8 @@ export async function listPlugins(githubRepo: string): Promise<GitHubResult<Plug
     const hasMcpJson = tree.some(e => e.path === `${dir}/.mcp.json` && e.type === "blob");
 
     plugins.push({
-      name: manifest.name,
+      name: dir,
+      displayName: manifest.name,
       description: manifest.description ?? null,
       version: manifest.version ?? null,
       author: manifest.author?.name ?? null,

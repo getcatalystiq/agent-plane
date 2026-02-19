@@ -20,6 +20,7 @@ interface Marketplace {
 
 interface AvailablePlugin {
   name: string;
+  displayName: string;
   description: string | null;
   version: string | null;
   hasSkills: boolean;
@@ -213,7 +214,7 @@ export function PluginsManager({
                           >
                             <div className="min-w-0">
                               <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium">{ap.name}</span>
+                                <span className="text-sm font-medium">{ap.displayName}</span>
                                 {ap.version && (
                                   <span className="text-xs text-muted-foreground">v{ap.version}</span>
                                 )}
