@@ -28,10 +28,15 @@ A multi-tenant platform for running Claude Code agents in isolated Vercel Sandbo
 ```bash
 npm run dev            # start dev server
 npm run build          # type-check + build (Next.js)
-npm run test           # vitest run
+npm run test           # vitest run (server tests)
 npm run migrate        # run DB migrations (requires DATABASE_URL)
 npm run create-tenant  # create a tenant + API key
 npx tsx scripts/create-api-key.ts <tenant-id>  # generate additional API keys
+
+# SDK (sdk/ directory)
+npm run sdk:build      # build SDK (ESM + CJS + DTS)
+npm run sdk:test       # run SDK tests
+npm run sdk:typecheck  # typecheck SDK
 ```
 
 ## Project Structure
@@ -105,6 +110,17 @@ scripts/
   create-api-key.ts       # CLI to generate additional API keys for a tenant
 tests/
   unit/                   # Vitest unit tests
+sdk/                      # TypeScript SDK (published as `agentplane` npm package)
+  src/
+    client.ts             # AgentPlane class (HTTPS enforcement, closure-based auth)
+    types.ts              # API interfaces (snake_case, matches wire format)
+    errors.ts             # AgentPlaneError + StreamDisconnectedError
+    streaming.ts          # NDJSON parser + RunStream (AsyncIterable)
+    resources/
+      runs.ts             # create, createAndWait, get, list, cancel, transcript
+      agents.ts           # CRUD
+    index.ts              # public exports
+  tests/                  # SDK unit tests (vitest)
 ```
 
 ## Database

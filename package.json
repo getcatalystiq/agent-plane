@@ -31,7 +31,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "migrate": "npx tsx src/db/migrate.ts",
-    "create-tenant": "npx tsx scripts/create-tenant.ts"
+    "create-tenant": "npx tsx scripts/create-tenant.ts",
+    "sdk:build": "npm run --prefix sdk build",
+    "sdk:test": "npm run --prefix sdk test",
+    "sdk:typecheck": "npm run --prefix sdk typecheck"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.4",
