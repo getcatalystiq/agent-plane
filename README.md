@@ -8,7 +8,8 @@ A multi-tenant platform for running Claude Code agents in isolated Vercel Sandbo
 - **npm**
 - A [Neon](https://neon.tech) Postgres database
 - A [Vercel](https://vercel.com) account (for Sandbox, Blob storage, and AI Gateway)
-- A [Composio](https://composio.dev) account (for MCP tool integrations)
+- (Optional) A [Composio](https://composio.dev) account for MCP tool integrations
+- (Optional) A [GitHub](https://github.com) personal access token for plugin marketplace access
 
 ## Setup
 
@@ -51,7 +52,7 @@ Used to proxy model requests from Claude Code running inside the sandbox.
 1. In your Vercel dashboard, go to **AI** > **AI Gateway** and create a gateway.
 2. Copy the API key — this is your `AI_GATEWAY_API_KEY`.
 
-### 4. Set up Composio
+### 4. Set up Composio (optional)
 
 [Composio](https://composio.dev) provides MCP tool integrations (GitHub, Slack, Firecrawl, etc.) for agents.
 
@@ -63,7 +64,7 @@ Composio MCP servers are created and cached per-agent automatically. Toolkit OAu
 
 ### 5. Generate an encryption key
 
-`ENCRYPTION_KEY` is used for AES-256-GCM encryption of API keys and Composio credentials at rest. Generate one:
+`ENCRYPTION_KEY` is used for AES-256-GCM encryption of API keys, OAuth tokens, and credentials at rest. Generate one:
 
 ```bash
 openssl rand -hex 32
@@ -90,12 +91,11 @@ BLOB_READ_WRITE_TOKEN="vercel_blob_rw_..."
 ADMIN_API_KEY="a-strong-secret-for-admin-routes"
 ENCRYPTION_KEY="64-hex-chars-from-openssl-rand"
 
-# Composio
-COMPOSIO_API_KEY="your-composio-api-key"
-
 # Optional
-# ENCRYPTION_KEY_PREVIOUS="old-64-hex-chars"  # for seamless key rotation
-# CRON_SECRET="vercel-cron-secret"            # auto-set by Vercel in production
+# COMPOSIO_API_KEY="your-composio-api-key"          # for Composio toolkit integrations
+# GITHUB_TOKEN="ghp_..."                            # for plugin marketplace access (5000 req/hr vs 60)
+# ENCRYPTION_KEY_PREVIOUS="old-64-hex-chars"        # for seamless key rotation
+# CRON_SECRET="vercel-cron-secret"                  # auto-set by Vercel in production
 ```
 
 ### 7. Run database migrations
@@ -146,7 +146,8 @@ The app runs at [http://localhost:3000](http://localhost:3000). The admin UI is 
 | `ENCRYPTION_KEY` | Yes | 64 hex chars (32 bytes) for AES-256-GCM encryption |
 | `ENCRYPTION_KEY_PREVIOUS` | No | Previous encryption key for seamless rotation |
 | `BLOB_READ_WRITE_TOKEN` | No | Vercel Blob token for transcript + asset storage |
-| `COMPOSIO_API_KEY` | Yes | Composio API key for MCP tool integrations |
+| `COMPOSIO_API_KEY` | No | Composio API key for MCP tool integrations |
+| `GITHUB_TOKEN` | No | GitHub API token for plugin marketplace access (5000 req/hr vs 60) |
 | `CRON_SECRET` | No | Vercel Cron authentication (auto-set in production) |
 
 ## API Authentication
@@ -154,9 +155,50 @@ The app runs at [http://localhost:3000](http://localhost:3000). The admin UI is 
 All API routes (except `/api/health`) require `Authorization: Bearer <api_key>`.
 
 - **Tenant routes** — use API keys created via `create-tenant` or `create-api-key` scripts.
-- **Admin routes** (`/api/admin/*`) — use the `ADMIN_API_KEY`.
+- **Admin routes** (`/api/admin/*`) — use the `ADMIN_API_KEY` or log in via `/admin` for JWT cookie auth.
 
 API keys are hashed with SHA-256 and optionally encrypted at rest with AES-256-GCM.
+
+## API Overview
+
+### Tenant Routes
+
+| Method | Route | Description |
+|---|---|---|
+| `GET` | `/api/agents` | List agents |
+| `POST` | `/api/agents` | Create agent |
+| `GET` | `/api/agents/:id` | Get agent |
+| `PATCH` | `/api/agents/:id` | Update agent |
+| `DELETE` | `/api/agents/:id` | Delete agent |
+| `POST` | `/api/agents/:id/runs` | Create & stream run (SSE) |
+| `GET` | `/api/agents/:id/runs` | List runs for agent |
+| `GET` | `/api/agents/:id/connectors` | List Composio connector status |
+| `POST` | `/api/agents/:id/connectors/:toolkit/initiate-oauth` | Start Composio OAuth |
+| `GET` | `/api/agents/:id/mcp-connections` | List custom MCP connections |
+| `POST` | `/api/agents/:id/mcp-connections/:mcpServerId/initiate-oauth` | Start MCP OAuth |
+| `PATCH` | `/api/agents/:id/mcp-connections/:mcpServerId` | Update MCP tool allowlist |
+| `GET` | `/api/agents/:id/mcp-connections/:mcpServerId/tools` | List available MCP tools |
+| `GET` | `/api/runs/:id` | Get run status (SSE stream) |
+| `POST` | `/api/runs/:id/cancel` | Cancel a run |
+| `GET` | `/api/runs/:id/transcript` | Get run transcript |
+| `GET` | `/api/tenants/me` | Get current tenant |
+| `GET` | `/api/keys` | List API keys |
+| `POST` | `/api/keys` | Create API key |
+| `DELETE` | `/api/keys/:id` | Revoke API key |
+| `GET` | `/api/mcp-servers` | List registered MCP servers |
+
+### Admin Routes
+
+| Method | Route | Description |
+|---|---|---|
+| `POST` | `/api/admin/login` | Admin login (returns JWT) |
+| | `/api/admin/agents/*` | Agent CRUD + connectors + MCP connections |
+| | `/api/admin/composio/toolkits` | List available Composio toolkits |
+| | `/api/admin/composio/tools` | List tools for a toolkit |
+| | `/api/admin/mcp-servers/*` | Custom MCP server CRUD |
+| | `/api/admin/plugin-marketplaces/*` | Marketplace CRUD + plugin listing + file editing |
+| | `/api/admin/tenants/*` | Tenant + API key management |
+| | `/api/admin/runs/*` | Admin run viewing |
 
 ## Deployment
 

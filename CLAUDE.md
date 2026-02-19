@@ -8,17 +8,20 @@ A multi-tenant platform for running Claude Code agents in isolated Vercel Sandbo
 
 **Core concepts:**
 - **Tenant** — isolated workspace with its own API keys, agents, and budget
-- **Agent** — configuration (model, tools, permissions, git repo) that runs Claude Code
+- **Agent** — configuration (model, tools, permissions, skills, plugins, git repo) that runs Claude Code
 - **Run** — a single agent execution triggered by a prompt; streams SSE events
+- **MCP Server** — custom OAuth-authenticated tool server registered by admins; agents connect via OAuth 2.1 PKCE
+- **Plugin Marketplace** — GitHub repo containing reusable skills/commands that agents can install
 
 **Execution flow:**
 1. Client POSTs to `/api/agents/:id/runs` with a prompt
-2. MCP config is built (Composio toolkits resolved, cached per agent)
-3. A Vercel Sandbox is created, Claude Code runs inside it
-4. Events stream back over SSE (`run_started`, `assistant`, `tool_use`, `tool_result`, `result`)
-5. Ephemeral asset URLs (e.g. Composio/Firecrawl) are replaced with permanent Vercel Blob URLs
-6. Transcript stored in Vercel Blob; token usage + cost recorded in DB
-7. Long-running streams (>4.5 min) detach with a `stream_detached` event; clients poll `/api/runs/:id`
+2. MCP config is built (Composio toolkits + custom MCP servers resolved, tokens refreshed)
+3. A Vercel Sandbox is created; skill files + plugin files injected into `.claude/skills/`
+4. Claude Code runs inside the sandbox
+5. Events stream back over SSE (`run_started`, `assistant`, `tool_use`, `tool_result`, `result`)
+6. Ephemeral asset URLs (e.g. Composio/Firecrawl) are replaced with permanent Vercel Blob URLs
+7. Transcript stored in Vercel Blob; token usage + cost recorded in DB
+8. Long-running streams (>4.5 min) detach with a `stream_detached` event; clients poll `/api/runs/:id`
 
 ## Key Commands
 
@@ -36,64 +39,86 @@ npx tsx scripts/create-api-key.ts <tenant-id>  # generate additional API keys
 ```
 src/
   app/
-    api/            # REST API routes
-      agents/       # CRUD + run creation + toolkit connect (OAuth)
-      runs/         # run status, cancel, transcript
-      admin/        # admin-only endpoints
-        agents/     # agent CRUD + connectors (per-toolkit auth)
-        composio/   # available toolkits listing
-        runs/       # admin run management
-        tenants/    # tenant management
-      cron/         # scheduled jobs (budget reset, cleanup)
-      github/       # GitHub webhook handler
-      health/       # health check
-      keys/         # API key management
-      tenants/      # tenant management
-    admin/          # Admin UI (Next.js pages)
+    api/
+      agents/             # CRUD + run creation + Composio OAuth + MCP connections
+      runs/               # run status (SSE), cancel, transcript
+      admin/
+        agents/           # admin agent CRUD + connectors + MCP connections + plugin suggestions
+        composio/         # available Composio toolkits + tools listing
+        login/            # admin JWT authentication
+        mcp-servers/      # custom MCP server CRUD
+        plugin-marketplaces/  # marketplace CRUD + plugin listing + file editing
+        runs/             # admin run management
+        tenants/          # tenant + API key management
+      cron/               # scheduled jobs (budget reset, sandbox + transcript cleanup)
+      health/             # health check (no auth)
+      keys/               # tenant-scoped API key management
+      mcp-servers/        # MCP OAuth callback + server listing
+      runs/               # tenant-scoped run management
+      tenants/            # tenant self-service (GET /me)
+    admin/                # Admin UI (Next.js pages)
+      (auth)/login/       # login page
+      (dashboard)/
+        agents/           # agent list + detail (edit, connectors, skills, plugins, playground)
+        mcp-servers/      # custom MCP server management
+        plugin-marketplaces/  # marketplace list + detail + plugin editor
+        runs/             # run list + detail (transcript viewer)
+        tenants/          # tenant list + detail (API keys, budget)
   db/
-    index.ts        # DB client (Pool, query helpers, transactions)
-    migrate.ts      # migration runner
-    migrations/     # sequential SQL migration files (001–005)
+    index.ts              # DB client (Pool, query helpers, RLS context, transactions)
+    migrate.ts            # migration runner
+    migrations/           # sequential SQL migration files (001–009)
   lib/
-    types.ts        # branded types, domain interfaces, StreamEvent union
-    env.ts          # Zod-validated env (getEnv())
-    auth.ts         # API key authentication
-    admin-auth.ts   # admin API key auth
-    sandbox.ts      # Vercel Sandbox creation + Claude Code runner
-    composio.ts     # Composio MCP integration (toolkit auth, server lifecycle)
-    mcp.ts          # MCP server config builder (caching, encryption)
-    assets.ts       # ephemeral asset persistence (Composio URLs → Vercel Blob)
-    runs.ts         # run lifecycle helpers
-    streaming.ts    # SSE streaming (heartbeats, stream detach)
-    transcripts.ts  # Vercel Blob transcript storage
-    api.ts          # withErrorHandler, jsonResponse helpers
-    validation.ts   # Zod request/response schemas
-    crypto.ts       # ID generation, key hashing, AES-256-GCM encryption
-    idempotency.ts  # idempotent request handling
-    rate-limit.ts   # Vercel KV-based rate limiting
-    errors.ts       # typed error classes
-    logger.ts       # structured logger
-    utils.ts        # misc helpers
-  components/       # React UI components
+    types.ts              # branded types, domain interfaces, StreamEvent union
+    env.ts                # Zod-validated env (getEnv())
+    validation.ts         # Zod request/response schemas
+    auth.ts               # API key authentication + tenant RLS context
+    admin-auth.ts         # admin JWT + cookie auth
+    sandbox.ts            # Vercel Sandbox creation + skill/plugin file injection
+    mcp.ts                # MCP config builder (Composio + custom servers)
+    mcp-connections.ts    # MCP connection orchestration (OAuth, token refresh, caching)
+    mcp-oauth.ts          # OAuth 2.1 PKCE HTTP calls (discovery, registration, token exchange)
+    mcp-oauth-state.ts    # signed OAuth state token generation
+    composio.ts           # Composio MCP integration (toolkit auth, server lifecycle)
+    plugins.ts            # plugin discovery + file fetching (GitHub, caching)
+    github.ts             # GitHub API client (tree, content, write access, push)
+    agents.ts             # agent loading helper
+    assets.ts             # ephemeral asset persistence (Composio URLs → Vercel Blob)
+    runs.ts               # run lifecycle (create, transition, budget/concurrency checks)
+    streaming.ts          # SSE streaming (heartbeats, stream detach)
+    transcripts.ts        # Vercel Blob transcript storage
+    api.ts                # withErrorHandler, jsonResponse helpers
+    crypto.ts             # ID generation, key hashing, AES-256-GCM encryption
+    idempotency.ts        # idempotent request handling
+    rate-limit.ts         # Vercel KV-based rate limiting
+    errors.ts             # typed error classes
+    logger.ts             # structured logger
+    utils.ts              # misc helpers
+  components/
+    file-tree-editor.tsx  # nested folder editor with CodeMirror (language-aware)
     toolkit-multiselect.tsx  # Composio toolkit picker (search, logos)
-    ui/             # shared UI primitives
-  middleware.ts     # auth middleware
+    local-date.tsx        # client-side date formatting
+    ui/                   # shared UI primitives (badge, button, card, dialog, etc.)
+  middleware.ts           # auth middleware
 scripts/
-  create-tenant.ts   # CLI to provision tenant + API key
-  create-api-key.ts  # CLI to generate additional API keys for a tenant
+  create-tenant.ts        # CLI to provision tenant + API key
+  create-api-key.ts       # CLI to generate additional API keys for a tenant
 tests/
-  unit/             # Vitest unit tests
+  unit/                   # Vitest unit tests
 ```
 
 ## Database
 
-Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `runs`.
+Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `runs`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`.
 
 - Agent names are unique per tenant
-- RLS enforced via `app.current_tenant_id` session config
+- RLS enforced via `app.current_tenant_id` session config (fail-closed via `NULLIF`)
 - Tenant-scoped transactions via `withTenantTransaction()`
-- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–005), run via `npm run migrate`
-- `agents` table includes Composio MCP cache columns (`composio_mcp_server_id`, `composio_mcp_server_name`, `composio_mcp_url`, `composio_mcp_api_key_enc`)
+- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–009), run via `npm run migrate`
+- `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `skills` JSONB, `plugins` JSONB
+- `mcp_servers` — admin-managed global registry (OAuth 2.1 client credentials, no RLS)
+- `mcp_connections` — per-agent OAuth connections (tenant-scoped RLS, unique per agent-server pair)
+- `plugin_marketplaces` — global registry of GitHub repos; optional encrypted GitHub token for push-to-repo editing
 
 ## Environment Variables
 
@@ -104,15 +129,16 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 | `DATABASE_URL_UNPOOLED` | No | Neon non-pooled URL; auto-set by Vercel integration; used for migrations |
 | `ADMIN_API_KEY` | Yes | Admin API authentication |
 | `AI_GATEWAY_API_KEY` | Yes | Vercel AI Gateway key |
-| `ENCRYPTION_KEY` | Yes | 64 hex chars (32 bytes) for key + Composio API key encryption (AES-256-GCM) |
+| `ENCRYPTION_KEY` | Yes | 64 hex chars (32 bytes) for AES-256-GCM encryption (keys, tokens, credentials) |
 | `ENCRYPTION_KEY_PREVIOUS` | No | 64 hex chars; supports seamless key rotation |
 | `BLOB_READ_WRITE_TOKEN` | No | Vercel Blob (transcript + asset storage) |
-| `CRON_SECRET` | No | Vercel Cron authentication |
-| `COMPOSIO_API_KEY` | Yes | Composio MCP tool integration |
+| `COMPOSIO_API_KEY` | No | Composio MCP tool integration (optional if not using Composio toolkits) |
+| `GITHUB_TOKEN` | No | GitHub API auth (5000 req/hr vs 60 unauthenticated); used for plugin marketplace access |
+| `CRON_SECRET` | No | Vercel Cron authentication (auto-set in production) |
 
 ## API Authentication
 
-All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Admin routes use `ADMIN_API_KEY`. API keys are hashed with SHA-256; optionally encrypted at rest with `ENCRYPTION_KEY`.
+All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Admin routes use `ADMIN_API_KEY` (or JWT cookie via `/api/admin/login`). API keys are hashed with SHA-256; optionally encrypted at rest with `ENCRYPTION_KEY`.
 
 ## Deployment
 
@@ -125,11 +151,16 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 
 ## Patterns & Conventions
 
-- Branded types (`TenantId`, `AgentId`, `RunId`) prevent parameter swaps at compile time
+- Branded types (`TenantId`, `AgentId`, `RunId`, `McpServerId`, `McpConnectionId`, `PluginMarketplaceId`) prevent parameter swaps at compile time
 - All DB queries go through typed helpers in `src/db/index.ts` with Zod validation
 - Use `withErrorHandler()` wrapper on every API route handler
 - Composio MCP server URL + API key are cached per agent in the `agents` table (encrypted at rest)
-- Agent skills are injected as files into the sandbox before Claude runs
+- Custom MCP servers use OAuth 2.1 PKCE; tokens refreshed automatically with 2-phase retry on transient 5xx
+- Agent skills are injected as files into the sandbox at `.claude/skills/<folder>/<path>`
+- Plugin files are injected into the sandbox at `.claude/skills/<plugin-name>-<filename>`
+- Process-level caching with TTLs: MCP servers (5 min), plugin trees (5 min), recent pushes (2 min)
 - SSE streams send heartbeats every 15s and auto-detach after 4.5 min for long-running runs
 - Ephemeral Composio asset URLs are persisted to Vercel Blob during transcript capture
 - Admin UI is always dark mode via `.dark` class on the layout root; Tailwind v4 dark variant is configured with `@variant dark (&:where(.dark, .dark *))` in `globals.css`
+- Sandbox network policy allowlists: AI Gateway, Composio, Firecrawl, GitHub, platform API, custom MCP servers
+- Max 10 concurrent runs per tenant; atomic concurrent run check prevents TOCTOU races
