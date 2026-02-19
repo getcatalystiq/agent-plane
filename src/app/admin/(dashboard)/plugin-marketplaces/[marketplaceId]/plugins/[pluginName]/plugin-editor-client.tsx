@@ -32,6 +32,7 @@ export function PluginEditorClient({
   const [skills, setSkills] = useState(initialSkills);
   const [commands, setCommands] = useState(initialCommands);
   const [mcpJson, setMcpJson] = useState(initialMcpJson ?? "");
+  const [activeTab, setActiveTab] = useState<"skills" | "commands" | "connectors">("skills");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -93,8 +94,13 @@ export function PluginEditorClient({
     }
   }
 
+  const tabs = [
+    { id: "skills" as const, label: "Skills", count: skills.reduce((n, f) => n + f.files.length, 0) },
+    { id: "commands" as const, label: "Commands", count: commands.reduce((n, f) => n + f.files.length, 0) },
+    { id: "connectors" as const, label: "Connectors", count: mcpJson ? 1 : 0 },
+  ];
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Save All button for owned plugins */}
       {!readOnly && (
         <div className="flex items-center gap-3">
@@ -106,64 +112,88 @@ export function PluginEditorClient({
         </div>
       )}
 
-      {/* Skills editor */}
-      <FileTreeEditor
-        initialFiles={initialSkills}
-        onSave={noopSave}
-        onChange={readOnly ? undefined : handleSkillsChange}
-        readOnly={readOnly}
-        hideSave={!readOnly}
-        title="Skills"
-        addFolderLabel="Skill"
-        newFolderTemplate={{ path: "SKILL.md", content: "# New\n\nDescribe this skill...\n" }}
-      />
+      {/* Tab bar */}
+      <div className="flex gap-1 border-b border-border">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.id
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/50"
+            }`}
+          >
+            {tab.label}
+            {tab.count > 0 && (
+              <span className="ml-1.5 text-xs text-muted-foreground">({tab.count})</span>
+            )}
+          </button>
+        ))}
+      </div>
 
-      {/* Commands editor */}
-      <FileTreeEditor
-        initialFiles={initialCommands}
-        onSave={noopSave}
-        onChange={readOnly ? undefined : handleCommandsChange}
-        readOnly={readOnly}
-        hideSave={!readOnly}
-        title="Commands"
-        addFolderLabel="Command"
-        newFolderTemplate={{ path: "command.md", content: "# New Command\n\nDescribe this command...\n" }}
-      />
+      {/* Tab content */}
+      {activeTab === "skills" && (
+        <FileTreeEditor
+          initialFiles={initialSkills}
+          onSave={noopSave}
+          onChange={readOnly ? undefined : handleSkillsChange}
+          readOnly={readOnly}
+          hideSave={!readOnly}
+          title="Skills"
+          addFolderLabel="Skill"
+          newFolderTemplate={{ path: "SKILL.md", content: "# New\n\nDescribe this skill...\n" }}
+        />
+      )}
 
-      {/* .mcp.json editor */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <div className="flex items-center gap-3">
-            <CardTitle className="text-base">Connectors (.mcp.json)</CardTitle>
-            {readOnly && <Badge variant="secondary" className="text-xs">Read-only</Badge>}
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="border border-border rounded-md overflow-hidden">
-            <div className="px-3 py-1.5 bg-muted/50 border-b border-border text-xs text-muted-foreground">
-              .mcp.json
+      {activeTab === "commands" && (
+        <FileTreeEditor
+          initialFiles={initialCommands}
+          onSave={noopSave}
+          onChange={readOnly ? undefined : handleCommandsChange}
+          readOnly={readOnly}
+          hideSave={!readOnly}
+          title="Commands"
+          addFolderLabel="Command"
+          newFolderTemplate={{ path: "command.md", content: "# New Command\n\nDescribe this command...\n" }}
+        />
+      )}
+
+      {activeTab === "connectors" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div className="flex items-center gap-3">
+              <CardTitle className="text-base">Connectors (.mcp.json)</CardTitle>
+              {readOnly && <Badge variant="secondary" className="text-xs">Read-only</Badge>}
             </div>
-            <CodeMirror
-              value={mcpJson}
-              onChange={(val) => !readOnly && setMcpJson(val)}
-              readOnly={readOnly}
-              theme={oneDark}
-              extensions={[json()]}
-              height="200px"
-              basicSetup={{
-                lineNumbers: true,
-                foldGutter: true,
-                bracketMatching: true,
-              }}
-            />
-          </div>
-          {!mcpJson && !readOnly && (
-            <p className="text-xs text-muted-foreground mt-2">
-              No .mcp.json found. Add connector definitions to suggest MCP servers for agents using this plugin.
-            </p>
-          )}
-        </CardContent>
-      </Card>
+          </CardHeader>
+          <CardContent>
+            <div className="border border-border rounded-md overflow-hidden">
+              <div className="px-3 py-1.5 bg-muted/50 border-b border-border text-xs text-muted-foreground">
+                .mcp.json
+              </div>
+              <CodeMirror
+                value={mcpJson}
+                onChange={(val) => !readOnly && setMcpJson(val)}
+                readOnly={readOnly}
+                theme={oneDark}
+                extensions={[json()]}
+                height="200px"
+                basicSetup={{
+                  lineNumbers: true,
+                  foldGutter: true,
+                  bracketMatching: true,
+                }}
+              />
+            </div>
+            {!mcpJson && !readOnly && (
+              <p className="text-xs text-muted-foreground mt-2">
+                No .mcp.json found. Add connector definitions to suggest MCP servers for agents using this plugin.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
