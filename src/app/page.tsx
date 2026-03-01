@@ -72,7 +72,7 @@ function Hero() {
 
         {/* Subheading */}
         <p className="mx-auto mt-6 max-w-xl text-lg leading-relaxed text-[hsl(240,5%,55%)]">
-          Run Claude Agent SDK in isolated sandboxes. Skills, connectors, streaming, and ready for production.
+          Run Claude Agent SDK in isolated sandboxes. Skills, plugins, connectors, and ready for production.
           One POST request to launch an agent.
         </p>
 
