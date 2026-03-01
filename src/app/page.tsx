@@ -146,16 +146,16 @@ const features = [
       "Inject custom skills into agents. Extend agent capabilities without changing code. Use Claude Cowork plugins.",
   },
   {
-    icon: Layers,
-    title: "Multi-tenant",
-    description:
-      "Row-level security, per-tenant API keys, budget controls, and rate limiting. Built for platforms.",
-  },
-  {
     icon: Globe,
     title: "Connectors",
     description:
       "Connect agents to 900+ external tools via Composio or add your custom MCP servers.",
+  },
+  {
+    icon: Layers,
+    title: "Multi-tenant",
+    description:
+      "Row-level security, per-tenant API keys, budget controls, and rate limiting. Built for platforms.",
   },
   {
     icon: Clock,
