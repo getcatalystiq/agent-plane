@@ -1,17 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { AgentPlane } from "../../src/index";
-
-function createClient(mockFetch: ReturnType<typeof vi.fn>) {
-  return new AgentPlane({
-    apiKey: "ap_live_test1234567890abcdef12345678",
-    baseUrl: "http://localhost:3000",
-    fetch: mockFetch as unknown as typeof fetch,
-  });
-}
-
-function jsonOk(data: unknown) {
-  return { ok: true, status: 200, json: () => Promise.resolve(data) };
-}
+import { createClient, jsonOk, jsonError } from "../helpers";
 
 describe("PluginMarketplacesResource", () => {
   it("list returns marketplace array", async () => {
@@ -51,5 +39,25 @@ describe("PluginMarketplacesResource", () => {
     expect(result[0].hasSkills).toBe(true);
     const [url] = mockFetch.mock.calls[0];
     expect(url).toContain("/api/plugin-marketplaces/mp_1/plugins");
+  });
+
+  it("listPlugins encodes marketplaceId in URL", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce(jsonOk({ data: [] }));
+    const client = createClient(mockFetch);
+
+    await client.pluginMarketplaces.listPlugins("mp 1");
+
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/plugin-marketplaces/mp%201/plugins");
+  });
+
+  it("throws AgentPlaneError on server error", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce(
+      jsonError(500, { code: "internal_error", message: "Internal server error" }),
+    );
+    const client = createClient(mockFetch);
+
+    await expect(client.pluginMarketplaces.list())
+      .rejects.toThrow("Internal server error");
   });
 });

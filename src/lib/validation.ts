@@ -99,15 +99,27 @@ export const AgentPluginsSchema = z.array(AgentPluginSchema)
 // --- Granular Skills/Plugins CRUD Schemas ---
 
 export const CreateSkillSchema = AgentSkillSchema;
-export type CreateSkillInput = z.infer<typeof CreateSkillSchema>;
 
 export const UpdateSkillSchema = z.object({
   files: z.array(AgentSkillFileSchema).min(1),
 });
-export type UpdateSkillInput = z.infer<typeof UpdateSkillSchema>;
 
 export const AddPluginSchema = AgentPluginSchema;
-export type AddPluginInput = z.infer<typeof AddPluginSchema>;
+
+// --- Partial Row Schemas (for JSONB column reads in route handlers) ---
+
+export const AgentSkillsPartialRow = z.object({
+  skills: z.array(
+    z.object({
+      folder: z.string(),
+      files: z.array(z.object({ path: z.string(), content: z.string() })),
+    }),
+  ).default([]).catch([]),
+});
+
+export const AgentPluginsPartialRow = z.object({
+  plugins: z.array(AgentPluginSchema).default([]).catch([]),
+});
 
 // Plugin manifest (fetched from GitHub plugin.json)
 export const PluginManifestSchema = z.object({

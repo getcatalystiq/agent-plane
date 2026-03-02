@@ -1,17 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { AgentPlane } from "../../src/index";
-
-function createClient(mockFetch: ReturnType<typeof vi.fn>) {
-  return new AgentPlane({
-    apiKey: "ap_live_test1234567890abcdef12345678",
-    baseUrl: "http://localhost:3000",
-    fetch: mockFetch as unknown as typeof fetch,
-  });
-}
-
-function jsonOk(data: unknown) {
-  return { ok: true, status: 200, json: () => Promise.resolve(data) };
-}
+import { createClient, jsonOk, jsonError } from "../helpers";
 
 describe("ConnectorsResource", () => {
   describe("agent-scoped methods", () => {
@@ -94,6 +82,16 @@ describe("ConnectorsResource", () => {
       expect(url).toContain("/api/composio/tools");
       expect(url).toContain("toolkit=github");
     });
+  });
+
+  it("throws AgentPlaneError on not found", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce(
+      jsonError(404, { code: "not_found", message: "Agent not found" }),
+    );
+    const client = createClient(mockFetch);
+
+    await expect(client.agents.connectors.list("nonexistent"))
+      .rejects.toThrow("Agent not found");
   });
 
   it("client.agents.connectors and client.connectors share the same instance", () => {

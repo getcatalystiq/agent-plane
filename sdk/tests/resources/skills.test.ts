@@ -1,17 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { AgentPlane } from "../../src/index";
-
-function createClient(mockFetch: ReturnType<typeof vi.fn>) {
-  return new AgentPlane({
-    apiKey: "ap_live_test1234567890abcdef12345678",
-    baseUrl: "http://localhost:3000",
-    fetch: mockFetch as unknown as typeof fetch,
-  });
-}
-
-function jsonOk(data: unknown, status = 200) {
-  return { ok: true, status, json: () => Promise.resolve(data) };
-}
+import { createClient, jsonOk, jsonError } from "../helpers";
 
 describe("SkillsResource", () => {
   it("list returns skills array", async () => {
@@ -90,21 +78,9 @@ describe("SkillsResource", () => {
   });
 
   it("throws AgentPlaneError on non-ok response", async () => {
-    const mockFetch = vi.fn().mockResolvedValueOnce({
-      ok: false,
-      status: 409,
-      headers: new Headers({ "content-length": "100" }),
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(
-            new TextEncoder().encode(
-              JSON.stringify({ error: { code: "conflict", message: "Folder already exists" } }),
-            ),
-          );
-          controller.close();
-        },
-      }),
-    });
+    const mockFetch = vi.fn().mockResolvedValueOnce(
+      jsonError(409, { code: "conflict", message: "Folder already exists" }),
+    );
     const client = createClient(mockFetch);
 
     await expect(client.agents.skills.create("agent_1", { folder: "dup", files: [{ path: "x", content: "y" }] }))

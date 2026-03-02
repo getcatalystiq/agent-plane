@@ -319,6 +319,68 @@ export async function getOrCreateComposioMcpServer(
   }
 }
 
+// ─── Shared discovery helpers (used by both admin and tenant routes) ──────────
+
+export interface ComposioToolkitInfo {
+  slug: string;
+  name: string;
+  logo: string;
+}
+
+export interface ComposioToolInfo {
+  slug: string;
+  name: string;
+  description: string;
+}
+
+const MAX_TOOL_PAGES = 10;
+
+/** List available Composio toolkits. Shared between admin and tenant routes. */
+export async function listComposioToolkits(): Promise<ComposioToolkitInfo[]> {
+  const client = getClient();
+  if (!client) return [];
+
+  const response = await client.toolkits.list({
+    limit: 1000,
+    sort_by: "alphabetically",
+    include_deprecated: false,
+  });
+
+  return response.items.map((t) => ({
+    slug: t.slug,
+    name: t.name,
+    logo: t.meta.logo,
+  }));
+}
+
+/** List tools in a Composio toolkit. Capped at MAX_TOOL_PAGES pages. */
+export async function listComposioTools(toolkit: string): Promise<ComposioToolInfo[]> {
+  const client = getClient();
+  if (!client) return [];
+
+  const slugLower = toolkit.toLowerCase();
+  const allItems: ComposioToolInfo[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+
+  do {
+    const response = await client.tools.list({
+      toolkit_slug: slugLower,
+      limit: 200,
+      important: "false",
+      toolkit_versions: "latest",
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const t of response.items) {
+      allItems.push({ slug: t.slug, name: t.name, description: t.description ?? "" });
+    }
+    cursor = response.next_cursor ?? undefined;
+    if (++pages >= MAX_TOOL_PAGES) break;
+  } while (cursor);
+
+  return allItems;
+}
+
 // ─── Connector management (admin) ─────────────────────────────────────────────
 
 export type { AuthScheme };

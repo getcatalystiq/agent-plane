@@ -4,18 +4,9 @@ import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { queryOne, execute } from "@/db";
 import { NotFoundError, ConflictError, ValidationError } from "@/lib/errors";
-import { CreateSkillSchema, AgentSkillFileSchema } from "@/lib/validation";
+import { CreateSkillSchema, AgentSkillsPartialRow } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
-
-const AgentSkillsRow = z.object({
-  skills: z.array(
-    z.object({
-      folder: z.string(),
-      files: z.array(z.object({ path: z.string(), content: z.string() })),
-    }),
-  ).default([]).catch([]),
-});
 
 // GET /api/agents/:agentId/skills — list all skills
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
@@ -23,7 +14,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const { agentId } = await context!.params;
 
   const agent = await queryOne(
-    AgentSkillsRow.extend({ id: z.string(), tenant_id: z.string() }),
+    AgentSkillsPartialRow.extend({ id: z.string(), tenant_id: z.string() }),
     "SELECT id, tenant_id, skills FROM agents WHERE id = $1 AND tenant_id = $2",
     [agentId, auth.tenantId],
   );
@@ -42,7 +33,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
 
   // Load current skills for validation
   const agent = await queryOne(
-    AgentSkillsRow.extend({ id: z.string(), tenant_id: z.string() }),
+    AgentSkillsPartialRow.extend({ id: z.string(), tenant_id: z.string() }),
     "SELECT id, tenant_id, skills FROM agents WHERE id = $1 AND tenant_id = $2",
     [agentId, auth.tenantId],
   );
@@ -63,11 +54,12 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     throw new ValidationError("Total skills content must be under 5MB");
   }
 
-  // Atomic append — fails if folder already exists (rowCount = 0)
+  // Atomic append — fails if folder already exists or count limit reached (rowCount = 0)
   const result = await execute(
     `UPDATE agents
      SET skills = skills || $1::jsonb, updated_at = NOW()
      WHERE id = $2 AND tenant_id = $3
+       AND jsonb_array_length(skills) < 50
        AND NOT EXISTS (
          SELECT 1 FROM jsonb_array_elements(skills) s WHERE s->>'folder' = $4
        )`,

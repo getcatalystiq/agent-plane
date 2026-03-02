@@ -1,17 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { AgentPlane } from "../../src/index";
-
-function createClient(mockFetch: ReturnType<typeof vi.fn>) {
-  return new AgentPlane({
-    apiKey: "ap_live_test1234567890abcdef12345678",
-    baseUrl: "http://localhost:3000",
-    fetch: mockFetch as unknown as typeof fetch,
-  });
-}
-
-function jsonOk(data: unknown) {
-  return { ok: true, status: 200, json: () => Promise.resolve(data) };
-}
+import { createClient, jsonOk, jsonError } from "../helpers";
 
 describe("PluginsResource", () => {
   it("list returns plugins array", async () => {
@@ -49,5 +37,15 @@ describe("PluginsResource", () => {
     const [url, init] = mockFetch.mock.calls[0];
     expect(url).toContain("/api/agents/agent_1/plugins/mp_1/my-plugin");
     expect(init.method).toBe("DELETE");
+  });
+
+  it("throws AgentPlaneError on conflict", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce(
+      jsonError(409, { code: "conflict", message: "Plugin already added" }),
+    );
+    const client = createClient(mockFetch);
+
+    await expect(client.agents.plugins.add("agent_1", { marketplace_id: "mp_1", plugin_name: "dup" }))
+      .rejects.toThrow("Plugin already added");
   });
 });

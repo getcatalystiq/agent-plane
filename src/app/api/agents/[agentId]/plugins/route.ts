@@ -4,13 +4,9 @@ import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { queryOne, execute } from "@/db";
 import { NotFoundError, ConflictError, ValidationError } from "@/lib/errors";
-import { AddPluginSchema, AgentPluginSchema } from "@/lib/validation";
+import { AddPluginSchema, AgentPluginsPartialRow } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
-
-const AgentPluginsRow = z.object({
-  plugins: z.array(AgentPluginSchema).default([]).catch([]),
-});
 
 // GET /api/agents/:agentId/plugins — list all plugins
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
@@ -18,7 +14,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const { agentId } = await context!.params;
 
   const agent = await queryOne(
-    AgentPluginsRow.extend({ id: z.string(), tenant_id: z.string() }),
+    AgentPluginsPartialRow.extend({ id: z.string(), tenant_id: z.string() }),
     "SELECT id, tenant_id, plugins FROM agents WHERE id = $1 AND tenant_id = $2",
     [agentId, auth.tenantId],
   );
@@ -45,15 +41,15 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     throw new ValidationError(`Plugin marketplace "${plugin.marketplace_id}" not found`);
   }
 
-  // Load current plugins for validation
+  // Load current plugins for early validation (better error messages)
   const agent = await queryOne(
-    AgentPluginsRow.extend({ id: z.string(), tenant_id: z.string() }),
+    AgentPluginsPartialRow.extend({ id: z.string(), tenant_id: z.string() }),
     "SELECT id, tenant_id, plugins FROM agents WHERE id = $1 AND tenant_id = $2",
     [agentId, auth.tenantId],
   );
   if (!agent) throw new NotFoundError("Agent not found");
 
-  // Check duplicate
+  // Check duplicate (early exit with descriptive error)
   const key = `${plugin.marketplace_id}:${plugin.plugin_name}`;
   const exists = agent.plugins.some(
     (p) => `${p.marketplace_id}:${p.plugin_name}` === key,
@@ -66,17 +62,21 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     throw new ValidationError("Maximum 20 plugins per agent");
   }
 
-  // Atomic append with max-length guard
+  // Atomic append with max-length + uniqueness guard
   const result = await execute(
     `UPDATE agents
      SET plugins = plugins || $1::jsonb, updated_at = NOW()
      WHERE id = $2 AND tenant_id = $3
-       AND jsonb_array_length(plugins) < 20`,
-    [JSON.stringify(plugin), agentId, auth.tenantId],
+       AND jsonb_array_length(plugins) < 20
+       AND NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements(plugins) p
+         WHERE p->>'marketplace_id' = $4 AND p->>'plugin_name' = $5
+       )`,
+    [JSON.stringify(plugin), agentId, auth.tenantId, plugin.marketplace_id, plugin.plugin_name],
   );
 
   if (result.rowCount === 0) {
-    throw new ValidationError("Maximum 20 plugins per agent");
+    throw new ConflictError("Plugin already exists or maximum 20 plugins per agent");
   }
 
   return jsonResponse(plugin, 201);

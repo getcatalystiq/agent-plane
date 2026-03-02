@@ -146,6 +146,10 @@ export interface SaveConnectorApiKeyParams {
   api_key: string;
 }
 
+/**
+ * Composio OAuth result. Uses `redirect_url` (snake_case) to match the
+ * Composio connector API wire format.
+ */
 export interface ConnectorOauthResult {
   redirect_url: string;
 }
@@ -198,9 +202,14 @@ export interface CustomConnectorConnection {
 export interface CustomConnectorTool {
   name: string;
   description?: string;
-  inputSchema?: unknown;
+  inputSchema?: Record<string, unknown>;
 }
 
+/**
+ * MCP custom connector OAuth result. Uses `redirectUrl` (camelCase) to match
+ * the MCP connection API wire format. Note: differs from ConnectorOauthResult
+ * which uses snake_case — this reflects different upstream API conventions.
+ */
 export interface CustomConnectorOauthResult {
   redirectUrl: string;
 }

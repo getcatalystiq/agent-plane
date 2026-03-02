@@ -4,18 +4,9 @@ import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { queryOne, execute } from "@/db";
 import { NotFoundError, ValidationError } from "@/lib/errors";
-import { SafeFolderName, UpdateSkillSchema } from "@/lib/validation";
+import { SafeFolderName, UpdateSkillSchema, AgentSkillsPartialRow } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
-
-const AgentSkillsRow = z.object({
-  skills: z.array(
-    z.object({
-      folder: z.string(),
-      files: z.array(z.object({ path: z.string(), content: z.string() })),
-    }),
-  ).default([]).catch([]),
-});
 
 // GET /api/agents/:agentId/skills/:folder — get a single skill
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
@@ -24,7 +15,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   SafeFolderName.parse(folder);
 
   const agent = await queryOne(
-    AgentSkillsRow.extend({ id: z.string(), tenant_id: z.string() }),
+    AgentSkillsPartialRow.extend({ id: z.string(), tenant_id: z.string() }),
     "SELECT id, tenant_id, skills FROM agents WHERE id = $1 AND tenant_id = $2",
     [agentId, auth.tenantId],
   );
@@ -47,7 +38,7 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
 
   // Load current skills to validate size after replacement
   const agent = await queryOne(
-    AgentSkillsRow.extend({ id: z.string(), tenant_id: z.string() }),
+    AgentSkillsPartialRow.extend({ id: z.string(), tenant_id: z.string() }),
     "SELECT id, tenant_id, skills FROM agents WHERE id = $1 AND tenant_id = $2",
     [agentId, auth.tenantId],
   );
