@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // --- Skills Validation ---
 
-const SafeFolderName = z
+export const SafeFolderName = z
   .string()
   .min(1)
   .max(255)
@@ -16,7 +16,7 @@ const SafeRelativePath = z
     message: "Path must be relative, no '..' segments, no null bytes",
   });
 
-const AgentSkillFileSchema = z.object({
+export const AgentSkillFileSchema = z.object({
   path: SafeRelativePath,
   content: z.string().max(100_000),
 });
@@ -29,6 +29,13 @@ const AgentSkillSchema = z.object({
 const SkillsSchema = z
   .array(AgentSkillSchema)
   .max(50, "Maximum 50 skills per agent")
+  .refine(
+    (skills) => {
+      const folders = skills.map((s) => s.folder);
+      return new Set(folders).size === folders.length;
+    },
+    { message: "Skill folder names must be unique" },
+  )
   .refine(
     (skills) => {
       const totalSize = skills.reduce(
@@ -59,6 +66,16 @@ export const PluginMarketplaceRow = z.object({
 
 export type PluginMarketplace = z.infer<typeof PluginMarketplaceRow>;
 
+export const PluginMarketplacePublicRow = z.object({
+  id: z.string(),
+  name: z.string(),
+  github_repo: z.string(),
+  created_at: z.coerce.date(),
+  updated_at: z.coerce.date(),
+});
+
+export type PluginMarketplacePublic = z.infer<typeof PluginMarketplacePublicRow>;
+
 export const UpdateMarketplaceSchema = z.object({
   github_token: z.string().min(1).nullable(),
 }).partial();
@@ -78,6 +95,19 @@ export const AgentPluginsSchema = z.array(AgentPluginSchema)
     },
     { message: "Duplicate plugin entries are not allowed" },
   );
+
+// --- Granular Skills/Plugins CRUD Schemas ---
+
+export const CreateSkillSchema = AgentSkillSchema;
+export type CreateSkillInput = z.infer<typeof CreateSkillSchema>;
+
+export const UpdateSkillSchema = z.object({
+  files: z.array(AgentSkillFileSchema).min(1),
+});
+export type UpdateSkillInput = z.infer<typeof UpdateSkillSchema>;
+
+export const AddPluginSchema = AgentPluginSchema;
+export type AddPluginInput = z.infer<typeof AddPluginSchema>;
 
 // Plugin manifest (fetched from GitHub plugin.json)
 export const PluginManifestSchema = z.object({

@@ -6,9 +6,27 @@ import type {
   PaginationParams,
   PaginatedResponse,
 } from "../types";
+import { SkillsResource } from "./skills";
+import { PluginsResource } from "./plugins";
+import type { ConnectorsResource } from "./connectors";
+import type { CustomConnectorsResource } from "./custom-connectors";
 
 export class AgentsResource {
-  constructor(private readonly _client: AgentPlane) {}
+  readonly skills: SkillsResource;
+  readonly plugins: PluginsResource;
+  readonly connectors: ConnectorsResource;
+  readonly customConnectors: CustomConnectorsResource;
+
+  constructor(
+    private readonly _client: AgentPlane,
+    connectors: ConnectorsResource,
+    customConnectors: CustomConnectorsResource,
+  ) {
+    this.skills = new SkillsResource(_client);
+    this.plugins = new PluginsResource(_client);
+    this.connectors = connectors;
+    this.customConnectors = customConnectors;
+  }
 
   /** Create a new agent. */
   async create(params: CreateAgentParams): Promise<Agent> {

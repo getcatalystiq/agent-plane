@@ -131,6 +131,101 @@ export interface PaginatedResponse<T> {
   has_more: boolean;
 }
 
+// --- Connectors (Composio) ---
+
+export interface ConnectorInfo {
+  slug: string;
+  name: string;
+  logo: string;
+  auth_scheme: string;
+  connected: boolean;
+}
+
+export interface SaveConnectorApiKeyParams {
+  toolkit: string;
+  api_key: string;
+}
+
+export interface ConnectorOauthResult {
+  redirect_url: string;
+}
+
+export interface ComposioToolkit {
+  slug: string;
+  name: string;
+  logo: string;
+}
+
+export interface ComposioTool {
+  slug: string;
+  name: string;
+  description: string;
+}
+
+// --- Custom Connectors (MCP) ---
+
+export interface CustomConnectorServer {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  logo_url: string | null;
+  base_url: string;
+  mcp_endpoint_path: string;
+  client_id: string | null;
+  oauth_metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomConnectorConnection {
+  id: string;
+  tenant_id: string;
+  agent_id: string;
+  mcp_server_id: string;
+  status: "initiated" | "active" | "expired" | "failed";
+  granted_scopes: string[];
+  allowed_tools: string[];
+  token_expires_at: string | null;
+  server_name: string;
+  server_slug: string;
+  server_logo_url: string | null;
+  server_base_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomConnectorTool {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
+export interface CustomConnectorOauthResult {
+  redirectUrl: string;
+}
+
+// --- Plugin Marketplaces ---
+
+export interface PluginMarketplace {
+  id: string;
+  name: string;
+  github_repo: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PluginListItem {
+  name: string;
+  displayName: string;
+  description: string | null;
+  version: string | null;
+  author: string | null;
+  hasSkills: boolean;
+  hasCommands: boolean;
+  hasMcpJson: boolean;
+}
+
 // --- Stream Events ---
 
 export interface RunStartedEvent {

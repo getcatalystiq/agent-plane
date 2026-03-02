@@ -17,6 +17,21 @@ export type {
   ListRunsParams,
   PaginationParams,
   PaginatedResponse,
+  // Connectors (Composio)
+  ConnectorInfo,
+  SaveConnectorApiKeyParams,
+  ConnectorOauthResult,
+  ComposioToolkit,
+  ComposioTool,
+  // Custom Connectors (MCP)
+  CustomConnectorServer,
+  CustomConnectorConnection,
+  CustomConnectorTool,
+  CustomConnectorOauthResult,
+  // Plugin Marketplaces
+  PluginMarketplace,
+  PluginListItem,
+  // Stream Events
   StreamEvent,
   RunStartedEvent,
   TextDeltaEvent,

@@ -2,13 +2,19 @@ import type { AgentPlaneOptions } from "./types";
 import { AgentPlaneError } from "./errors";
 import { RunsResource } from "./resources/runs";
 import { AgentsResource } from "./resources/agents";
+import { ConnectorsResource } from "./resources/connectors";
+import { CustomConnectorsResource } from "./resources/custom-connectors";
+import { PluginMarketplacesResource } from "./resources/plugin-marketplaces";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const MAX_ERROR_BODY_BYTES = 64 * 1024; // 64KB
 
 export class AgentPlane {
   readonly runs: RunsResource;
   readonly agents: AgentsResource;
+  readonly connectors: ConnectorsResource;
+  readonly customConnectors: CustomConnectorsResource;
+  readonly pluginMarketplaces: PluginMarketplacesResource;
 
   private readonly _getAuthHeader: () => string;
   private readonly _baseUrl: string;
@@ -66,8 +72,13 @@ export class AgentPlane {
     this._fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
 
     // Initialize resource namespaces
+    const connectors = new ConnectorsResource(this);
+    const customConnectors = new CustomConnectorsResource(this);
+    this.connectors = connectors;
+    this.customConnectors = customConnectors;
+    this.pluginMarketplaces = new PluginMarketplacesResource(this);
     this.runs = new RunsResource(this);
-    this.agents = new AgentsResource(this);
+    this.agents = new AgentsResource(this, connectors, customConnectors);
   }
 
   /** @internal Make a JSON API request. */
