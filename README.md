@@ -243,8 +243,25 @@ API keys are hashed with SHA-256 and optionally encrypted at rest with AES-256-G
 
 The app is deployed on Vercel.
 
-1. Set all required environment variables in the Vercel project settings.
-2. Push to `main` to trigger a production deploy.
+### Vercel Project Setup
+
+1. **Create a Vercel project** and link it to this repository.
+
+2. **Add Neon Postgres** — go to **Storage** in your Vercel project, create a new **Neon Postgres** database, and connect it to the project. This automatically sets `DATABASE_URL` and `DATABASE_URL_UNPOOLED` in your environment variables.
+
+3. **Add Vercel Blob** — go to **Storage**, create a new **Blob** store, and connect it to the project. This automatically sets `BLOB_READ_WRITE_TOKEN`.
+
+4. **Create an AI Gateway API key** — go to **AI** > **AI Gateway** in the Vercel dashboard, create a gateway, and copy the API key. Manually add it as `AI_GATEWAY_API_KEY` in the project's environment variables.
+
+5. **Generate and set the following environment variables** manually in the Vercel project settings:
+
+   | Variable | How to generate |
+   |---|---|
+   | `ADMIN_API_KEY` | Any strong secret string for admin route authentication |
+   | `ENCRYPTION_KEY` | `openssl rand -hex 32` (64 hex chars, used for AES-256-GCM encryption) |
+   | `CRON_SECRET` | Any strong secret string for Vercel Cron job authentication |
+
+6. Push to `main` to trigger a production deploy.
 
 **Migrations run automatically on every deploy.** The `buildCommand` in `vercel.json` runs `npm run migrate && next build`, so any pending migrations are applied before the new code goes live. If a migration fails, the deploy is aborted and the previous version stays running.
 
