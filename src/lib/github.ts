@@ -31,7 +31,9 @@ function buildHeaders(token?: string): Record<string, string> {
     "User-Agent": "AgentPlane",
   };
   if (token) {
-    headers.Authorization = `Bearer ${token}`;
+    // Classic PATs (ghp_) use "token" scheme; fine-grained (github_pat_) use "Bearer"
+    const scheme = token.startsWith("ghp_") ? "token" : "Bearer";
+    headers.Authorization = `${scheme} ${token}`;
   }
   return headers;
 }
@@ -55,6 +57,16 @@ export async function fetchRepoTree(
   }
 
   if (response.status === 404) {
+    // Could be a truly missing repo OR an empty repo (no commits → HEAD doesn't exist).
+    // Check the repo endpoint to distinguish.
+    const repoUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    try {
+      const repoResponse = await fetch(repoUrl, { headers: buildHeaders(token) });
+      if (repoResponse.ok) {
+        // Repo exists but is empty — return empty tree
+        return { ok: true, data: [] };
+      }
+    } catch { /* fall through to not_found */ }
     return { ok: false, error: "not_found", message: `Repository not found: ${owner}/${repo}` };
   }
   if (response.status === 403 || response.status === 429) {
