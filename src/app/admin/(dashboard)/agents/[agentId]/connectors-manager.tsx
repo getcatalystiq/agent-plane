@@ -308,14 +308,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
       <div>
         {showAdd && (
           <div className="mb-4 space-y-3">
-            <div className="flex items-start gap-2">
-              <div className="flex-1">
-                <ToolkitMultiselect value={pendingToolkits} onChange={setPendingToolkits} />
-              </div>
-              <Button size="sm" onClick={handleApplyAdd} disabled={applyingToolkits}>
-                {applyingToolkits ? "Saving..." : "Apply"}
-              </Button>
-            </div>
+            <ToolkitMultiselect value={pendingToolkits} onChange={setPendingToolkits} />
 
             {availableMcpServers.length > 0 && (
               <div className="grid grid-cols-4 gap-2">
@@ -346,8 +339,11 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
               </div>
             )}
 
-            <div className="flex justify-end">
-              <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Close</Button>
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancel</Button>
+              <Button size="sm" onClick={handleApplyAdd} disabled={applyingToolkits}>
+                {applyingToolkits ? "Saving..." : "Apply"}
+              </Button>
             </div>
           </div>
         )}

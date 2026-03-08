@@ -52,6 +52,8 @@ export function ToolkitMultiselect({ value, onChange }: Props) {
 
   function toggle(slug: string) {
     onChange(value.includes(slug) ? value.filter((s) => s !== slug) : [...value, slug]);
+    setSearch("");
+    searchRef.current?.focus();
   }
 
   function remove(slug: string) {
@@ -64,47 +66,51 @@ export function ToolkitMultiselect({ value, onChange }: Props) {
 
   return (
     <div ref={containerRef} className="relative">
-      {/* Selected badges + trigger */}
       <div
-        className="min-h-9 flex flex-wrap gap-1.5 rounded-md border border-input bg-transparent px-3 py-1.5 cursor-text"
-        onClick={() => setOpen(true)}
+        className="rounded-md border border-input bg-transparent cursor-text"
+        onClick={() => { setOpen(true); searchRef.current?.focus(); }}
       >
-        {selectedToolkits.map((t) => (
-          <span
-            key={t.slug}
-            className="inline-flex items-center gap-1 rounded-md bg-secondary text-secondary-foreground text-xs px-2 py-0.5"
-          >
-            {t.logo && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={t.logo} alt="" className="w-3.5 h-3.5 rounded-sm object-contain" />
-            )}
-            {t.name}
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); remove(t.slug); }}
-              className="text-muted-foreground hover:text-foreground ml-0.5"
-            >
-              ×
-            </button>
-          </span>
-        ))}
-        <span className="text-sm text-muted-foreground self-center">
-          {value.length === 0 ? "Select toolkits..." : ""}
-        </span>
+        {/* Selected badges */}
+        {selectedToolkits.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-1">
+            {selectedToolkits.map((t) => (
+              <span
+                key={t.slug}
+                className="inline-flex items-center gap-1 rounded-md bg-secondary text-secondary-foreground text-xs px-2 py-0.5"
+              >
+                {t.logo && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={t.logo} alt="" className="w-3.5 h-3.5 rounded-sm object-contain" />
+                )}
+                {t.name}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); remove(t.slug); }}
+                  className="text-muted-foreground hover:text-foreground ml-0.5"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Search input */}
+        <div className="px-3 py-2">
+          <input
+            ref={searchRef}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onFocus={() => setOpen(true)}
+            placeholder="Search toolkits..."
+            className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          />
+        </div>
       </div>
 
       {/* Dropdown */}
       {open && (
         <div className="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover shadow-md">
-          <div className="p-2 border-b border-border">
-            <input
-              ref={searchRef}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search toolkits..."
-              className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-            />
-          </div>
           <div className="max-h-64 overflow-y-auto">
             {loading && (
               <p className="text-sm text-muted-foreground p-3">Loading...</p>
