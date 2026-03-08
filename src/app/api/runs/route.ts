@@ -50,18 +50,26 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       maxRuntimeSeconds: agent.max_runtime_seconds,
     });
 
+    // Track whether the stream detached (long-running run)
+    let detached = false;
+
     // Create pull-based NDJSON stream
     const stream = createNdjsonStream({
       runId,
       logIterator,
       onDetach: () => {
+        detached = true;
         logger.info("Stream detached for long-running run", { run_id: runId });
       },
     });
 
-    // Use after() to persist transcript after response closes
+    // Use after() to persist transcript after response closes.
+    // If the stream detached, the sandbox is still running and will
+    // self-finalize via /api/internal/runs/:id/transcript when done.
     after(async () => {
-      await finalizeRun(runId, auth.tenantId, transcriptChunks, sandbox, effectiveBudget);
+      if (!detached) {
+        await finalizeRun(runId, auth.tenantId, transcriptChunks, sandbox, effectiveBudget);
+      }
     });
 
     return new Response(stream, {
