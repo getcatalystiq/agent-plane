@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 
@@ -62,57 +62,64 @@ export function AddTenantForm() {
       <Button size="sm" onClick={() => setOpen(true)}>Add Tenant</Button>
       <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); else setOpen(true); }}>
         <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{apiKey ? "Tenant Created" : "Add Tenant"}</DialogTitle>
-          </DialogHeader>
           {apiKey ? (
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Save this API key now — it cannot be shown again.
-              </p>
-              <code className="block p-3 bg-muted rounded text-xs break-all font-mono select-all">
-                {apiKey}
-              </code>
-              <div className="flex justify-end pt-2">
+            <>
+              <DialogHeader>
+                <DialogTitle>Tenant Created</DialogTitle>
+              </DialogHeader>
+              <DialogBody className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Save this API key now — it cannot be shown again.
+                </p>
+                <code className="block p-3 bg-muted rounded-lg text-xs break-all font-mono select-all">
+                  {apiKey}
+                </code>
+              </DialogBody>
+              <DialogFooter>
                 <Button size="sm" onClick={handleClose}>Done</Button>
-              </div>
-            </div>
+              </DialogFooter>
+            </>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-3">
-              <FormField label="Name">
-                <Input
-                  value={form.name}
-                  onChange={(e) => handleNameChange(e.target.value)}
-                  placeholder="Acme Corp"
-                  required
-                />
-              </FormField>
-              <FormField label="Slug" hint="Lowercase alphanumeric with hyphens">
-                <Input
-                  value={form.slug}
-                  onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
-                  placeholder="acme-corp"
-                  pattern="^[a-z0-9-]+$"
-                  required
-                />
-              </FormField>
-              <FormField label="Monthly Budget (USD)">
-                <Input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={form.monthly_budget_usd}
-                  onChange={(e) => setForm((f) => ({ ...f, monthly_budget_usd: e.target.value }))}
-                  required
-                />
-              </FormField>
-              <FormError error={error} />
-              <div className="flex justify-end gap-2 pt-2">
-                <Button type="button" variant="ghost" size="sm" onClick={handleClose}>Cancel</Button>
+            <form onSubmit={handleSubmit}>
+              <DialogHeader>
+                <DialogTitle>Add Tenant</DialogTitle>
+              </DialogHeader>
+              <DialogBody className="space-y-3">
+                <FormField label="Name">
+                  <Input
+                    value={form.name}
+                    onChange={(e) => handleNameChange(e.target.value)}
+                    placeholder="Acme Corp"
+                    required
+                  />
+                </FormField>
+                <FormField label="Slug" hint="Lowercase alphanumeric with hyphens">
+                  <Input
+                    value={form.slug}
+                    onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
+                    placeholder="acme-corp"
+                    pattern="^[a-z0-9-]+$"
+                    required
+                  />
+                </FormField>
+                <FormField label="Monthly Budget (USD)">
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={form.monthly_budget_usd}
+                    onChange={(e) => setForm((f) => ({ ...f, monthly_budget_usd: e.target.value }))}
+                    required
+                  />
+                </FormField>
+                <FormError error={error} />
+              </DialogBody>
+              <DialogFooter>
+                <Button type="button" variant="outline" size="sm" onClick={handleClose}>Cancel</Button>
                 <Button type="submit" size="sm" disabled={saving}>
                   {saving ? "Creating..." : "Create"}
                 </Button>
-              </div>
+              </DialogFooter>
             </form>
           )}
         </DialogContent>

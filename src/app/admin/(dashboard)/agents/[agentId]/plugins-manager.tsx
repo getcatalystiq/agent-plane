@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { SectionHeader } from "@/components/ui/section-header";
 
 interface AgentPlugin {
@@ -177,77 +177,77 @@ export function PluginsManager({
               <DialogTitle>Add Plugins</DialogTitle>
             </DialogHeader>
 
-            {marketplaces.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No plugin marketplaces registered. Add one from the Plugin Marketplaces page first.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-3 overflow-hidden">
-                {/* Marketplace selector */}
-                <div className="flex gap-2 flex-wrap">
-                  {marketplaces.map((m) => (
-                    <Button
-                      key={m.id}
-                      size="sm"
-                      variant={selectedMarketplace === m.id ? "default" : "outline"}
-                      onClick={() => loadPluginsForMarketplace(m.id)}
-                    >
-                      {m.name}
-                    </Button>
-                  ))}
-                </div>
-
-                {/* Plugin list */}
-                {selectedMarketplace && (
-                  <div className="overflow-y-auto border border-border rounded-md divide-y divide-border">
-                    {loadingPlugins ? (
-                      <p className="p-4 text-sm text-muted-foreground text-center">Loading plugins...</p>
-                    ) : availablePlugins.length === 0 ? (
-                      <p className="p-4 text-sm text-muted-foreground text-center">No plugins found in this marketplace.</p>
-                    ) : (
-                      availablePlugins.map((ap) => {
-                        const enabled = isPluginEnabled(selectedMarketplace, ap.name);
-                        return (
-                          <div
-                            key={ap.name}
-                            className="flex items-center justify-between px-3 py-2 hover:bg-muted/30 cursor-pointer"
-                            onClick={() => togglePlugin(selectedMarketplace, ap.name)}
-                          >
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium">{ap.displayName}</span>
-                                {ap.version && (
-                                  <span className="text-xs text-muted-foreground">v{ap.version}</span>
-                                )}
-                              </div>
-                              {ap.description && (
-                                <p className="text-xs text-muted-foreground truncate">{ap.description}</p>
-                              )}
-                              <div className="flex gap-1 mt-1">
-                                {ap.hasSkills && <Badge variant="secondary" className="text-[10px] px-1 py-0">Skills</Badge>}
-                                {ap.hasCommands && <Badge variant="secondary" className="text-[10px] px-1 py-0">Commands</Badge>}
-                                {ap.hasMcpJson && <Badge variant="secondary" className="text-[10px] px-1 py-0">MCP</Badge>}
-                              </div>
-                            </div>
-                            <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
-                              enabled
-                                ? "bg-primary border-primary text-primary-foreground"
-                                : "border-muted-foreground"
-                            }`}>
-                              {enabled && <span className="text-xs">&#10003;</span>}
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
+            <DialogBody className="flex-1 overflow-hidden flex flex-col gap-3">
+              {marketplaces.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No plugin marketplaces registered. Add one from the Plugin Marketplaces page first.
+                </p>
+              ) : (
+                <>
+                  <div className="flex gap-2 flex-wrap">
+                    {marketplaces.map((m) => (
+                      <Button
+                        key={m.id}
+                        size="sm"
+                        variant={selectedMarketplace === m.id ? "default" : "outline"}
+                        onClick={() => loadPluginsForMarketplace(m.id)}
+                      >
+                        {m.name}
+                      </Button>
+                    ))}
                   </div>
-                )}
-              </div>
-            )}
 
-            <div className="flex justify-end pt-2">
+                  {selectedMarketplace && (
+                    <div className="overflow-y-auto border border-border rounded-lg divide-y divide-border">
+                      {loadingPlugins ? (
+                        <p className="p-4 text-sm text-muted-foreground text-center">Loading plugins...</p>
+                      ) : availablePlugins.length === 0 ? (
+                        <p className="p-4 text-sm text-muted-foreground text-center">No plugins found in this marketplace.</p>
+                      ) : (
+                        availablePlugins.map((ap) => {
+                          const enabled = isPluginEnabled(selectedMarketplace, ap.name);
+                          return (
+                            <div
+                              key={ap.name}
+                              className="flex items-center justify-between px-3 py-2.5 hover:bg-muted/30 cursor-pointer transition-colors"
+                              onClick={() => togglePlugin(selectedMarketplace, ap.name)}
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-medium">{ap.displayName}</span>
+                                  {ap.version && (
+                                    <span className="text-xs text-muted-foreground">v{ap.version}</span>
+                                  )}
+                                </div>
+                                {ap.description && (
+                                  <p className="text-xs text-muted-foreground truncate">{ap.description}</p>
+                                )}
+                                <div className="flex gap-1 mt-1">
+                                  {ap.hasSkills && <Badge variant="secondary" className="text-[10px] px-1 py-0">Skills</Badge>}
+                                  {ap.hasCommands && <Badge variant="secondary" className="text-[10px] px-1 py-0">Commands</Badge>}
+                                  {ap.hasMcpJson && <Badge variant="secondary" className="text-[10px] px-1 py-0">MCP</Badge>}
+                                </div>
+                              </div>
+                              <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                                enabled
+                                  ? "bg-primary border-primary text-primary-foreground"
+                                  : "border-muted-foreground"
+                              }`}>
+                                {enabled && <span className="text-xs">&#10003;</span>}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </DialogBody>
+
+            <DialogFooter>
               <Button size="sm" onClick={() => setDialogOpen(false)}>Done</Button>
-            </div>
+            </DialogFooter>
           </DialogContent>
         </Dialog>
       </div>

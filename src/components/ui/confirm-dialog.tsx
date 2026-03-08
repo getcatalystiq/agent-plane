@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -13,6 +13,7 @@ interface ConfirmDialogProps {
   loading?: boolean;
   error?: string;
   onConfirm: () => void;
+  variant?: "destructive" | "default";
 }
 
 export function ConfirmDialog({
@@ -25,6 +26,7 @@ export function ConfirmDialog({
   loading = false,
   error,
   onConfirm,
+  variant = "destructive",
 }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -32,14 +34,16 @@ export function ConfirmDialog({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
-        <div className="text-sm text-muted-foreground">{children}</div>
-        {error && <p className="text-xs text-destructive">{error}</p>}
-        <div className="flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>Cancel</Button>
-          <Button size="sm" variant="destructive" onClick={onConfirm} disabled={loading}>
+        <DialogBody>
+          <div className="text-sm text-muted-foreground">{children}</div>
+          {error && <p className="text-xs text-destructive mt-3">{error}</p>}
+        </DialogBody>
+        <DialogFooter>
+          <Button size="sm" variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>Cancel</Button>
+          <Button size="sm" variant={variant} onClick={onConfirm} disabled={loading}>
             {loading ? loadingLabel : confirmLabel}
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

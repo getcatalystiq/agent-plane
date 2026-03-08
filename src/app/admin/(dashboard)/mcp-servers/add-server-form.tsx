@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 
@@ -24,7 +24,6 @@ export function AddMcpServerForm() {
 
   function updateField(field: string, value: string) {
     setForm((f) => ({ ...f, [field]: value }));
-    // Auto-generate slug from name if slug hasn't been manually edited
     if (field === "name") {
       const autoSlug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       setForm((f) => ({ ...f, name: value, slug: autoSlug }));
@@ -53,7 +52,6 @@ export function AddMcpServerForm() {
         setError(data?.error?.message ?? `Error ${res.status}`);
         return;
       }
-      // Wait for response body before refreshing to ensure DB write is committed
       await res.json();
       setOpen(false);
       setForm({ name: "", slug: "", description: "", base_url: "", mcp_endpoint_path: "/mcp", logo_url: "" });
@@ -70,62 +68,64 @@ export function AddMcpServerForm() {
       <Button size="sm" onClick={() => setOpen(true)}>Register Connector</Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Register Custom Connector</DialogTitle>
-          </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <FormField label="Name">
-              <Input
-                value={form.name}
-                onChange={(e) => updateField("name", e.target.value)}
-                placeholder="My Custom Connector"
-                required
-              />
-            </FormField>
-            <FormField label="Slug">
-              <Input
-                value={form.slug}
-                onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
-                placeholder="my-mcp-server"
-                required
-              />
-            </FormField>
-            <FormField label="Description">
-              <Input
-                value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                placeholder="What this server does"
-              />
-            </FormField>
-            <FormField label="Base URL">
-              <Input
-                value={form.base_url}
-                onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))}
-                placeholder="https://mcp.example.com"
-                required
-              />
-            </FormField>
-            <FormField label="MCP Endpoint Path">
-              <Input
-                value={form.mcp_endpoint_path}
-                onChange={(e) => setForm((f) => ({ ...f, mcp_endpoint_path: e.target.value }))}
-                placeholder="/mcp"
-              />
-            </FormField>
-            <FormField label="Logo URL (optional)">
-              <Input
-                value={form.logo_url}
-                onChange={(e) => setForm((f) => ({ ...f, logo_url: e.target.value }))}
-                placeholder="https://..."
-              />
-            </FormField>
-            <FormError error={error} />
-            <div className="flex justify-end gap-2 pt-2">
-              <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>Cancel</Button>
+          <form onSubmit={handleSubmit}>
+            <DialogHeader>
+              <DialogTitle>Register Custom Connector</DialogTitle>
+            </DialogHeader>
+            <DialogBody className="space-y-3">
+              <FormField label="Name">
+                <Input
+                  value={form.name}
+                  onChange={(e) => updateField("name", e.target.value)}
+                  placeholder="My Custom Connector"
+                  required
+                />
+              </FormField>
+              <FormField label="Slug">
+                <Input
+                  value={form.slug}
+                  onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
+                  placeholder="my-mcp-server"
+                  required
+                />
+              </FormField>
+              <FormField label="Description">
+                <Input
+                  value={form.description}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  placeholder="What this server does"
+                />
+              </FormField>
+              <FormField label="Base URL">
+                <Input
+                  value={form.base_url}
+                  onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))}
+                  placeholder="https://mcp.example.com"
+                  required
+                />
+              </FormField>
+              <FormField label="MCP Endpoint Path">
+                <Input
+                  value={form.mcp_endpoint_path}
+                  onChange={(e) => setForm((f) => ({ ...f, mcp_endpoint_path: e.target.value }))}
+                  placeholder="/mcp"
+                />
+              </FormField>
+              <FormField label="Logo URL (optional)">
+                <Input
+                  value={form.logo_url}
+                  onChange={(e) => setForm((f) => ({ ...f, logo_url: e.target.value }))}
+                  placeholder="https://..."
+                />
+              </FormField>
+              <FormError error={error} />
+            </DialogBody>
+            <DialogFooter>
+              <Button type="button" variant="outline" size="sm" onClick={() => setOpen(false)}>Cancel</Button>
               <Button type="submit" size="sm" disabled={saving}>
                 {saving ? "Registering..." : "Register"}
               </Button>
-            </div>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

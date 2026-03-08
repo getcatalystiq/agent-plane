@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 
@@ -91,95 +91,97 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
       <Button size="sm" onClick={() => setOpen(true)}>Add Agent</Button>
       <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) resetForm(); }}>
         <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Add Agent</DialogTitle>
-          </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-3">
-            {!defaultTenantId && (
-              <FormField label="Tenant">
-                <Select
-                  value={form.tenant_id}
-                  onChange={(e) => setForm((f) => ({ ...f, tenant_id: e.target.value }))}
-                  required
-                >
-                  {tenants.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
-                  ))}
-                </Select>
-              </FormField>
-            )}
-            <FormField label="Name">
-              <Input
-                value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="my-agent"
-                required
-              />
-            </FormField>
-            <FormField label="Description">
-              <Input
-                value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                placeholder="What does this agent do?"
-              />
-            </FormField>
-            <div className="grid grid-cols-2 gap-3">
-              <FormField label="Model">
-                <Select
-                  value={form.model}
-                  onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
-                >
-                  {MODELS.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </Select>
-              </FormField>
-              <FormField label="Permission Mode">
-                <Select
-                  value={form.permission_mode}
-                  onChange={(e) => setForm((f) => ({ ...f, permission_mode: e.target.value }))}
-                >
-                  <option value="default">default</option>
-                  <option value="acceptEdits">acceptEdits</option>
-                  <option value="bypassPermissions">bypassPermissions</option>
-                  <option value="plan">plan</option>
-                </Select>
-              </FormField>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <FormField label="Max Turns">
+          <form onSubmit={handleSubmit}>
+            <DialogHeader>
+              <DialogTitle>Add Agent</DialogTitle>
+            </DialogHeader>
+            <DialogBody className="space-y-3">
+              {!defaultTenantId && (
+                <FormField label="Tenant">
+                  <Select
+                    value={form.tenant_id}
+                    onChange={(e) => setForm((f) => ({ ...f, tenant_id: e.target.value }))}
+                    required
+                  >
+                    {tenants.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </Select>
+                </FormField>
+              )}
+              <FormField label="Name">
                 <Input
-                  type="number"
-                  min="1"
-                  max="1000"
-                  value={form.max_turns}
-                  onChange={(e) => setForm((f) => ({ ...f, max_turns: e.target.value }))}
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="my-agent"
                   required
                 />
               </FormField>
-              <FormField label="Max Budget">
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+              <FormField label="Description">
+                <Input
+                  value={form.description}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  placeholder="What does this agent do?"
+                />
+              </FormField>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Model">
+                  <Select
+                    value={form.model}
+                    onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
+                  >
+                    {MODELS.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </Select>
+                </FormField>
+                <FormField label="Permission Mode">
+                  <Select
+                    value={form.permission_mode}
+                    onChange={(e) => setForm((f) => ({ ...f, permission_mode: e.target.value }))}
+                  >
+                    <option value="default">default</option>
+                    <option value="acceptEdits">acceptEdits</option>
+                    <option value="bypassPermissions">bypassPermissions</option>
+                    <option value="plan">plan</option>
+                  </Select>
+                </FormField>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Max Turns">
                   <Input
                     type="number"
-                    step="0.01"
-                    min="0.01"
-                    max="100"
-                    value={form.max_budget_usd}
-                    onChange={(e) => setForm((f) => ({ ...f, max_budget_usd: e.target.value }))}
-                    className="pl-6"
+                    min="1"
+                    max="1000"
+                    value={form.max_turns}
+                    onChange={(e) => setForm((f) => ({ ...f, max_turns: e.target.value }))}
                     required
                   />
-                </div>
-              </FormField>
-            </div>
-            <FormError error={error} />
-            <div className="flex justify-end gap-2 pt-2">
-              <Button type="button" variant="ghost" size="sm" onClick={() => { setOpen(false); resetForm(); }}>Cancel</Button>
+                </FormField>
+                <FormField label="Max Budget">
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="100"
+                      value={form.max_budget_usd}
+                      onChange={(e) => setForm((f) => ({ ...f, max_budget_usd: e.target.value }))}
+                      className="pl-6"
+                      required
+                    />
+                  </div>
+                </FormField>
+              </div>
+              <FormError error={error} />
+            </DialogBody>
+            <DialogFooter>
+              <Button type="button" variant="outline" size="sm" onClick={() => { setOpen(false); resetForm(); }}>Cancel</Button>
               <Button type="submit" size="sm" disabled={saving}>
                 {saving ? "Creating..." : "Create Agent"}
               </Button>
-            </div>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

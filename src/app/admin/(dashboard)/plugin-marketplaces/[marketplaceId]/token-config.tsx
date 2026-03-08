@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 export function TokenConfig({ marketplaceId, hasToken }: { marketplaceId: string; hasToken: boolean }) {
@@ -75,41 +75,38 @@ export function TokenConfig({ marketplaceId, hasToken }: { marketplaceId: string
       ) : (
         <Button size="sm" variant="outline" onClick={() => setOpen(true)}>Configure GitHub Token</Button>
       )}
-      {error && <span className="text-xs text-destructive">{error}</span>}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>{hasToken ? "Update" : "Configure"} GitHub Token</DialogTitle>
           </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <Input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="ghp_... or github_pat_..."
-              />
-              <div className="text-xs text-muted-foreground mt-2 space-y-1">
-                <p className="font-medium">How to create a token:</p>
-                <ol className="list-decimal list-inside space-y-0.5 text-[11px]">
-                  <li>Go to <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">GitHub → Settings → Fine-grained tokens</a></li>
-                  <li>Click <strong>Generate new token</strong></li>
-                  <li>Set a name and expiration</li>
-                  <li>Under <strong>Repository access</strong>, select the marketplace repo</li>
-                  <li>Under <strong>Permissions → Repository permissions</strong>, set <strong>Contents</strong> to <strong>Read and write</strong></li>
-                  <li>Click <strong>Generate token</strong> and paste it above</li>
-                </ol>
-              </div>
+          <DialogBody className="space-y-3">
+            <Input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="ghp_... or github_pat_..."
+            />
+            <div className="text-xs text-muted-foreground space-y-1">
+              <p className="font-medium">How to create a token:</p>
+              <ol className="list-decimal list-inside space-y-0.5 text-[11px]">
+                <li>Go to <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">GitHub → Settings → Fine-grained tokens</a></li>
+                <li>Click <strong>Generate new token</strong></li>
+                <li>Set a name and expiration</li>
+                <li>Under <strong>Repository access</strong>, select the marketplace repo</li>
+                <li>Under <strong>Permissions → Repository permissions</strong>, set <strong>Contents</strong> to <strong>Read and write</strong></li>
+                <li>Click <strong>Generate token</strong> and paste it above</li>
+              </ol>
             </div>
             {error && <p className="text-xs text-destructive">{error}</p>}
-            <div className="flex justify-end gap-2 pt-2">
-              <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button size="sm" disabled={saving || !token} onClick={handleSave}>
-                {saving ? "Validating..." : "Save Token"}
-              </Button>
-            </div>
-          </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button type="button" variant="outline" size="sm" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button size="sm" disabled={saving || !token} onClick={handleSave}>
+              {saving ? "Validating..." : "Save Token"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
