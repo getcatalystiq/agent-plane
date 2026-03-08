@@ -209,6 +209,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
   const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -276,6 +277,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       setPolling(false);
       setRunning(false);
       abortRef.current = null;
+      runIdRef.current = null;
     }
   }
 
@@ -346,6 +348,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       setPolling(false);
       setRunning(false);
       abortRef.current = null;
+      runIdRef.current = null;
     }
   }
 
@@ -401,6 +404,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
             if (event.type === "run_started" && event.run_id) {
               runId = event.run_id as string;
+              runIdRef.current = runId;
             }
 
             if (event.type === "text_delta") {
@@ -435,12 +439,18 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       if (!handedOffToReconnect) {
         setRunning(false);
         abortRef.current = null;
+        runIdRef.current = null;
       }
     }
   }
 
-  function handleStop() {
+  async function handleStop() {
     abortRef.current?.abort();
+    const id = runIdRef.current;
+    if (id) {
+      runIdRef.current = null;
+      fetch(`/api/admin/runs/${id}/cancel`, { method: "POST" }).catch(() => {});
+    }
   }
 
   return (
