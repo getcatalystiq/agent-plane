@@ -40,10 +40,10 @@ export function ToolkitMultiselect({ value, onChange }: Props) {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  // Focus search when opening
+  // Focus search on mount
   useEffect(() => {
-    if (open) searchRef.current?.focus();
-  }, [open]);
+    searchRef.current?.focus();
+  }, []);
 
   const filtered = toolkits.filter((t) => {
     const q = search.toLowerCase();
@@ -109,7 +109,7 @@ export function ToolkitMultiselect({ value, onChange }: Props) {
       </div>
 
       {/* Dropdown */}
-      {open && (
+      {open && search.length > 0 && (
         <div className="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover shadow-md">
           <div className="max-h-64 overflow-y-auto">
             {loading && (
