@@ -63,11 +63,12 @@ export async function buildMcpConfig(
           ],
         );
 
-        // Composio uses SSE transport; authenticate with the account-level
-        // COMPOSIO_API_KEY (the URL itself has no embedded apiKey).
+        // Composio supports streamable HTTP (POST → /mcp); use type "http"
+        // which maps to the MCP streamable-HTTP transport in the SDK.
+        // Authenticate with the account-level COMPOSIO_API_KEY header.
         const composioApiKey = process.env.COMPOSIO_API_KEY;
         servers.composio = {
-          type: "sse",
+          type: "http",
           url: mcpUrl,
           ...(composioApiKey ? { headers: { "x-api-key": composioApiKey } } : {}),
         };
