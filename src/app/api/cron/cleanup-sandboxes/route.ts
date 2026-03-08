@@ -8,15 +8,15 @@ import { verifyCronSecret } from "@/lib/cron-auth";
 
 export const dynamic = "force-dynamic";
 
-// Default timeout + 30 min buffer
-const STUCK_THRESHOLD_MS = (10 + 30) * 60 * 1000;
+// Buffer added beyond agent's max_runtime_seconds before marking as stuck
+const BUFFER_SECONDS = 120;
+// Absolute fallback for runs without an agent (shouldn't happen, but fail-safe)
+const FALLBACK_THRESHOLD_SECONDS = 10 * 60 + BUFFER_SECONDS;
 
 export const GET = withErrorHandler(async (request: NextRequest) => {
   verifyCronSecret(request);
 
-  const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MS);
-
-  // Find stuck runs
+  // Find stuck runs: created longer ago than their agent's max_runtime + buffer
   const stuckRuns = await query(
     z.object({
       id: z.string(),
@@ -24,10 +24,11 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
       sandbox_id: z.string().nullable(),
       started_at: z.coerce.string().nullable(),
     }),
-    `SELECT id, tenant_id, sandbox_id, started_at FROM runs
-     WHERE status IN ('pending', 'running')
-       AND created_at < $1`,
-    [cutoff.toISOString()],
+    `SELECT r.id, r.tenant_id, r.sandbox_id, r.started_at FROM runs r
+     LEFT JOIN agents a ON a.id = r.agent_id
+     WHERE r.status IN ('pending', 'running')
+       AND r.created_at < NOW() - INTERVAL '1 second' * (COALESCE(a.max_runtime_seconds, $1) + $2)`,
+    [FALLBACK_THRESHOLD_SECONDS, BUFFER_SECONDS],
   );
 
   let cleaned = 0;
@@ -56,10 +57,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     });
   }
 
-  logger.info("Sandbox cleanup completed", {
-    cleaned,
-    threshold_ms: STUCK_THRESHOLD_MS,
-  });
+  logger.info("Sandbox cleanup completed", { cleaned });
 
   return jsonResponse({ cleaned });
 });

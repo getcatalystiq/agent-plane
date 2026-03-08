@@ -58,6 +58,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
         platformApiUrl: new URL(request.url).origin,
         effectiveBudget,
         effectiveMaxTurns: agentInternal.max_turns,
+        maxRuntimeSeconds: agentInternal.max_runtime_seconds,
       });
 
       try {

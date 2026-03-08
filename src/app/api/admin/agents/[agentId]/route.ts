@@ -67,6 +67,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     ["permission_mode", "permission_mode"],
     ["max_turns", "max_turns"],
     ["max_budget_usd", "max_budget_usd"],
+    ["max_runtime_seconds", "max_runtime_seconds"],
     ["composio_toolkits", "composio_toolkits"],
     ["composio_allowed_tools", "composio_allowed_tools"],
     ["skills", "skills", (v) => JSON.stringify(v)],

@@ -286,10 +286,12 @@ export async function fetchPluginContent(
         }
 
         // Preserve subdirectory structure for skill discovery (Claude Code expects <folder>/SKILL.md)
+        // Flatten plugin name slashes to dashes so the folder stays one level deep under .claude/skills/
         const relativePath = entry.path.replace(`${pluginName}/skills/`, "");
         const parts = relativePath.split("/");
         const fileName = parts.pop()!;
-        const folderName = [pluginName, ...parts].join("-");
+        const safeName = pluginName.replace(/\//g, "-");
+        const folderName = [safeName, ...parts].join("-");
 
         return {
           path: `.claude/skills/${folderName}/${fileName}`,
@@ -313,7 +315,7 @@ export async function fetchPluginContent(
         }
 
         return {
-          path: `.claude/commands/${pluginName}-${filename}`,
+          path: `.claude/commands/${pluginName.replace(/\//g, "-")}-${filename}`,
           content: contentResult.data,
         };
       });

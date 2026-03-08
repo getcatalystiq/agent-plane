@@ -195,6 +195,7 @@ export const CreateAgentSchema = z.object({
     .default("bypassPermissions"),
   max_turns: z.number().int().min(1).max(1000).default(10),
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
+  max_runtime_seconds: z.number().int().min(60).max(3600).default(600),
 });
 
 // Strip defaults before .partial() so omitted fields stay undefined (not default values)
@@ -212,6 +213,7 @@ export const UpdateAgentSchema = z.object({
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),
   max_turns: z.number().int().min(1).max(1000),
   max_budget_usd: z.number().min(0.01).max(100.0),
+  max_runtime_seconds: z.number().int().min(60).max(3600),
   schedule_frequency: ScheduleFrequencySchema,
   schedule_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, "Must be HH:MM or HH:MM:SS format").refine(
     (v) => {
@@ -308,6 +310,7 @@ export const AgentRow = z.object({
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),
   max_turns: z.coerce.number(),
   max_budget_usd: z.coerce.number(),
+  max_runtime_seconds: z.coerce.number(),
   schedule_frequency: ScheduleFrequencySchema.default("manual"),
   schedule_time: z.string().nullable().default(null),
   schedule_day_of_week: z.coerce.number().nullable().default(null),

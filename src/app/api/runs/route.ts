@@ -47,6 +47,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       platformApiUrl: new URL(request.url).origin,
       effectiveBudget,
       effectiveMaxTurns,
+      maxRuntimeSeconds: agent.max_runtime_seconds,
     });
 
     // Create pull-based NDJSON stream

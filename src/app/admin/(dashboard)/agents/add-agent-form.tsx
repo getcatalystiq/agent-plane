@@ -38,6 +38,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
     permission_mode: "bypassPermissions",
     max_turns: "100",
     max_budget_usd: "1.00",
+    max_runtime_minutes: "10",
   });
 
   function resetForm() {
@@ -49,6 +50,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
       permission_mode: "bypassPermissions",
       max_turns: "100",
       max_budget_usd: "1.00",
+      max_runtime_minutes: "10",
     });
     setError("");
   }
@@ -69,6 +71,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
           permission_mode: form.permission_mode,
           max_turns: parseInt(form.max_turns),
           max_budget_usd: parseFloat(form.max_budget_usd),
+          max_runtime_seconds: parseInt(form.max_runtime_minutes) * 60,
         }),
       });
       if (!res.ok) {
@@ -147,7 +150,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
                   </Select>
                 </FormField>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <FormField label="Max Turns">
                   <Input
                     type="number"
@@ -171,6 +174,20 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
                       className="pl-6"
                       required
                     />
+                  </div>
+                </FormField>
+                <FormField label="Max Runtime">
+                  <div className="relative">
+                    <Input
+                      type="number"
+                      min="1"
+                      max="60"
+                      value={form.max_runtime_minutes}
+                      onChange={(e) => setForm((f) => ({ ...f, max_runtime_minutes: e.target.value }))}
+                      className="pr-10"
+                      required
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">min</span>
                   </div>
                 </FormField>
               </div>

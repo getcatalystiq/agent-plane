@@ -41,6 +41,7 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
     permission_mode: input.permission_mode,
     max_turns: input.max_turns,
     max_budget_usd: input.max_budget_usd,
+    max_runtime_seconds: input.max_runtime_seconds,
   };
 
   for (const [key, value] of Object.entries(fields)) {

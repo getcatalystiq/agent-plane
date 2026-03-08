@@ -73,6 +73,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       platformApiUrl: getPlatformApiUrl(request),
       effectiveBudget,
       effectiveMaxTurns: agent.max_turns,
+      maxRuntimeSeconds: agent.max_runtime_seconds,
     });
   } catch (err) {
     logger.error("Scheduled run sandbox creation failed", {

@@ -61,10 +61,11 @@ export default async function AgentDetailPage({
         }
       />
 
-      <div className="grid grid-cols-5 gap-4">
+      <div className="grid grid-cols-6 gap-4">
         <MetricCard label="Runs">{totalRuns}</MetricCard>
         <MetricCard label="Max Turns">{agent.max_turns}</MetricCard>
         <MetricCard label="Budget"><span className="font-mono">${agent.max_budget_usd.toFixed(2)}</span></MetricCard>
+        <MetricCard label="Max Runtime"><span className="font-mono">{Math.floor(agent.max_runtime_seconds / 60)}m</span></MetricCard>
         <MetricCard label="Skills">{agent.skills.length}</MetricCard>
         <MetricCard label="Plugins">{agent.plugins.length}</MetricCard>
       </div>

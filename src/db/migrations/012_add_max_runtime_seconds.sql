@@ -1,0 +1,1 @@
+ALTER TABLE agents ADD COLUMN max_runtime_seconds INTEGER NOT NULL DEFAULT 600;

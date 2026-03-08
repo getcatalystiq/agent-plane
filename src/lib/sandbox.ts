@@ -21,6 +21,7 @@ export interface SandboxConfig {
   prompt: string;
   platformApiUrl: string;
   runToken?: string;
+  maxRuntimeSeconds?: number;
   aiGatewayApiKey: string;
   mcpServers?: Record<string, McpServerConfig>;
   mcpErrors?: string[];
@@ -59,7 +60,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   const sandbox = await Sandbox.create({
     runtime: "node22",
     resources: { vcpus: 2 },
-    timeout: 10 * 60 * 1000, // 10 minutes
+    timeout: (config.maxRuntimeSeconds ?? 600) * 1000,
     ...(sourceConfig ? { source: sourceConfig } : {}),
     networkPolicy: {
       allow: [

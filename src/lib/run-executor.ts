@@ -18,6 +18,7 @@ export interface RunExecutionParams {
   platformApiUrl: string;
   effectiveBudget: number;
   effectiveMaxTurns: number;
+  maxRuntimeSeconds: number;
 }
 
 const MAX_TRANSCRIPT_EVENTS = 10_000;
@@ -36,7 +37,7 @@ export interface RunExecutionResult {
 export async function prepareRunExecution(
   params: RunExecutionParams,
 ): Promise<RunExecutionResult> {
-  const { agent, tenantId, runId, prompt, platformApiUrl, effectiveBudget, effectiveMaxTurns } = params;
+  const { agent, tenantId, runId, prompt, platformApiUrl, effectiveBudget, effectiveMaxTurns, maxRuntimeSeconds } = params;
 
   const [mcpResult, pluginResult] = await Promise.all([
     buildMcpConfig(agent, tenantId),
@@ -59,6 +60,7 @@ export async function prepareRunExecution(
     prompt,
     platformApiUrl,
     runToken,
+    maxRuntimeSeconds,
     aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
     mcpServers: mcpResult.servers,
     mcpErrors: mcpResult.errors,
