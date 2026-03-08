@@ -67,11 +67,13 @@ export async function buildMcpConfig(
           ],
         );
 
-        // Pass API key via headers instead of URL query param to avoid logging leaks
+        // Composio expects the API key as a query param, not a header
+        const composioUrl = mcpApiKey
+          ? `${mcpUrl}${mcpUrl.includes("?") ? "&" : "?"}apiKey=${mcpApiKey}`
+          : mcpUrl;
         servers.composio = {
           type: "http",
-          url: mcpUrl,
-          ...(mcpApiKey ? { headers: { "x-api-key": mcpApiKey } } : {}),
+          url: composioUrl,
         };
       }
     } catch (err) {
