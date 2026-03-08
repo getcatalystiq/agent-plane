@@ -39,8 +39,25 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
 
   (async () => {
     let runId: RunId | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    // Detach before Vercel's maxDuration kills the function
+    const DETACH_MS = (maxDuration - 15) * 1000;
+    let detachTimer: ReturnType<typeof setTimeout> | null = null;
+    let detached = false;
+
+    const cleanup = () => {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      if (detachTimer) { clearTimeout(detachTimer); detachTimer = null; }
+    };
 
     try {
+      // Send heartbeats every 15s so the client knows we're alive
+      heartbeatTimer = setInterval(async () => {
+        try {
+          await emit({ type: "heartbeat", timestamp: new Date().toISOString() });
+        } catch { /* writer closed */ }
+      }, 15_000);
+
       await emit({ type: "queued", timestamp: new Date().toISOString() });
 
       const { run, agent: agentInternal, remainingBudget } = await createRun(tenantId, agentId as AgentId, prompt, { triggeredBy: "playground" });
@@ -61,8 +78,24 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
         maxRuntimeSeconds: agentInternal.max_runtime_seconds,
       });
 
+      // Set up stream detach before function timeout
+      detachTimer = setTimeout(async () => {
+        detached = true;
+        cleanup();
+        try {
+          await emit({
+            type: "stream_detached",
+            run_id: runId,
+            poll_url: `/api/admin/runs/${runId}`,
+            timestamp: new Date().toISOString(),
+          });
+        } catch { /* writer closed */ }
+        await writer.close().catch(() => {});
+      }, DETACH_MS);
+
       try {
         for await (const line of logIterator) {
+          if (detached) break;
           const trimmed = line.trim();
           if (trimmed) {
             let parsed: Record<string, unknown>;
@@ -76,7 +109,9 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
           }
         }
       } finally {
-        await finalizeRun(runId, tenantId, transcriptChunks, sandbox, effectiveBudget);
+        if (!detached) {
+          await finalizeRun(runId, tenantId, transcriptChunks, sandbox, effectiveBudget);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -92,7 +127,10 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
         }
       } catch { /* writer may already be closed */ }
     } finally {
-      await writer.close().catch(() => {});
+      cleanup();
+      if (!detached) {
+        await writer.close().catch(() => {});
+      }
     }
   })();
 

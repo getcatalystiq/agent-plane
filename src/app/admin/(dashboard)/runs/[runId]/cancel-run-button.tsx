@@ -3,18 +3,27 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogBody,
+  DialogFooter,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 
 export function CancelRunButton({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const router = useRouter();
 
-  async function handleCancel() {
-    if (!confirm("Stop this run? This will terminate the sandbox immediately.")) return;
-
+  async function handleConfirm() {
     setCancelling(true);
     try {
       const res = await fetch(`/api/admin/runs/${runId}/cancel`, { method: "POST" });
       if (res.ok) {
+        setOpen(false);
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
@@ -28,13 +37,34 @@ export function CancelRunButton({ runId }: { runId: string }) {
   }
 
   return (
-    <Button
-      variant="destructive"
-      size="sm"
-      onClick={handleCancel}
-      disabled={cancelling}
-    >
-      {cancelling ? "Stopping…" : "Stop Run"}
-    </Button>
+    <>
+      <Button
+        variant="destructive"
+        size="sm"
+        onClick={() => setOpen(true)}
+      >
+        Stop Run
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Stop this run?</DialogTitle>
+            <DialogDescription>
+              This will terminate the sandbox immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody />
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setOpen(false)} disabled={cancelling}>
+              Cancel
+            </Button>
+            <Button variant="destructive" size="sm" onClick={handleConfirm} disabled={cancelling}>
+              {cancelling ? "Stopping…" : "Stop Run"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
