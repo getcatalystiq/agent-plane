@@ -1,19 +1,18 @@
-import { NextRequest, after } from "next/server";
+import { NextRequest } from "next/server";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
-import { query, queryOne, execute } from "@/db";
+import { query, execute } from "@/db";
 import { verifyCronSecret } from "@/lib/cron-auth";
 import { computeNextRunAt, buildScheduleConfig } from "@/lib/schedule";
-import { createRun } from "@/lib/runs";
-import { executeRunInBackground } from "@/lib/run-executor";
+import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
-import { AgentRowInternal, TenantRow, ScheduleFrequencySchema } from "@/lib/validation";
-import type { AgentId, RunId, TenantId } from "@/lib/types";
+import { ScheduleFrequencySchema } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const CLAIM_LIMIT = 50;
+const DISPATCH_CONCURRENCY = 10;
 
 // The claim query guarantees schedule_enabled = true, so these fields are non-null
 // per the DB CHECK constraints (chk_schedule_time_required, chk_schedule_day_of_week_weekly).
@@ -25,6 +24,20 @@ const DueAgentRow = z.object({
   schedule_day_of_week: z.coerce.number().nullable(),
   timezone: z.string(),
 });
+
+/**
+ * Resolve the base URL for dispatching to the executor endpoint.
+ * On Vercel, VERCEL_PROJECT_PRODUCTION_URL gives the stable production domain
+ * (e.g. "agentplane-nine.vercel.app"), avoiding issues with deployment-specific
+ * or internal URLs that may not route correctly for self-referencing fetches.
+ */
+function getDispatchBaseUrl(request: NextRequest): string {
+  const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  if (vercelUrl) {
+    return `https://${vercelUrl}`;
+  }
+  return new URL(request.url).origin;
+}
 
 export const GET = withErrorHandler(async (request: NextRequest) => {
   verifyCronSecret(request);
@@ -129,25 +142,38 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     [ids, nextRunAts],
   );
 
-  // Execute each claimed agent's scheduled run via after()
-  const platformApiUrl = new URL(request.url).origin;
+  // Dispatch to executor endpoint — fire-and-forget via separate function invocations.
+  // Each executor gets its own maxDuration: 300 for the full sandbox run.
+  const baseUrl = getDispatchBaseUrl(request);
+  const cronSecret = getEnv().CRON_SECRET;
   let triggered = 0;
   let failed = 0;
 
-  for (const dueAgent of dueAgents) {
-    try {
-      const result = await dispatchScheduledRun(dueAgent.id, platformApiUrl);
-      if (result === "triggered") {
+  for (let i = 0; i < dueAgents.length; i += DISPATCH_CONCURRENCY) {
+    const batch = dueAgents.slice(i, i + DISPATCH_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map((agent) =>
+        fetch(`${baseUrl}/api/cron/scheduled-runs/execute`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${cronSecret}`,
+          },
+          body: JSON.stringify({ agent_id: agent.id }),
+        }),
+      ),
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value.ok) {
         triggered++;
       } else {
         failed++;
+        const reason = result.status === "rejected"
+          ? result.reason
+          : `HTTP ${result.value.status}`;
+        logger.warn("Executor dispatch failed", { error: String(reason) });
       }
-    } catch (err) {
-      failed++;
-      logger.warn("Scheduled run dispatch failed", {
-        agent_id: dueAgent.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
     }
   }
 
@@ -159,64 +185,3 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
 
   return jsonResponse({ triggered, failed, claimed: dueAgents.length });
 });
-
-async function dispatchScheduledRun(
-  agentId: string,
-  platformApiUrl: string,
-): Promise<"triggered" | "skipped"> {
-  const agent = await queryOne(
-    AgentRowInternal,
-    "SELECT * FROM agents WHERE id = $1",
-    [agentId],
-  );
-  if (!agent || !agent.schedule_enabled || !agent.schedule_prompt) {
-    logger.warn("Scheduled run skipped: agent not found or not schedulable", { agent_id: agentId });
-    return "skipped";
-  }
-
-  const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [agent.tenant_id]);
-  if (!tenant || tenant.status === "suspended") {
-    logger.warn("Scheduled run skipped: tenant suspended or not found", { agent_id: agentId, tenant_id: agent.tenant_id });
-    return "skipped";
-  }
-
-  const tenantId = agent.tenant_id as TenantId;
-
-  let runId: RunId;
-  let remainingBudget: number;
-  try {
-    const result = await createRun(tenantId, agentId as AgentId, agent.schedule_prompt, { triggeredBy: "schedule" });
-    runId = result.run.id as RunId;
-    remainingBudget = result.remainingBudget;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn("Scheduled run creation failed", { agent_id: agentId, error: msg });
-    return "skipped";
-  }
-
-  const effectiveBudget = Math.min(agent.max_budget_usd, remainingBudget);
-
-  // Execute the run in after() so we return quickly
-  after(async () => {
-    try {
-      await executeRunInBackground({
-        agent,
-        tenantId,
-        runId,
-        prompt: agent.schedule_prompt!,
-        platformApiUrl,
-        effectiveBudget,
-        effectiveMaxTurns: agent.max_turns,
-      });
-    } catch (err) {
-      logger.error("Scheduled run execution failed", {
-        agent_id: agentId,
-        run_id: runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  });
-
-  logger.info("Scheduled run triggered", { agent_id: agentId, run_id: runId });
-  return "triggered";
-}
