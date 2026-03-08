@@ -216,7 +216,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     if (el) el.scrollTop = el.scrollHeight;
   }, [events, streamingText]);
 
-  async function pollForCompletion(runId: string, eventsBeforeDetach: number) {
+  async function pollForCompletion(runId: string) {
     setPolling(true);
     let delay = 3000;
     const maxDelay = 10_000;
@@ -243,9 +243,10 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           // Append transcript events that came after the stream detached
           const transcript = data.transcript as PlaygroundEvent[] | undefined;
           if (transcript && transcript.length > 0) {
-            // The transcript contains the full run; skip events we already have
-            // and append any new ones (assistant, tool_use, tool_result, result, error)
-            const newEvents = transcript.slice(eventsBeforeDetach).filter(
+            // Find the stream_detached event in the transcript and take everything after it
+            const detachIdx = transcript.findIndex((ev) => ev.type === "stream_detached");
+            const eventsAfterDetach = detachIdx >= 0 ? transcript.slice(detachIdx + 1) : [];
+            const newEvents = eventsAfterDetach.filter(
               (ev: PlaygroundEvent) =>
                 ev.type !== "heartbeat" &&
                 ev.type !== "text_delta" &&
@@ -258,8 +259,9 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
             }
           }
 
-          // If no transcript events but run is terminal, synthesize a result event
-          if (!transcript || transcript.length === 0) {
+          // If no result event was added from the transcript, synthesize one
+          setEvents((prev) => {
+            if (prev.some((ev) => ev.type === "result")) return prev;
             const syntheticResult: PlaygroundEvent = {
               type: "result",
               subtype: run.status === "completed" ? "success" : "failed",
@@ -270,8 +272,8 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
             if (run.error_type) {
               syntheticResult.result = run.error_type;
             }
-            setEvents((prev) => [...prev, syntheticResult]);
-          }
+            return [...prev, syntheticResult];
+          });
           break;
         }
 
@@ -301,9 +303,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     abortRef.current = abort;
 
     let runId: string | null = null;
-    // Track count of meaningful events (excluding stream_detached itself)
-    // so we can skip them in the transcript
-    let meaningfulEventCount = 0;
+    let handedOffToPolling = false;
 
     try {
       const res = await fetch(`/api/admin/agents/${agentId}/runs`, {
@@ -348,16 +348,13 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
               setEvents((prev) => [...prev, event]);
               // Start polling for completion
               if (runId) {
-                pollForCompletion(runId, meaningfulEventCount);
+                handedOffToPolling = true;
+                pollForCompletion(runId);
                 return; // Exit stream reading, polling takes over
               }
             } else {
               if (event.type === "assistant") setStreamingText("");
               setEvents((prev) => [...prev, event]);
-              // Count events that would appear in transcript (not heartbeats/text_delta)
-              if (event.type !== "heartbeat") {
-                meaningfulEventCount++;
-              }
             }
           } catch {
             // Skip non-JSON lines
@@ -369,7 +366,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         setError(err instanceof Error ? err.message : "Unknown error");
       }
     } finally {
-      if (!polling) {
+      if (!handedOffToPolling) {
         setRunning(false);
         abortRef.current = null;
       }
