@@ -288,7 +288,8 @@ export async function getOrCreateComposioMcpServer(
     const urlResponse = await client.mcp.generate.url({
       mcp_server_id: serverId,
       user_ids: [userId],
-    });
+      managed_auth_by_composio: true,
+    } as Parameters<typeof client.mcp.generate.url>[0]);
 
     const fullUrl = urlResponse.user_ids_url?.[0] || urlResponse.mcp_url;
 
