@@ -127,8 +127,10 @@ export function ScheduleEditor({ agentId, initialSchedule, timezone }: ScheduleE
           <Select
             value={frequency}
             onChange={(e) => {
-              setFrequency(e.target.value);
-              if (e.target.value === "manual") setEnabled(false);
+              const newFreq = e.target.value;
+              setFrequency(newFreq);
+              if (newFreq === "manual") setEnabled(false);
+              else setEnabled(true);
             }}
           >
             {FREQUENCIES.map((f) => (
