@@ -30,50 +30,95 @@ interface PlaygroundEvent {
   [key: string]: unknown;
 }
 
+function CollapsibleJson({ data, maxHeight = "12rem" }: { data: unknown; maxHeight?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const json = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  return (
+    <div className="relative">
+      <pre
+        className={`text-xs font-mono text-muted-foreground bg-muted/50 rounded-md p-2 overflow-x-auto whitespace-pre-wrap break-all ${expanded ? "" : "overflow-hidden"}`}
+        style={expanded ? undefined : { maxHeight }}
+      >
+        {json}
+      </pre>
+      {json.length > 200 && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-xs text-blue-400 hover:text-blue-300 mt-1"
+        >
+          {expanded ? "Collapse" : "Expand"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function renderEvent(event: PlaygroundEvent, idx: number) {
   if (event.type === "heartbeat") return null;
   if (event.type === "text_delta") return null; // rendered separately as streaming text
 
   if (event.type === "assistant") {
-    const content = event.message as { content?: Array<{ type: string; text?: string }> };
-    const texts = content?.content
-      ?.filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("") ?? "";
-    if (!texts) return null;
+    const content = event.message as { content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> } | undefined;
+    const blocks = content?.content ?? [];
+    const textBlocks = blocks.filter((c) => c.type === "text").map((c) => c.text).join("");
+    const toolUseBlocks = blocks.filter((c) => c.type === "tool_use");
+    if (!textBlocks && toolUseBlocks.length === 0) return null;
     return (
-      <div key={idx} className="space-y-1">
-        <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
-        <MarkdownContent>{texts}</MarkdownContent>
+      <div key={idx} className="space-y-2">
+        {textBlocks && (
+          <div className="space-y-1">
+            <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
+            <MarkdownContent>{textBlocks}</MarkdownContent>
+          </div>
+        )}
+        {toolUseBlocks.map((tool, ti) => (
+          <div key={ti} className="space-y-1 ml-3 pl-3 border-l-2 border-yellow-800/50">
+            <span className="text-xs font-semibold text-yellow-400 uppercase">
+              Tool Call: {tool.name ?? "unknown"}
+            </span>
+            {tool.id && <span className="text-xs text-muted-foreground ml-2 font-mono">{String(tool.id)}</span>}
+            {tool.input != null && <CollapsibleJson data={tool.input} />}
+          </div>
+        ))}
       </div>
     );
   }
 
   if (event.type === "tool_use") {
+    const toolName = String(event.tool_name ?? event.name ?? "unknown");
     return (
-      <div key={idx} className="space-y-1">
-        <span className="text-xs font-semibold text-yellow-400 uppercase">Tool</span>
-        <p className="text-xs font-mono text-muted-foreground">
-          {String(event.tool_name ?? event.name ?? "unknown")}
-          {event.input ? ` ${JSON.stringify(event.input).slice(0, 200)}` : ""}
-        </p>
+      <div key={idx} className="space-y-1 ml-3 pl-3 border-l-2 border-yellow-800/50">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-yellow-400 uppercase">Tool Call</span>
+          <span className="text-xs font-mono text-yellow-400/80">{toolName}</span>
+          {event.tool_use_id ? <span className="text-xs text-muted-foreground font-mono">{String(event.tool_use_id)}</span> : null}
+        </div>
+        {event.input != null ? <CollapsibleJson data={event.input} /> : null}
       </div>
     );
   }
 
   if (event.type === "tool_result") {
+    const isError = event.is_error === true || event.error === true;
+    const content = event.output ?? event.content ?? "";
+    const contentStr = typeof content === "string" ? content : JSON.stringify(content, null, 2);
     return (
-      <div key={idx} className="space-y-1">
-        <span className="text-xs font-semibold text-green-400 uppercase">Tool Result</span>
-        <p className="text-xs font-mono text-muted-foreground line-clamp-3">
-          {String(event.output ?? event.content ?? "").slice(0, 300)}
-        </p>
+      <div key={idx} className={`space-y-1 ml-3 pl-3 border-l-2 ${isError ? "border-red-800/50" : "border-green-800/50"}`}>
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-semibold uppercase ${isError ? "text-red-400" : "text-green-400"}`}>
+            {isError ? "Tool Error" : "Tool Result"}
+          </span>
+          {event.tool_name ? <span className="text-xs font-mono text-muted-foreground">{String(event.tool_name)}</span> : null}
+          {event.tool_use_id ? <span className="text-xs text-muted-foreground font-mono">{String(event.tool_use_id)}</span> : null}
+        </div>
+        {contentStr ? <CollapsibleJson data={contentStr} /> : null}
       </div>
     );
   }
 
   if (event.type === "result") {
     const success = event.subtype === "success";
+    const costUsd = event.cost_usd ?? event.total_cost_usd;
     return (
       <div key={idx} className={`rounded-md p-3 ${success ? "bg-green-950 border border-green-800" : "bg-red-950 border border-red-800"}`}>
         <p className={`text-sm font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
@@ -82,10 +127,12 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
         {event.result != null && (
           <p className="text-sm mt-1 text-foreground whitespace-pre-wrap">{String(event.result)}</p>
         )}
-        <p className="text-xs text-muted-foreground mt-1">
-          {event.num_turns != null ? `${event.num_turns} turns` : ""}
-          {event.cost_usd != null ? ` · $${Number(event.cost_usd).toFixed(4)}` : ""}
-        </p>
+        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mt-2">
+          {event.num_turns != null && <span>{String(event.num_turns)} turns</span>}
+          {costUsd != null && <span>${Number(costUsd).toFixed(4)}</span>}
+          {event.duration_ms != null && <span>{(Number(event.duration_ms) / 1000).toFixed(1)}s</span>}
+          {event.duration_api_ms != null && <span>API: {(Number(event.duration_api_ms) / 1000).toFixed(1)}s</span>}
+        </div>
       </div>
     );
   }
@@ -93,7 +140,10 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
   if (event.type === "error") {
     return (
       <div key={idx} className="rounded-md p-3 bg-red-950 border border-red-800">
-        <p className="text-sm font-semibold text-red-400">Error</p>
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold text-red-400">Error</p>
+          {event.code ? <span className="text-xs font-mono text-red-400/70">{String(event.code)}</span> : null}
+        </div>
         <p className="text-sm text-foreground mt-1">{String(event.error ?? "Unknown error")}</p>
       </div>
     );
@@ -101,8 +151,8 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
 
   if (event.type === "stream_detached") {
     return (
-      <div key={idx} className="text-xs text-muted-foreground italic">
-        Stream detached (run continues in background)
+      <div key={idx} className="text-xs text-muted-foreground italic border-t border-border pt-2">
+        Stream detached at {event.timestamp ? new Date(String(event.timestamp)).toLocaleTimeString() : "unknown"} — run continues in background
       </div>
     );
   }
@@ -121,12 +171,31 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
 
   if (event.type === "run_started") {
     return (
-      <div key={idx} className="text-xs text-muted-foreground">Agent started</div>
+      <div key={idx} className="text-xs text-muted-foreground">
+        Agent started
+        {event.model ? <span className="ml-2 font-mono text-foreground/60">{String(event.model)}</span> : null}
+        {event.mcp_server_count != null && Number(event.mcp_server_count) > 0 && (
+          <span className="ml-2">{String(event.mcp_server_count)} MCP server{Number(event.mcp_server_count) !== 1 ? "s" : ""}</span>
+        )}
+      </div>
     );
   }
 
-  // Skip other low-level events
-  return null;
+  if (event.type === "system") {
+    return (
+      <div key={idx} className="text-xs text-muted-foreground italic">
+        {String(event.message ?? JSON.stringify(event))}
+      </div>
+    );
+  }
+
+  // Catch-all: show any unrecognized events so nothing is hidden
+  return (
+    <div key={idx} className="space-y-1">
+      <span className="text-xs font-semibold text-purple-400 uppercase">{event.type}</span>
+      <CollapsibleJson data={event} maxHeight="8rem" />
+    </div>
+  );
 }
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out"]);
