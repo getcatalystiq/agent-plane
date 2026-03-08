@@ -139,9 +139,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   env.ANTHROPIC_AUTH_TOKEN = config.aiGatewayApiKey;
   env.ANTHROPIC_API_KEY = "";
   // Disable ToolSearch: the Agent SDK's tool_reference content blocks require
-  // the tool-search-tool-2025-10-19 beta header, which Vercel AI Gateway
-  // doesn't support yet (causes 400: messages.N.content: Invalid input).
-  env.ENABLE_TOOL_SEARCH = "false";
+  env.ENABLE_TOOL_SEARCH = "true";
   if (config.runToken) {
     env.AGENTPLANE_RUN_TOKEN = config.runToken;
   }

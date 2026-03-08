@@ -200,7 +200,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 ## Sandbox & Runner
 
 - Sandboxes run `@anthropic-ai/claude-agent-sdk` (installed at runtime via npm)
-- `ENABLE_TOOL_SEARCH=false` is set in the sandbox env — Vercel AI Gateway doesn't support the `tool-search-tool-2025-10-19` beta header yet
+- `ENABLE_TOOL_SEARCH=true` is set in the sandbox env to enable dynamic tool discovery for agents with many MCP tools
 - When MCP servers are present, `allowedTools` is suppressed so `mcp__*` tool names aren't blocked
 - Plugin skill files → `.claude/skills/<plugin-name>-<subfolder>/<filename>`; plugin command files → `.claude/commands/<plugin-name>-<filename>`
 - Network allowlist: `ai-gateway.vercel.sh`, `*.composio.dev`, `*.firecrawl.dev`, `*.githubusercontent.com`, `registry.npmjs.org`, platform API host, custom MCP server hosts
