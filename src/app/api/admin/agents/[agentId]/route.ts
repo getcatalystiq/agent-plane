@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { queryOne, query, execute, getPool } from "@/db";
-import { AgentRow, RunRow, TenantRow, UpdateAgentSchema } from "@/lib/validation";
+import { AgentRow, RunRow, UpdateAgentSchema } from "@/lib/validation";
 import { removeToolkitConnections } from "@/lib/composio";
 import { withErrorHandler } from "@/lib/api";
-import { computeNextRunAt, buildScheduleConfig } from "@/lib/schedule";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -72,11 +71,6 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     ["composio_allowed_tools", "composio_allowed_tools"],
     ["skills", "skills", (v) => JSON.stringify(v)],
     ["plugins", "plugins", (v) => JSON.stringify(v)],
-    ["schedule_frequency", "schedule_frequency"],
-    ["schedule_time", "schedule_time"],
-    ["schedule_day_of_week", "schedule_day_of_week"],
-    ["schedule_prompt", "schedule_prompt"],
-    ["schedule_enabled", "schedule_enabled"],
   ];
 
   for (const [field, col, transform] of fieldMap) {
@@ -85,32 +79,6 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
       sets.push(`${col} = $${idx++}`);
       params.push(val);
     }
-  }
-
-  // Compute schedule_next_run_at when schedule fields change
-  const scheduleFieldChanged = (
-    input.schedule_frequency !== undefined ||
-    input.schedule_time !== undefined ||
-    input.schedule_day_of_week !== undefined ||
-    input.schedule_enabled !== undefined
-  );
-
-  if (scheduleFieldChanged) {
-    const freq = input.schedule_frequency ?? current.schedule_frequency;
-    const time = input.schedule_time !== undefined ? input.schedule_time : current.schedule_time;
-    const day = input.schedule_day_of_week !== undefined ? input.schedule_day_of_week : current.schedule_day_of_week;
-    const enabled = input.schedule_enabled ?? current.schedule_enabled;
-
-    let nextRunAt: Date | null = null;
-    if (enabled && freq !== "manual") {
-      const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [current.tenant_id]);
-      const timezone = tenant?.timezone ?? "UTC";
-      const config = buildScheduleConfig(freq, time, day);
-      nextRunAt = computeNextRunAt(config, timezone);
-    }
-
-    sets.push(`schedule_next_run_at = $${idx++}`);
-    params.push(nextRunAt?.toISOString() ?? null);
   }
 
   if (sets.length === 0) {
@@ -158,7 +126,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
 
   const runCount = await queryOne(
     z.object({ count: z.coerce.number() }),
-    "SELECT COUNT(*)::int AS count FROM runs WHERE agent_id = $1 AND status IN ('queued', 'running')",
+    "SELECT COUNT(*)::int AS count FROM runs WHERE agent_id = $1 AND status IN ('pending', 'running')",
     [agentId],
   );
 

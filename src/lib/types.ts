@@ -5,6 +5,7 @@ export type RunId = string & { readonly __brand: "RunId" };
 export type McpServerId = string & { readonly __brand: "McpServerId" };
 export type McpConnectionId = string & { readonly __brand: "McpConnectionId" };
 export type PluginMarketplaceId = string & { readonly __brand: "PluginMarketplaceId" };
+export type ScheduleId = string & { readonly __brand: "ScheduleId" };
 
 export interface AgentPlugin {
   marketplace_id: PluginMarketplaceId;

@@ -256,17 +256,6 @@ export const UpdateAgentSchema = z.object({
   max_turns: z.number().int().min(1).max(1000),
   max_budget_usd: z.number().min(0.01).max(100.0),
   max_runtime_seconds: z.number().int().min(60).max(3600),
-  schedule_frequency: ScheduleFrequencySchema,
-  schedule_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, "Must be HH:MM or HH:MM:SS format").refine(
-    (v) => {
-      const [h, m] = v.split(":").map(Number);
-      return h >= 0 && h <= 23 && m >= 0 && m <= 59;
-    },
-    { message: "Hours must be 0-23, minutes must be 0-59" },
-  ).nullable(),
-  schedule_day_of_week: z.number().int().min(0).max(6).nullable(),
-  schedule_prompt: z.string().max(100_000).nullable(),
-  schedule_enabled: z.boolean(),
 }).partial();
 
 export type CreateAgentInput = z.infer<typeof CreateAgentSchema>;
@@ -353,13 +342,6 @@ export const AgentRow = z.object({
   max_turns: z.coerce.number(),
   max_budget_usd: z.coerce.number(),
   max_runtime_seconds: z.coerce.number(),
-  schedule_frequency: ScheduleFrequencySchema.default("manual"),
-  schedule_time: z.string().nullable().default(null),
-  schedule_day_of_week: z.coerce.number().nullable().default(null),
-  schedule_prompt: z.string().nullable().default(null),
-  schedule_enabled: z.boolean().default(false),
-  schedule_last_run_at: z.coerce.string().nullable().default(null),
-  schedule_next_run_at: z.coerce.string().nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -500,7 +482,72 @@ export const RunRow = z.object({
   error_messages: z.array(z.string()),
   sandbox_id: z.string().nullable(),
   triggered_by: RunTriggeredBySchema.default("api"),
+  schedule_id: z.string().nullable().default(null),
   started_at: z.coerce.string().nullable(),
   completed_at: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
 });
+
+// --- Schedule DB Row & CRUD Schemas ---
+
+const ScheduleTimeSchema = z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, "Must be HH:MM or HH:MM:SS format").refine(
+  (v) => {
+    const [h, m] = v.split(":").map(Number);
+    return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+  },
+  { message: "Hours must be 0-23, minutes must be 0-59" },
+);
+
+export const ScheduleRow = z.object({
+  id: z.string(),
+  tenant_id: z.string(),
+  agent_id: z.string(),
+  name: z.string().nullable().default(null),
+  frequency: ScheduleFrequencySchema,
+  time: z.string().nullable().default(null),
+  day_of_week: z.coerce.number().nullable().default(null),
+  prompt: z.string().nullable().default(null),
+  enabled: z.boolean(),
+  last_run_at: z.coerce.string().nullable().default(null),
+  next_run_at: z.coerce.string().nullable().default(null),
+  created_at: z.coerce.string(),
+  updated_at: z.coerce.string(),
+});
+
+export type Schedule = z.infer<typeof ScheduleRow>;
+
+const scheduleBaseFields = {
+  name: z.string().min(1).max(100).nullable().optional(),
+  frequency: ScheduleFrequencySchema,
+  time: ScheduleTimeSchema.nullable(),
+  day_of_week: z.number().int().min(0).max(6).nullable(),
+  prompt: z.string().min(1).max(100_000).nullable(),
+  enabled: z.boolean(),
+};
+
+function addScheduleCrossFieldValidation<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return schema.superRefine((data, ctx) => {
+    const freq = data.frequency as string;
+    if (["daily", "weekdays", "weekly"].includes(freq) && !data.time) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "time is required for daily/weekdays/weekly", path: ["time"] });
+    }
+    if (freq === "weekly" && (data.day_of_week === null || data.day_of_week === undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "day_of_week is required for weekly", path: ["day_of_week"] });
+    }
+    if (freq !== "weekly" && data.day_of_week !== null && data.day_of_week !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "day_of_week only applies to weekly", path: ["day_of_week"] });
+    }
+    if (data.enabled && (!data.prompt || (typeof data.prompt === "string" && data.prompt.length === 0))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "prompt is required when enabled", path: ["prompt"] });
+    }
+    if (data.enabled && freq === "manual") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "cannot enable a manual schedule", path: ["enabled"] });
+    }
+  });
+}
+
+export const ScheduleInputSchema = addScheduleCrossFieldValidation(
+  z.object(scheduleBaseFields),
+);
+
+export type ScheduleInput = z.infer<typeof ScheduleInputSchema>;

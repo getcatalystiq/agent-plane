@@ -23,8 +23,7 @@ const AgentWithTenant = z.object({
   last_run_at: z.coerce.string().nullable(),
   mcp_active_slugs: z.array(z.string()),
   mcp_unhealthy_slugs: z.array(z.string()),
-  schedule_enabled: z.boolean(),
-  schedule_frequency: z.string().nullable(),
+  schedule_count: z.coerce.number(),
 });
 
 export const dynamic = "force-dynamic";
@@ -35,7 +34,7 @@ export default async function AgentsPage() {
     AgentWithTenant,
     `SELECT a.id, a.tenant_id, t.name AS tenant_name, a.name, a.description, a.model,
        a.permission_mode, a.composio_toolkits, a.max_turns, a.max_budget_usd, a.created_at,
-       a.schedule_enabled, a.schedule_frequency,
+       (SELECT COUNT(*)::int FROM schedules s WHERE s.agent_id = a.id AND s.enabled = true) AS schedule_count,
        COUNT(DISTINCT r.id)::int AS run_count,
        MAX(r.created_at) AS last_run_at,
        COALESCE(array_agg(DISTINCT ms.slug) FILTER (WHERE ms.slug IS NOT NULL AND mc.status = 'active'), '{}') AS mcp_active_slugs,
@@ -105,8 +104,8 @@ export default async function AgentsPage() {
                 )}
               </td>
               <td className="p-3">
-                {a.schedule_enabled ? (
-                  <Badge variant="default" className="text-xs">{a.schedule_frequency ?? "scheduled"}</Badge>
+                {a.schedule_count > 0 ? (
+                  <Badge variant="default" className="text-xs">{a.schedule_count} active</Badge>
                 ) : (
                   <span className="text-muted-foreground text-xs">—</span>
                 )}

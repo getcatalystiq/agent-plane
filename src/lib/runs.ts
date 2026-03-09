@@ -9,7 +9,7 @@ import {
   BudgetExceededError,
   ConcurrencyLimitError,
 } from "./errors";
-import type { RunStatus, RunTriggeredBy, TenantId, AgentId, RunId } from "./types";
+import type { RunStatus, RunTriggeredBy, TenantId, AgentId, RunId, ScheduleId } from "./types";
 import { VALID_TRANSITIONS } from "./types";
 
 const MAX_CONCURRENT_RUNS = 10;
@@ -26,7 +26,7 @@ export async function createRun(
   tenantId: TenantId,
   agentId: AgentId,
   prompt: string,
-  options?: { triggeredBy?: RunTriggeredBy },
+  options?: { triggeredBy?: RunTriggeredBy; scheduleId?: ScheduleId },
 ): Promise<{ run: z.infer<typeof RunRow>; agent: AgentInternal; remainingBudget: number }> {
   return withTenantTransaction(tenantId, async (tx) => {
     // Load agent (including internal Composio MCP cache fields)
@@ -62,13 +62,14 @@ export async function createRun(
     // Atomic insert with concurrent run limit check
     const runId = generateId();
     const triggeredBy = options?.triggeredBy ?? "api";
+    const scheduleId = options?.scheduleId ?? null;
     const inserted = await tx.queryOne(
       RunRow,
-      `INSERT INTO runs (id, agent_id, tenant_id, status, prompt, triggered_by, created_at)
-       SELECT $1, $2, $3, 'pending', $4, $5, NOW()
-       WHERE (SELECT COUNT(*) FROM runs WHERE tenant_id = $3 AND status IN ('pending', 'running')) < $6
+      `INSERT INTO runs (id, agent_id, tenant_id, status, prompt, triggered_by, schedule_id, created_at)
+       SELECT $1, $2, $3, 'pending', $4, $5, $6, NOW()
+       WHERE (SELECT COUNT(*) FROM runs WHERE tenant_id = $3 AND status IN ('pending', 'running')) < $7
        RETURNING *`,
-      [runId, agentId, tenantId, prompt, triggeredBy, MAX_CONCURRENT_RUNS],
+      [runId, agentId, tenantId, prompt, triggeredBy, scheduleId, MAX_CONCURRENT_RUNS],
     );
 
     if (!inserted) {

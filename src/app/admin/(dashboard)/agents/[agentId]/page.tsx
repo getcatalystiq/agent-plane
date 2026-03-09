@@ -10,7 +10,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
 import { LocalDate } from "@/components/local-date";
 import { queryOne, query } from "@/db";
-import { AgentRow, RunRow, TenantRow } from "@/lib/validation";
+import { AgentRow, RunRow, TenantRow, ScheduleRow } from "@/lib/validation";
 import { AgentEditForm } from "./edit-form";
 import { SkillsEditor } from "./skills-editor";
 import { ConnectorsManager } from "./connectors-manager";
@@ -36,13 +36,14 @@ export default async function AgentDetailPage({
 
   const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [agent.tenant_id]);
 
-  const [runs, countResult] = await Promise.all([
+  const [runs, countResult, schedules] = await Promise.all([
     query(RunRow, "SELECT * FROM runs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3", [agentId, pageSize, offset]),
     queryOne(
       z.object({ total: z.number() }),
       "SELECT COUNT(*)::int AS total FROM runs WHERE agent_id = $1",
       [agentId],
     ),
+    query(ScheduleRow, "SELECT * FROM schedules WHERE agent_id = $1 ORDER BY created_at ASC", [agentId]),
   ]);
 
   const totalRuns = countResult?.total ?? 0;
@@ -80,15 +81,7 @@ export default async function AgentDetailPage({
 
       <ScheduleEditor
         agentId={agent.id}
-        initialSchedule={{
-          frequency: agent.schedule_frequency,
-          time: agent.schedule_time,
-          dayOfWeek: agent.schedule_day_of_week,
-          prompt: agent.schedule_prompt,
-          enabled: agent.schedule_enabled,
-          lastRunAt: agent.schedule_last_run_at,
-          nextRunAt: agent.schedule_next_run_at,
-        }}
+        initialSchedules={schedules}
         timezone={tenant?.timezone ?? "UTC"}
       />
 
