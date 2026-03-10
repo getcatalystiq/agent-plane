@@ -315,6 +315,9 @@ export async function finalizeSessionMessage(
         error: inner instanceof Error ? inner.message : String(inner),
       });
     });
+
+    // Re-throw so streamWithFinalize can emit the error in the NDJSON stream
+    throw err;
   }
 }
 
