@@ -131,7 +131,7 @@ ENCRYPTION_KEY="64-hex-chars-from-openssl-rand"
 # Optional
 # COMPOSIO_API_KEY="your-composio-api-key"          # for Composio toolkit integrations
 # ENCRYPTION_KEY_PREVIOUS="old-64-hex-chars"        # for seamless key rotation
-# CRON_SECRET="vercel-cron-secret"                  # auto-set by Vercel in production
+# CRON_SECRET="random-string-at-least-16-chars"      # must match Vercel project env var
 ```
 
 ### 7. Run database migrations
@@ -187,7 +187,7 @@ The app runs at [http://localhost:3000](http://localhost:3000):
 | `ENCRYPTION_KEY_PREVIOUS` | No | Previous encryption key for seamless rotation |
 | `BLOB_READ_WRITE_TOKEN` | No | Vercel Blob token for transcript + asset storage |
 | `COMPOSIO_API_KEY` | No | Composio API key for MCP tool integrations |
-| `CRON_SECRET` | Yes | Vercel Cron authentication (auto-set in production) |
+| `CRON_SECRET` | Yes | Vercel Cron authentication (manual; random string ≥16 chars) |
 
 ## API Authentication
 
@@ -267,7 +267,7 @@ The app is deployed on Vercel.
    |---|---|
    | `ADMIN_API_KEY` | Any strong secret string for admin route authentication |
    | `ENCRYPTION_KEY` | `openssl rand -hex 32` (64 hex chars, used for AES-256-GCM encryption) |
-   | `CRON_SECRET` | Any strong secret string for Vercel Cron job authentication |
+   | `CRON_SECRET` | Random string ≥16 chars (use a password generator); Vercel sends it as `Authorization: Bearer` header to cron endpoints |
 
 6. Push to `main` to trigger a production deploy.
 
