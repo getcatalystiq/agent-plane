@@ -354,15 +354,24 @@ export function createSessionStreamResponse(
     });
 
     if (!detached) {
-      await finalizeSessionMessage(
-        runId,
-        tenantId,
-        sessionId,
-        transcriptChunks,
-        effectiveBudget,
-        sandbox,
-        sdkSessionIdRef.value,
-      );
+      try {
+        await finalizeSessionMessage(
+          runId,
+          tenantId,
+          sessionId,
+          transcriptChunks,
+          effectiveBudget,
+          sandbox,
+          sdkSessionIdRef.value,
+        );
+      } catch (finErr) {
+        // DEBUG: emit error as NDJSON event so we can see it in curl
+        yield JSON.stringify({
+          type: "debug_finalize_error",
+          error: finErr instanceof Error ? finErr.message : String(finErr),
+          stack: finErr instanceof Error ? finErr.stack : undefined,
+        });
+      }
     }
   }
 
