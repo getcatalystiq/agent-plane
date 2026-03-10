@@ -9,20 +9,31 @@ A multi-tenant platform for running Claude Agent SDK agents in isolated Vercel S
 **Core concepts:**
 - **Tenant** — isolated workspace with its own API keys, agents, budget, and timezone
 - **Agent** — configuration (model, tools, permissions, skills, plugins, git repo, schedule, max runtime) that runs Claude Agent SDK
-- **Run** — a single agent execution triggered by API, schedule, or playground; streams NDJSON events; tracks `triggered_by` source
+- **Run** — a single agent execution triggered by API, schedule, playground, or chat; streams NDJSON events; tracks `triggered_by` source
+- **Session** — persistent multi-turn conversation with sandbox kept alive; uses Claude Agent SDK `resume: sessionId` for context preservation; each message creates a run with `triggered_by: 'chat'`
 - **Schedule** — per-agent cron configuration (manual/hourly/daily/weekdays/weekly) with timezone-aware execution
 - **MCP Server** — custom OAuth-authenticated tool server registered by admins; agents connect via OAuth 2.1 PKCE
 - **Plugin Marketplace** — GitHub repo containing reusable skills/commands that agents can install
 
-**Execution flow:**
+**Execution flow (one-shot runs):**
 1. Client POSTs to `/api/agents/:id/runs` (or `/api/runs`) with a prompt
-2. MCP config is built (Composio toolkits + custom MCP servers resolved, tokens refreshed)
+2. MCP config is built (Composio toolkits + custom MCP servers resolved, tokens refreshed in parallel)
 3. A Vercel Sandbox is created; `@anthropic-ai/claude-agent-sdk` installed; skill + plugin files injected
 4. Claude Agent SDK `query()` runs inside the sandbox
 5. Events stream back over NDJSON (`run_started`, `assistant`, `tool_use`, `tool_result`, `result`, `text_delta`)
 6. Ephemeral asset URLs (e.g. Composio/Firecrawl) are replaced with permanent Vercel Blob URLs
 7. Transcript stored in Vercel Blob; token usage + cost recorded in DB
 8. Long-running streams (>4.5 min) detach with a `stream_detached` event; clients poll `/api/runs/:id`
+
+**Execution flow (sessions):**
+1. Client POSTs to `/api/sessions` with `agent_id` (optional `prompt` for first message)
+2. Sandbox created and kept warm (no runner script yet); session enters `idle` state
+3. Client POSTs to `/api/sessions/:id/messages` with `prompt`
+4. Per-message `runner-<runId>.mjs` written to sandbox, executes `query({ prompt, options: { resume: sessionId } })`
+5. Session transitions: `idle` → `active` (message in flight) → `idle` (message done)
+6. Session file backed up to Vercel Blob BEFORE response ends (prevents TOCTOU race with cleanup cron)
+7. Sandbox stays alive for 10 min idle; cleanup cron stops stale sessions
+8. On cold start (sandbox died): new sandbox created, session file restored from Blob, SDK resumes from disk
 
 ## Key Commands
 
@@ -52,6 +63,7 @@ src/
       composio/           # tenant-scoped Composio toolkit + tool discovery
       internal/           # internal endpoints (run transcript upload from sandbox)
       runs/               # run list, status (NDJSON stream), cancel, transcript
+      sessions/           # tenant-scoped session CRUD + message sending (NDJSON stream)
       admin/
         agents/           # admin agent CRUD + connectors + MCP connections + plugin suggestions
         composio/         # available Composio toolkits + tools listing
@@ -59,10 +71,12 @@ src/
         mcp-servers/      # custom MCP server CRUD
         plugin-marketplaces/  # marketplace CRUD + plugin listing + file editing
         runs/             # admin run management + cancellation
+        sessions/         # admin session management + playground messaging
         tenants/          # tenant CRUD + API key management
-      cron/               # scheduled jobs (budget reset, sandbox + transcript cleanup, scheduled runs)
+      cron/               # scheduled jobs (budget reset, sandbox + transcript + session cleanup, scheduled runs)
         budget-reset/     # daily budget reset
-        cleanup-sandboxes/  # sandbox cleanup every 5 min
+        cleanup-sandboxes/  # sandbox cleanup every 5 min (excludes session-owned runs)
+        cleanup-sessions/ # session cleanup every 5 min (idle timeout + stuck session watchdog)
         cleanup-transcripts/  # daily transcript cleanup
         scheduled-runs/   # per-minute scheduled agent run dispatcher + executor
       health/             # health check (no auth)
@@ -84,15 +98,18 @@ src/
   db/
     index.ts              # DB client (Pool, query helpers, RLS context, transactions)
     migrate.ts            # migration runner
-    migrations/           # sequential SQL migration files (001–012)
+    migrations/           # sequential SQL migration files (001–014)
   lib/
     types.ts              # branded types, domain interfaces, StreamEvent union
     env.ts                # Zod-validated env (getEnv())
     validation.ts         # Zod request/response schemas
     auth.ts               # API key authentication + tenant RLS context
     admin-auth.ts         # admin JWT + cookie auth
-    sandbox.ts            # Vercel Sandbox creation + Claude Agent SDK runner + skill/plugin file injection
+    sandbox.ts            # Vercel Sandbox creation + Claude Agent SDK runner + session sandbox + skill/plugin injection
     run-executor.ts       # run preparation + execution abstraction (sandbox setup, transcript, billing)
+    sessions.ts           # session lifecycle (create, transition, stop, idle/stuck queries)
+    session-executor.ts   # session message execution (sandbox prepare/reconnect, message run, finalize)
+    session-files.ts      # session file backup/restore to Vercel Blob (multipart upload)
     schedule.ts           # schedule config management, cron expression building, timezone-aware scheduling
     timezone.ts           # browser-safe timezone validation using Intl.DateTimeFormat
     cron-auth.ts          # cron secret verification for scheduled run endpoints
@@ -145,6 +162,7 @@ sdk/                      # TypeScript SDK (published as `@getcatalystiq/agentpl
       plugins.ts          # agent plugin management (list, add, remove)
       connectors.ts       # Composio connector management (list, saveApiKey, initiateOauth, availableToolkits/Tools)
       custom-connectors.ts # MCP custom connector management (listServers, list, delete, updateAllowedTools, listTools, initiateOauth)
+      sessions.ts          # session CRUD + message sending (create, get, list, sendMessage, sendMessageAndWait, stop)
       plugin-marketplaces.ts # marketplace discovery (list, listPlugins) — admin-only for mutations
     index.ts              # public exports
   tests/
@@ -154,15 +172,16 @@ sdk/                      # TypeScript SDK (published as `@getcatalystiq/agentpl
 
 ## Database
 
-Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `runs`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`.
+Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `runs`, `sessions`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`.
 
 - Agent names are unique per tenant
 - RLS enforced via `app.current_tenant_id` session config (fail-closed via `NULLIF`)
 - Tenant-scoped transactions via `withTenantTransaction()`
-- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–012), run via `npm run migrate`
+- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–014), run via `npm run migrate`
 - `tenants` table includes: `timezone` column for schedule evaluation
 - `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600)
-- `runs` table includes: `triggered_by` column (`api`, `schedule`, `playground`) to track run source
+- `runs` table includes: `triggered_by` column (`api`, `schedule`, `playground`, `chat`) to track run source; `session_id` FK to sessions table for chat messages
+- `sessions` table includes: `sandbox_id` (NULL when stopped), `sdk_session_id` (Claude Agent SDK session), `session_blob_url` (Vercel Blob backup), `status` (creating/active/idle/stopped), `message_count`, `idle_since`, `last_backup_at`; state machine: creating→active/idle/stopped, active→idle/stopped, idle→active/stopped; max 5 concurrent sessions per tenant
 - `mcp_servers` — admin-managed global registry (OAuth 2.1 client credentials, no RLS)
 - `mcp_connections` — per-agent OAuth connections (tenant-scoped RLS, unique per agent-server pair)
 - `plugin_marketplaces` — global registry of GitHub repos; optional encrypted GitHub token for push-to-repo editing
@@ -223,7 +242,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Sandbox network policy allowlists: AI Gateway, Composio, Firecrawl, GitHub, npm registry, platform API, custom MCP servers
 - Max 10 concurrent runs per tenant; atomic concurrent run check prevents TOCTOU races
 - Transcript viewer renders markdown via `react-markdown` + `remark-gfm`; HTML sanitized with `dompurify`
-- SDK resource namespaces: `client.runs`, `client.agents`, `client.connectors`, `client.customConnectors`, `client.pluginMarketplaces`; agents nests `skills`, `plugins`, `connectors`, `customConnectors`
+- SDK resource namespaces: `client.runs`, `client.agents`, `client.sessions`, `client.connectors`, `client.customConnectors`, `client.pluginMarketplaces`; agents nests `skills`, `plugins`, `connectors`, `customConnectors`
 - JSONB array mutations use atomic SQL guards (`NOT EXISTS` for uniqueness, `jsonb_array_length` for limits) to prevent TOCTOU races
 - Composio discovery helpers (`listComposioToolkits`, `listComposioTools`) are shared between admin and tenant routes via `src/lib/composio.ts`; tool pagination capped at 10 pages
 - Scheduled runs: cron dispatcher runs every minute, claims due agents, computes next run time, dispatches to executor endpoint
@@ -231,3 +250,9 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Transcript capture preserves critical events (result/error) even after truncation limit
 - Timezone validation extracted to `src/lib/timezone.ts` to avoid pulling `croner` into client bundles
 - `croner` library used for cron expression evaluation and next-run-time computation
+- Session sandbox uses per-message `runner-<runId>.mjs` scripts with `resume: sessionId`; no persistent process inside sandbox
+- Session file backup (to Vercel Blob) is synchronous — completes BEFORE response stream closes to prevent TOCTOU race with cleanup cron
+- Session file uploads use `multipart: true` for Blob put() to handle >4.5MB server upload limit
+- MCP token refresh in `buildMcpConfig()` is parallelized with `Promise.allSettled()` for faster cold starts
+- Cleanup cron for sessions runs every 5 min: stops idle sessions after 10 min, watchdog catches stuck creating (>5 min) and active (>30 min) sessions
+- `cleanup-sandboxes` cron excludes session-owned runs (`session_id IS NULL` filter)
