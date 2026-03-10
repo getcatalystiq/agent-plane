@@ -42,28 +42,28 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     throw new ConflictError("Session is currently processing a message");
   }
 
-  // Check tenant budget (long-lived sessions could outlive creation-time check)
-  await withTenantTransaction(auth.tenantId, async (tx) => {
-    await checkTenantBudget(tx, auth.tenantId);
-  }).catch(async (err) => {
-    // Rollback session to idle on budget check failure
-    await transitionSessionStatus(sessionId, auth.tenantId, "active", "idle", {
-      idle_since: new Date().toISOString(),
-    }).catch((rollbackErr) => {
-      logger.error("Failed to rollback session to idle after budget check failure", {
-        session_id: sessionId,
-        error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+  // Run budget check and agent load in parallel (both are independent DB queries)
+  const [, agent] = await Promise.all([
+    withTenantTransaction(auth.tenantId, async (tx) => {
+      await checkTenantBudget(tx, auth.tenantId);
+    }).catch(async (err) => {
+      // Rollback session to idle on budget check failure
+      await transitionSessionStatus(sessionId, auth.tenantId, "active", "idle", {
+        idle_since: new Date().toISOString(),
+      }).catch((rollbackErr) => {
+        logger.error("Failed to rollback session to idle after budget check failure", {
+          session_id: sessionId,
+          error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+        });
       });
-    });
-    throw err;
-  });
-
-  // Load agent config (need internal schema for MCP fields)
-  const agent = await queryOne(
-    AgentRowInternal,
-    "SELECT * FROM agents WHERE id = $1 AND tenant_id = $2",
-    [session.agent_id, auth.tenantId],
-  );
+      throw err;
+    }),
+    queryOne(
+      AgentRowInternal,
+      "SELECT * FROM agents WHERE id = $1 AND tenant_id = $2",
+      [session.agent_id, auth.tenantId],
+    ),
+  ]);
   if (!agent) throw new NotFoundError("Agent not found");
 
   // Apply per-message overrides capped to agent config

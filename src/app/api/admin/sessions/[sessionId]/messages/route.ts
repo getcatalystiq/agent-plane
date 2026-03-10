@@ -47,27 +47,27 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     throw new ConflictError("Session is currently processing a message");
   }
 
-  // Check tenant budget (long-lived sessions could outlive creation-time check)
-  await withTenantTransaction(tenantId, async (tx) => {
-    await checkTenantBudget(tx, tenantId);
-  }).catch(async (err) => {
-    await transitionSessionStatus(sessionId, tenantId, "active", "idle", {
-      idle_since: new Date().toISOString(),
-    }).catch((rollbackErr) => {
-      logger.error("Failed to rollback session to idle after budget check failure", {
-        session_id: sessionId,
-        error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+  // Run budget check and agent load in parallel (both are independent DB queries)
+  const [, agent] = await Promise.all([
+    withTenantTransaction(tenantId, async (tx) => {
+      await checkTenantBudget(tx, tenantId);
+    }).catch(async (err) => {
+      await transitionSessionStatus(sessionId, tenantId, "active", "idle", {
+        idle_since: new Date().toISOString(),
+      }).catch((rollbackErr) => {
+        logger.error("Failed to rollback session to idle after budget check failure", {
+          session_id: sessionId,
+          error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+        });
       });
-    });
-    throw err;
-  });
-
-  // Load agent
-  const agent = await queryOne(
-    AgentRowInternal,
-    "SELECT * FROM agents WHERE id = $1",
-    [session.agent_id],
-  );
+      throw err;
+    }),
+    queryOne(
+      AgentRowInternal,
+      "SELECT * FROM agents WHERE id = $1",
+      [session.agent_id],
+    ),
+  ]);
   if (!agent) throw new NotFoundError("Agent not found");
 
   const effectiveBudget = Math.min(

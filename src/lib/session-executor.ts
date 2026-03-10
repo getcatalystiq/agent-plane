@@ -53,12 +53,97 @@ export async function prepareSessionSandbox(
 ): Promise<SessionSandboxInstance> {
   const env = getEnv();
 
-  // Build MCP + plugin config (process-level cache with 5-min TTL makes
-  // repeated hot-path calls cheap while keeping tokens fresh)
-  const [mcpResult, pluginResult] = await Promise.all([
-    buildMcpConfig(params.agent, params.tenantId),
-    fetchPluginContent(params.agent.plugins ?? []),
-  ]);
+  // Hot path: try to reconnect to existing sandbox.
+  // Run buildMcpConfig + fetchPluginContent in PARALLEL with the reconnect attempt.
+  // On reconnect success, we still need MCP config for the runner env vars.
+  // On reconnect failure (cold path), we already have the config ready.
+  const mcpPromise = buildMcpConfig(params.agent, params.tenantId);
+  const pluginPromise = fetchPluginContent(params.agent.plugins ?? []);
+
+  if (session.sandbox_id) {
+    // Race the reconnect against the MCP/plugin fetch — reconnect is fast if sandbox exists
+    const [reconnectResult, mcpResult, pluginResult] = await Promise.all([
+      reconnectSessionSandbox(session.sandbox_id, {
+        agent: {
+          ...params.agent,
+          max_budget_usd: params.effectiveBudget,
+          max_turns: params.effectiveMaxTurns,
+        },
+        tenantId: params.tenantId,
+        sessionId: params.sessionId,
+        platformApiUrl: params.platformApiUrl,
+        aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+        // MCP config will be applied after reconnect
+        mcpServers: undefined,
+        mcpErrors: [],
+        pluginFiles: [],
+        maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
+      }),
+      mcpPromise,
+      pluginPromise,
+    ]);
+
+    if (reconnectResult) {
+      // Inject fresh MCP server config into the reconnected sandbox's base env
+      // so subsequent runMessage() calls have up-to-date tokens.
+      if (Object.keys(mcpResult.servers).length > 0) {
+        reconnectResult.updateMcpConfig(mcpResult.servers, mcpResult.errors);
+      }
+
+      // Skip extendTimeout if session was active recently (< 5 min idle)
+      const idleSinceMs = session.idle_since ? Date.now() - new Date(session.idle_since).getTime() : Infinity;
+      if (idleSinceMs > 5 * 60 * 1000) {
+        await reconnectResult.extendTimeout(DEFAULT_SESSION_TIMEOUT_MS);
+      }
+      logger.info("Session sandbox reconnected (hot path)", {
+        session_id: params.sessionId,
+        sandbox_id: session.sandbox_id,
+        skipped_extend_timeout: idleSinceMs <= 5 * 60 * 1000,
+      });
+      return reconnectResult;
+    }
+
+    logger.info("Session sandbox gone, creating new (cold path)", {
+      session_id: params.sessionId,
+      old_sandbox_id: session.sandbox_id,
+    });
+
+    // MCP + plugin results already resolved from Promise.all above
+    if (mcpResult.errors.length > 0) {
+      logger.warn("MCP config errors for session", {
+        session_id: params.sessionId,
+        errors: mcpResult.errors,
+      });
+    }
+
+    const sandboxConfig: SessionSandboxConfig = {
+      agent: {
+        ...params.agent,
+        max_budget_usd: params.effectiveBudget,
+        max_turns: params.effectiveMaxTurns,
+      },
+      tenantId: params.tenantId,
+      sessionId: params.sessionId,
+      platformApiUrl: params.platformApiUrl,
+      aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+      mcpServers: mcpResult.servers,
+      mcpErrors: mcpResult.errors,
+      pluginFiles: [...pluginResult.skillFiles, ...pluginResult.commandFiles],
+      maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
+    };
+
+    const sandbox = await createSessionSandbox(sandboxConfig);
+    await updateSessionSandbox(params.sessionId, params.tenantId, sandbox.id);
+
+    if (session.sdk_session_id && session.session_blob_url) {
+      await restoreSessionFile(sandbox, session.session_blob_url, session.sdk_session_id);
+    }
+
+    return sandbox;
+  }
+
+  // No existing sandbox — pure cold path
+  const [mcpResult, pluginResult] = await Promise.all([mcpPromise, pluginPromise]);
 
   if (mcpResult.errors.length > 0) {
     logger.warn("MCP config errors for session", {
@@ -83,30 +168,9 @@ export async function prepareSessionSandbox(
     maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
   };
 
-  // Hot path: try to reconnect to existing sandbox
-  if (session.sandbox_id) {
-    const sandbox = await reconnectSessionSandbox(session.sandbox_id, sandboxConfig);
-    if (sandbox) {
-      await sandbox.extendTimeout(DEFAULT_SESSION_TIMEOUT_MS);
-      logger.info("Session sandbox reconnected (hot path)", {
-        session_id: params.sessionId,
-        sandbox_id: session.sandbox_id,
-      });
-      return sandbox;
-    }
-    logger.info("Session sandbox gone, creating new (cold path)", {
-      session_id: params.sessionId,
-      old_sandbox_id: session.sandbox_id,
-    });
-  }
-
-  // Cold path: create new sandbox
   const sandbox = await createSessionSandbox(sandboxConfig);
-
-  // Update session with new sandbox_id
   await updateSessionSandbox(params.sessionId, params.tenantId, sandbox.id);
 
-  // Restore session file from Blob if resuming
   if (session.sdk_session_id && session.session_blob_url) {
     await restoreSessionFile(sandbox, session.session_blob_url, session.sdk_session_id);
   }
