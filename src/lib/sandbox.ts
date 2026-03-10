@@ -5,85 +5,111 @@ import type { McpServerConfig } from "./mcp";
 
 // --- SDK Snapshot Cache ---
 // Pre-built snapshot with @anthropic-ai/claude-agent-sdk installed.
-// Created lazily on first cold start, then reused for all subsequent sandboxes.
-// Eliminates ~3-4s npm install on every cold start.
-// Rebuilt automatically if older than 24 hours (picks up SDK updates).
-const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Managed by the refresh-snapshot cron job (runs daily).
+// On cold start, the most recent valid snapshot is looked up from the API.
+// Falls back to fresh npm install if no snapshot exists.
+const SNAPSHOT_MAX_AGE_MS = 25 * 60 * 60 * 1000; // 25 hours (cron runs every 24h, 1h grace)
 
 let sdkSnapshotId: string | null = null;
 let sdkSnapshotCreatedAt: number | null = null;
-let sdkSnapshotPromise: Promise<string> | null = null;
 
-async function getOrCreateSdkSnapshot(): Promise<string> {
-  // Return cached snapshot if still fresh
+/**
+ * Find the most recent valid SDK snapshot from Vercel.
+ * Returns the snapshot ID or null if none found / all expired.
+ */
+async function findSdkSnapshot(): Promise<string | null> {
+  // Return cached if fresh
   if (sdkSnapshotId && sdkSnapshotCreatedAt && Date.now() - sdkSnapshotCreatedAt < SNAPSHOT_MAX_AGE_MS) {
     return sdkSnapshotId;
   }
 
-  // Deduplicate concurrent snapshot creation requests
-  if (sdkSnapshotPromise) return sdkSnapshotPromise;
-
-  sdkSnapshotPromise = (async () => {
-    // Check if we already have a valid, recent snapshot
-    try {
-      const result = await Snapshot.list({ limit: 10 });
-      const now = Date.now();
-      const existing = result.json.snapshots.find(
-        (s: { status: string; createdAt: number }) =>
-          s.status === "created" && now - s.createdAt < SNAPSHOT_MAX_AGE_MS,
-      );
-      if (existing) {
-        sdkSnapshotId = existing.id;
-        sdkSnapshotCreatedAt = existing.createdAt;
-        logger.info("Reusing existing SDK snapshot", {
-          snapshot_id: existing.id,
-          age_hours: ((now - existing.createdAt) / 3600_000).toFixed(1),
-        });
-        return existing.id;
-      }
-    } catch (err) {
-      logger.warn("Failed to list snapshots, will create new", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    // Create a fresh sandbox, install SDK, snapshot it
-    logger.info("Creating SDK snapshot (one-time operation)");
-    const sandbox = await Sandbox.create({
-      runtime: "node22",
-      resources: { vcpus: 2 },
-      timeout: 120_000,
-    });
-
-    const installCmd = await sandbox.runCommand({
-      cmd: "npm",
-      args: ["install", "@anthropic-ai/claude-agent-sdk"],
-    });
-    if (installCmd.exitCode !== 0) {
-      const stderr = await installCmd.stderr();
-      await sandbox.stop();
-      throw new Error(`SDK install failed during snapshot creation: ${stderr.slice(0, 500)}`);
-    }
-
-    // snapshot() stops the sandbox automatically
-    const snapshot = await sandbox.snapshot();
-    sdkSnapshotId = snapshot.snapshotId;
-    sdkSnapshotCreatedAt = Date.now();
-    logger.info("SDK snapshot created", { snapshot_id: snapshot.snapshotId });
-    return snapshot.snapshotId;
-  })();
-
   try {
-    return await sdkSnapshotPromise;
-  } finally {
-    sdkSnapshotPromise = null;
+    const result = await Snapshot.list({ limit: 10 });
+    const now = Date.now();
+    const existing = result.json.snapshots.find(
+      (s: { status: string; createdAt: number }) =>
+        s.status === "created" && now - s.createdAt < SNAPSHOT_MAX_AGE_MS,
+    );
+    if (existing) {
+      sdkSnapshotId = existing.id;
+      sdkSnapshotCreatedAt = existing.createdAt;
+      logger.info("Found SDK snapshot", {
+        snapshot_id: existing.id,
+        age_hours: ((now - existing.createdAt) / 3600_000).toFixed(1),
+      });
+      return existing.id;
+    }
+  } catch (err) {
+    logger.warn("Failed to list snapshots", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
+
+  sdkSnapshotId = null;
+  sdkSnapshotCreatedAt = null;
+  return null;
 }
 
 /** Invalidate the cached snapshot (e.g. if sandbox creation from it fails). */
 function invalidateSdkSnapshot() {
   sdkSnapshotId = null;
   sdkSnapshotCreatedAt = null;
+}
+
+/**
+ * Create a fresh SDK snapshot. Called by the refresh-snapshot cron job.
+ * Returns the new snapshot ID and cleans up old snapshots.
+ */
+export async function refreshSdkSnapshot(): Promise<{ snapshotId: string; cleaned: number }> {
+  logger.info("Creating fresh SDK snapshot");
+  const sandbox = await Sandbox.create({
+    runtime: "node22",
+    resources: { vcpus: 2 },
+    timeout: 120_000,
+  });
+
+  const installCmd = await sandbox.runCommand({
+    cmd: "npm",
+    args: ["install", "@anthropic-ai/claude-agent-sdk"],
+  });
+  if (installCmd.exitCode !== 0) {
+    const stderr = await installCmd.stderr();
+    await sandbox.stop();
+    throw new Error(`SDK install failed during snapshot creation: ${stderr.slice(0, 500)}`);
+  }
+
+  // snapshot() stops the sandbox automatically
+  const snapshot = await sandbox.snapshot();
+  const newId = snapshot.snapshotId;
+
+  // Update process-level cache
+  sdkSnapshotId = newId;
+  sdkSnapshotCreatedAt = Date.now();
+  logger.info("SDK snapshot created", { snapshot_id: newId });
+
+  // Clean up old snapshots (keep only the new one)
+  let cleaned = 0;
+  try {
+    const result = await Snapshot.list({ limit: 20 });
+    for (const s of result.json.snapshots) {
+      if (s.id !== newId && s.status === "created") {
+        try {
+          const old = await Snapshot.get({ snapshotId: s.id });
+          await old.delete();
+          cleaned++;
+          logger.info("Deleted old SDK snapshot", { snapshot_id: s.id });
+        } catch {
+          // Best-effort cleanup
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn("Failed to clean up old snapshots", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return { snapshotId: newId, cleaned };
 }
 
 export interface SandboxConfig {
@@ -125,29 +151,34 @@ async function createSandboxFromSnapshot(opts: {
   timeout: number;
   networkPolicy: { allow: string[] };
 }): Promise<Sandbox> {
-  try {
-    const snapshotId = await getOrCreateSdkSnapshot();
-    return await Sandbox.create({
-      source: { type: "snapshot", snapshotId },
-      resources: opts.resources,
-      timeout: opts.timeout,
-      networkPolicy: opts.networkPolicy,
-    });
-  } catch (err) {
-    // Snapshot may be expired or invalid — fall back to fresh sandbox
-    logger.warn("Snapshot-based sandbox creation failed, falling back to fresh install", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    invalidateSdkSnapshot();
-    const sandbox = await Sandbox.create({
-      runtime: "node22",
-      resources: opts.resources,
-      timeout: opts.timeout,
-      networkPolicy: opts.networkPolicy,
-    });
-    await installSdk(sandbox, "fallback");
-    return sandbox;
+  const snapshotId = await findSdkSnapshot();
+
+  if (snapshotId) {
+    try {
+      return await Sandbox.create({
+        source: { type: "snapshot", snapshotId },
+        resources: opts.resources,
+        timeout: opts.timeout,
+        networkPolicy: opts.networkPolicy,
+      });
+    } catch (err) {
+      // Snapshot may be expired or invalid — fall back to fresh sandbox
+      logger.warn("Snapshot-based sandbox creation failed, falling back to fresh install", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      invalidateSdkSnapshot();
+    }
   }
+
+  // No snapshot or snapshot failed — fresh sandbox + npm install
+  const sandbox = await Sandbox.create({
+    runtime: "node22",
+    resources: opts.resources,
+    timeout: opts.timeout,
+    networkPolicy: opts.networkPolicy,
+  });
+  await installSdk(sandbox, "fallback");
+  return sandbox;
 }
 
 /** Install the Claude Agent SDK in a sandbox. */

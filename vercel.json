@@ -5,7 +5,8 @@
     { "path": "/api/cron/cleanup-sandboxes", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/budget-reset", "schedule": "0 0 * * *" },
     { "path": "/api/cron/scheduled-runs", "schedule": "* * * * *" },
-    { "path": "/api/cron/cleanup-sessions", "schedule": "*/5 * * * *" }
+    { "path": "/api/cron/cleanup-sessions", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/refresh-snapshot", "schedule": "0 4 * * *" }
   ],
   "functions": {
     "app/api/runs/**": { "supportsCancellation": true },
