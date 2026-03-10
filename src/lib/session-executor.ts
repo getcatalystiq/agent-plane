@@ -211,6 +211,11 @@ export async function finalizeSessionMessage(
   sandbox: SessionSandboxInstance,
   sdkSessionId: string | null,
 ): Promise<void> {
+  logger.info("finalizeSessionMessage: starting", {
+    run_id: runId, session_id: sessionId, sdk_session_id: sdkSessionId,
+    transcript_chunks: transcriptChunks.length,
+  });
+
   try {
     // 1. Persist transcript
     let resultData: { status: RunStatus; updates: Record<string, unknown> } | null = null;
@@ -233,9 +238,11 @@ export async function finalizeSessionMessage(
         { expectedMaxBudgetUsd: effectiveBudget },
       );
     }
+    logger.info("finalizeSessionMessage: step 1 done (transcript)", { run_id: runId, session_id: sessionId });
 
     // 2. Increment message count
     await incrementMessageCount(sessionId, tenantId);
+    logger.info("finalizeSessionMessage: step 2 done (message count)", { run_id: runId, session_id: sessionId });
 
     // 3. Back up session file SYNCHRONOUSLY (before response ends)
     let sessionBlobUrl: string | null = null;
@@ -254,9 +261,12 @@ export async function finalizeSessionMessage(
         });
       }
     }
+    logger.info("finalizeSessionMessage: step 3 done (backup)", {
+      run_id: runId, session_id: sessionId, session_blob_url: sessionBlobUrl,
+    });
 
     // 4. Transition session to idle
-    await transitionSessionStatus(
+    const transitioned = await transitionSessionStatus(
       sessionId,
       tenantId,
       "active",
@@ -268,6 +278,9 @@ export async function finalizeSessionMessage(
         ...(sessionBlobUrl ? { session_blob_url: sessionBlobUrl, last_backup_at: new Date().toISOString() } : {}),
       },
     );
+    logger.info("finalizeSessionMessage: step 4 done (session idle)", {
+      run_id: runId, session_id: sessionId, transitioned,
+    });
   } catch (err) {
     logger.error("Failed to finalize session message", {
       run_id: runId,
@@ -333,6 +346,12 @@ export function createSessionStreamResponse(
     for await (const line of logIterator) {
       yield line;
     }
+
+    logger.info("streamWithFinalize: log iteration complete", {
+      session_id: sessionId, run_id: runId, detached,
+      sdk_session_id: sdkSessionIdRef.value,
+      transcript_chunks: transcriptChunks.length,
+    });
 
     if (!detached) {
       await finalizeSessionMessage(
