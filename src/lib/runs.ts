@@ -57,7 +57,7 @@ export async function createRun(
   tenantId: TenantId,
   agentId: AgentId,
   prompt: string,
-  options?: { triggeredBy?: RunTriggeredBy; scheduleId?: ScheduleId; sessionId?: string },
+  options?: { triggeredBy?: RunTriggeredBy; scheduleId?: ScheduleId; sessionId?: string; createdByKeyId?: string },
 ): Promise<{ run: z.infer<typeof RunRow>; agent: AgentInternal; remainingBudget: number }> {
   return withTenantTransaction(tenantId, async (tx) => {
     // Load agent (including internal Composio MCP cache fields)
@@ -75,13 +75,14 @@ export async function createRun(
     const triggeredBy = options?.triggeredBy ?? "api";
     const scheduleId = options?.scheduleId ?? null;
     const sessionId = options?.sessionId ?? null;
+    const createdByKeyId = options?.createdByKeyId ?? null;
     const inserted = await tx.queryOne(
       RunRow,
-      `INSERT INTO runs (id, agent_id, tenant_id, status, prompt, triggered_by, schedule_id, session_id, created_at)
-       SELECT $1, $2, $3, 'pending', $4, $5, $6, $7, NOW()
-       WHERE (SELECT COUNT(*) FROM runs WHERE tenant_id = $3 AND status IN ('pending', 'running')) < $8
+      `INSERT INTO runs (id, agent_id, tenant_id, status, prompt, triggered_by, schedule_id, session_id, created_by_key_id, created_at)
+       SELECT $1, $2, $3, 'pending', $4, $5, $6, $7, $8, NOW()
+       WHERE (SELECT COUNT(*) FROM runs WHERE tenant_id = $3 AND status IN ('pending', 'running')) < $9
        RETURNING *`,
-      [runId, agentId, tenantId, prompt, triggeredBy, scheduleId, sessionId, MAX_CONCURRENT_RUNS],
+      [runId, agentId, tenantId, prompt, triggeredBy, scheduleId, sessionId, createdByKeyId, MAX_CONCURRENT_RUNS],
     );
 
     if (!inserted) {
@@ -212,7 +213,7 @@ export async function getRun(runId: string, tenantId: TenantId) {
 
 export async function listRuns(
   tenantId: TenantId,
-  options: { agentId?: string; sessionId?: string; status?: RunStatus; limit: number; offset: number },
+  options: { agentId?: string; sessionId?: string; status?: RunStatus; triggeredBy?: RunTriggeredBy; limit: number; offset: number },
 ) {
   const conditions = ["tenant_id = $1"];
   const params: unknown[] = [tenantId];
@@ -231,6 +232,11 @@ export async function listRuns(
   if (options.status) {
     conditions.push(`status = $${idx}`);
     params.push(options.status);
+    idx++;
+  }
+  if (options.triggeredBy) {
+    conditions.push(`triggered_by = $${idx}`);
+    params.push(options.triggeredBy);
     idx++;
   }
 

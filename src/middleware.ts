@@ -53,6 +53,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // A2A Agent Card is public (specific regex — NOT prefix match)
+  if (/^\/api\/a2a\/[^/]+\/\.well-known\/agent-card\.json$/.test(pathname)) {
+    return NextResponse.next();
+  }
+
   // OAuth callbacks are unauthenticated (redirect from external provider)
   if (/^\/api\/agents\/[^/]+\/connectors\/[^/]+\/callback$/.test(pathname)) {
     return NextResponse.next();

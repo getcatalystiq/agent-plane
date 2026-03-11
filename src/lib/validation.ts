@@ -208,7 +208,7 @@ export const SafePluginFilename = z.string()
 // --- Schedule Validation ---
 
 export const ScheduleFrequencySchema = z.enum(["manual", "hourly", "daily", "weekdays", "weekly"]);
-export const RunTriggeredBySchema = z.enum(["api", "schedule", "playground", "chat"]);
+export const RunTriggeredBySchema = z.enum(["api", "schedule", "playground", "chat", "a2a"]);
 export const SessionStatusSchema = z.enum(["creating", "active", "idle", "stopped"]);
 export const TimezoneSchema = z.string().min(1).max(100).refine(isValidTimezone, { message: "Invalid IANA timezone" });
 
@@ -239,6 +239,7 @@ export const CreateAgentSchema = z.object({
   max_turns: z.number().int().min(1).max(1000).default(10),
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
   max_runtime_seconds: z.number().int().min(60).max(3600).default(600),
+  a2a_enabled: z.boolean().default(false),
 });
 
 // Strip defaults before .partial() so omitted fields stay undefined (not default values)
@@ -257,6 +258,7 @@ export const UpdateAgentSchema = z.object({
   max_turns: z.number().int().min(1).max(1000),
   max_budget_usd: z.number().min(0.01).max(100.0),
   max_runtime_seconds: z.number().int().min(60).max(3600),
+  a2a_enabled: z.boolean(),
 }).partial();
 
 export type CreateAgentInput = z.infer<typeof CreateAgentSchema>;
@@ -343,6 +345,7 @@ export const AgentRow = z.object({
   max_turns: z.coerce.number(),
   max_budget_usd: z.coerce.number(),
   max_runtime_seconds: z.coerce.number(),
+  a2a_enabled: z.boolean().default(false),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -483,6 +486,7 @@ export const RunRow = z.object({
   error_messages: z.array(z.string()),
   sandbox_id: z.string().nullable(),
   triggered_by: RunTriggeredBySchema.default("api"),
+  created_by_key_id: z.string().nullable().default(null),
   schedule_id: z.string().nullable().default(null),
   session_id: z.string().nullable().default(null),
   started_at: z.coerce.string().nullable(),

@@ -56,6 +56,8 @@ export interface Agent {
   permission_mode: PermissionMode;
   max_turns: number;
   max_budget_usd: number;
+  max_runtime_seconds: number;
+  a2a_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -74,6 +76,8 @@ export interface CreateAgentParams {
   permission_mode?: PermissionMode | undefined;
   max_turns?: number | undefined;
   max_budget_usd?: number | undefined;
+  max_runtime_seconds?: number | undefined;
+  a2a_enabled?: boolean | undefined;
 }
 
 export type UpdateAgentParams = Partial<CreateAgentParams>;
@@ -99,6 +103,7 @@ export interface Run {
   transcript_blob_url: string | null;
   error_type: string | null;
   error_messages: string[];
+  triggered_by: string;
   session_id: string | null;
   sandbox_id: string | null;
   started_at: string | null;
@@ -117,6 +122,7 @@ export interface ListRunsParams extends PaginationParams {
   agent_id?: string | undefined;
   session_id?: string | undefined;
   status?: RunStatus | undefined;
+  triggered_by?: string | undefined;
 }
 
 // --- Pagination ---

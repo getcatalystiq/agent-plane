@@ -10,6 +10,7 @@
   ],
   "functions": {
     "app/api/runs/**": { "supportsCancellation": true },
-    "app/api/sessions/**": { "supportsCancellation": true }
+    "app/api/sessions/**": { "supportsCancellation": true },
+    "app/api/a2a/**": { "supportsCancellation": true }
   }
 }

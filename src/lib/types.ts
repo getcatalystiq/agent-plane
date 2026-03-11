@@ -14,7 +14,7 @@ export interface AgentPlugin {
 }
 
 export type ScheduleFrequency = "manual" | "hourly" | "daily" | "weekdays" | "weekly";
-export type RunTriggeredBy = "api" | "schedule" | "playground" | "chat";
+export type RunTriggeredBy = "api" | "schedule" | "playground" | "chat" | "a2a";
 
 export type SessionStatus = "creating" | "active" | "idle" | "stopped";
 

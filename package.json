@@ -37,6 +37,7 @@
     "sdk:typecheck": "npm run --prefix sdk typecheck"
   },
   "dependencies": {
+    "@a2a-js/sdk": "0.3.12",
     "@codemirror/lang-javascript": "^6.2.4",
     "@codemirror/lang-json": "^6.0.2",
     "@codemirror/lang-markdown": "^6.5.0",

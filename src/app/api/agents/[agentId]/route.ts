@@ -42,6 +42,7 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
     max_turns: input.max_turns,
     max_budget_usd: input.max_budget_usd,
     max_runtime_seconds: input.max_runtime_seconds,
+    a2a_enabled: input.a2a_enabled,
   };
 
   for (const [key, value] of Object.entries(fields)) {

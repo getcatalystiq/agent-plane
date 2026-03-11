@@ -64,8 +64,8 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 
   await execute(
     `INSERT INTO agents (id, tenant_id, name, description, git_repo_url, git_branch,
-      composio_toolkits, skills, model, allowed_tools, permission_mode, max_turns, max_budget_usd, max_runtime_seconds)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)`,
+      composio_toolkits, skills, model, allowed_tools, permission_mode, max_turns, max_budget_usd, max_runtime_seconds, a2a_enabled)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)`,
     [
       id,
       input.tenant_id,
@@ -81,6 +81,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       input.max_turns,
       input.max_budget_usd,
       input.max_runtime_seconds,
+      input.a2a_enabled,
     ],
   );
 

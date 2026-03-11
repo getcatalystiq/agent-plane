@@ -23,6 +23,7 @@ interface Agent {
   max_turns: number;
   max_budget_usd: number;
   max_runtime_seconds: number;
+  a2a_enabled: boolean;
 }
 
 export function AgentEditForm({ agent }: { agent: Agent }) {
@@ -34,6 +35,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
   const [maxTurns, setMaxTurns] = useState(agent.max_turns.toString());
   const [maxBudget, setMaxBudget] = useState(agent.max_budget_usd.toString());
   const [maxRuntime, setMaxRuntime] = useState(Math.floor(agent.max_runtime_seconds / 60).toString());
+  const [a2aEnabled, setA2aEnabled] = useState(agent.a2a_enabled);
   const [saving, setSaving] = useState(false);
 
   const isDirty =
@@ -43,7 +45,8 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
     permissionMode !== agent.permission_mode ||
     maxTurns !== agent.max_turns.toString() ||
     maxBudget !== agent.max_budget_usd.toString() ||
-    maxRuntime !== Math.floor(agent.max_runtime_seconds / 60).toString();
+    maxRuntime !== Math.floor(agent.max_runtime_seconds / 60).toString() ||
+    a2aEnabled !== agent.a2a_enabled;
 
   async function handleSave() {
     setSaving(true);
@@ -59,6 +62,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           max_turns: parseInt(maxTurns),
           max_budget_usd: parseFloat(maxBudget),
           max_runtime_seconds: parseInt(maxRuntime) * 60,
+          a2a_enabled: a2aEnabled,
         }),
       });
       router.refresh();
@@ -130,6 +134,20 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
               </Select>
             </FormField>
           </div>
+        </div>
+        <div className="mt-4 flex items-center gap-3">
+          <label className="relative inline-flex cursor-pointer items-center">
+            <input
+              type="checkbox"
+              checked={a2aEnabled}
+              onChange={(e) => setA2aEnabled(e.target.checked)}
+              className="peer sr-only"
+            />
+            <div className="h-5 w-9 rounded-full bg-zinc-700 after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all peer-checked:bg-indigo-500 peer-checked:after:translate-x-full" />
+          </label>
+          <span className="text-sm text-muted-foreground">
+            A2A Protocol — expose this agent via Agent-to-Agent protocol
+          </span>
         </div>
       </div>
     </div>
