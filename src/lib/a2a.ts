@@ -213,7 +213,7 @@ export class RunBackedTaskStore implements TaskStore {
     try {
       const sql = getHttpClient();
       const rows = await sql`
-        SELECT id, status, result_summary, duration_ms, created_at, completed_at
+        SELECT id, status, result_summary, duration_ms, created_at, completed_at, transcript
         FROM runs
         WHERE id = ${taskId}
           AND tenant_id = ${this.tenantId}
@@ -221,7 +221,36 @@ export class RunBackedTaskStore implements TaskStore {
 
       if (rows.length === 0) return undefined;
       const run = RunForTaskRow.parse(rows[0]);
-      return runToA2aTask(run);
+      const task = runToA2aTask(run);
+
+      // If completed and result_summary is just a status code, extract actual output from transcript
+      if (task.status.state === "completed" && rows[0].transcript) {
+        const transcript = typeof rows[0].transcript === "string" ? rows[0].transcript : "";
+        const lines = transcript.split("\n").filter(Boolean);
+        let lastAssistantText = "";
+        for (const line of lines) {
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "assistant" && event.message?.content) {
+              const textBlocks = Array.isArray(event.message.content)
+                ? event.message.content.filter((b: { type?: string }) => b.type === "text")
+                : [];
+              if (textBlocks.length > 0) {
+                lastAssistantText = textBlocks.map((b: { text: string }) => b.text).join("\n");
+              }
+            }
+          } catch { /* skip non-JSON */ }
+        }
+        if (lastAssistantText) {
+          task.artifacts = [{
+            artifactId: "result",
+            name: "Agent Result",
+            parts: [{ kind: "text", text: lastAssistantText } as TextPart],
+          }];
+        }
+      }
+
+      return task;
     } catch (err) {
       logger.error("RunBackedTaskStore.load failed", {
         task_id: taskId,
@@ -346,13 +375,23 @@ export class SandboxAgentExecutor implements AgentExecutor {
       });
 
       // Consume log stream, publish A2A events
+      let lastAssistantText = "";
       try {
         for await (const line of logIterator) {
           try {
             const event = JSON.parse(line);
+            // Accumulate assistant message text (the actual agent output)
+            if (event.type === "assistant" && event.message?.content) {
+              const textBlocks = Array.isArray(event.message.content)
+                ? event.message.content.filter((b: { type?: string }) => b.type === "text")
+                : [];
+              if (textBlocks.length > 0) {
+                lastAssistantText = textBlocks.map((b: { text: string }) => b.text).join("\n");
+              }
+            }
             if (event.type === "result") {
-              // Publish artifact with final result
-              const resultText = event.result_summary || event.text || "";
+              // Publish artifact with the accumulated agent output
+              const resultText = lastAssistantText || event.result || event.text || "";
               if (resultText) {
                 eventBus.publish({
                   kind: "artifact-update",
