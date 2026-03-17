@@ -203,6 +203,7 @@ export class RunBackedTaskStore implements TaskStore {
     private readonly createdByKeyId?: string,
   ) {}
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async load(taskId: string, _context?: ServerCallContext): Promise<Task | undefined> {
     if (!UUID_V4_REGEX.test(taskId)) return undefined;
 
@@ -228,6 +229,7 @@ export class RunBackedTaskStore implements TaskStore {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async save(task: Task, _context?: ServerCallContext): Promise<void> {
     // Status-only UPDATE — SDK calls save() on EVERY event (50-200 per run).
     // Skip if status hasn't changed (reduces ~200 DB calls to ~3 per run).

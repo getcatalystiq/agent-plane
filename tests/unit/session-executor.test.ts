@@ -248,6 +248,7 @@ describe("prepareSessionSandbox", () => {
       max_turns: 100,
       max_budget_usd: 1.0,
       max_runtime_seconds: 600,
+      a2a_enabled: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     },
