@@ -3,7 +3,7 @@
  *
  * This module handles the plugin lifecycle:
  * - listPlugins()         — discover plugins in a marketplace (admin UI)
- * - fetchPluginContent()  — fetch skill/command files for agent runtime
+ * - fetchPluginContent()  — fetch skill/agent files for agent runtime
  *
  * Mirrors mcp-connections.ts pattern (orchestration layer).
  * Pure HTTP calls are delegated to github.ts.
@@ -20,6 +20,8 @@ import { z } from "zod";
 
 // --- Types ---
 
+export interface PluginFile { path: string; content: string }
+
 export interface PluginListItem {
   name: string;          // directory name in the repo (used as identifier for fetching)
   displayName: string;   // human-readable name from plugin.json manifest
@@ -27,13 +29,13 @@ export interface PluginListItem {
   version: string | null;
   author: string | null;
   hasSkills: boolean;
-  hasCommands: boolean;
+  hasAgents: boolean;
   hasMcpJson: boolean;
 }
 
 export interface PluginFileSet {
-  skillFiles: Array<{ path: string; content: string }>;
-  commandFiles: Array<{ path: string; content: string }>;
+  skillFiles: PluginFile[];
+  agentFiles: PluginFile[];
   warnings: string[];
 }
 
@@ -172,7 +174,7 @@ export async function listPlugins(githubRepo: string, marketplaceToken?: string)
     }
 
     const hasSkills = tree.some(e => e.path.startsWith(`${dir}/skills/`) && e.type === "blob");
-    const hasCommands = tree.some(e => e.path.startsWith(`${dir}/commands/`) && e.type === "blob" && e.path.endsWith(".md"));
+    const hasAgents = tree.some(e => e.path.startsWith(`${dir}/agents/`) && e.type === "blob" && e.path.endsWith(".md"));
     const hasMcpJson = tree.some(e => e.path === `${dir}/.mcp.json` && e.type === "blob");
 
     plugins.push({
@@ -182,7 +184,7 @@ export async function listPlugins(githubRepo: string, marketplaceToken?: string)
       version: manifest.version ?? null,
       author: manifest.author?.name ?? null,
       hasSkills,
-      hasCommands,
+      hasAgents,
       hasMcpJson,
     });
   }
@@ -193,14 +195,51 @@ export async function listPlugins(githubRepo: string, marketplaceToken?: string)
 const MAX_FILES_PER_PLUGIN = 20;
 
 /**
- * Fetch plugin skill and command files for runtime injection.
+ * Fetch and validate a batch of plugin files from GitHub in parallel.
+ * Shared helper used by both skill and agent file discovery.
+ */
+async function fetchPluginFileBatch(
+  entries: GitHubTreeEntry[],
+  owner: string,
+  repo: string,
+  token: string | undefined,
+  pluginName: string,
+  mapPath: (entry: GitHubTreeEntry) => string,
+  warnings: string[],
+): Promise<PluginFile[]> {
+  const fetches = entries.map(async (entry) => {
+    const filename = entry.path.split("/").pop() ?? "";
+    const validation = SafePluginFilename.safeParse(filename);
+    if (!validation.success) {
+      warnings.push(`Plugin ${pluginName}: unsafe filename ${filename}, skipping`);
+      return null;
+    }
+
+    const contentResult = await fetchRawContent(owner, repo, entry.path, token);
+    if (!contentResult.ok) {
+      warnings.push(`Plugin ${pluginName}: failed to fetch ${entry.path}: ${contentResult.message}`);
+      return null;
+    }
+
+    return { path: mapPath(entry), content: contentResult.data };
+  });
+
+  const results = await Promise.all(fetches);
+  return results.filter((r): r is PluginFile => r !== null);
+}
+
+/**
+ * Fetch plugin skill and agent files for runtime injection.
  * Groups plugins by marketplace, fetches one tree per marketplace.
  * Returns pre-resolved files ready for sandbox.writeFiles().
+ *
+ * Note: commands/ directories are ignored (Anthropic merged commands into skills
+ * in Claude Code 2.1.3). Marketplace maintainers should rename commands/ to skills/.
  */
 export async function fetchPluginContent(
   plugins: Array<{ marketplace_id: string; plugin_name: string }>,
 ): Promise<PluginFileSet> {
-  const result: PluginFileSet = { skillFiles: [], commandFiles: [], warnings: [] };
+  const result: PluginFileSet = { skillFiles: [], agentFiles: [], warnings: [] };
   if (plugins.length === 0) return result;
 
   // Resolve marketplace_id -> github_repo
@@ -250,87 +289,55 @@ export async function fetchPluginContent(
           && e.path.startsWith(`${pluginName}/skills/`),
       );
 
-      // Find command files: pluginName/commands/*.md
-      const commandEntries = tree.filter(
+      // Find agent files: pluginName/agents/*.md
+      const agentEntries = tree.filter(
         e => e.type === "blob"
-          && e.path.startsWith(`${pluginName}/commands/`)
+          && e.path.startsWith(`${pluginName}/agents/`)
           && e.path.endsWith(".md"),
       );
 
-      const totalFiles = skillEntries.length + commandEntries.length;
+      const totalFiles = skillEntries.length + agentEntries.length;
       if (totalFiles > MAX_FILES_PER_PLUGIN) {
         result.warnings.push(`Plugin ${pluginName}: exceeds ${MAX_FILES_PER_PLUGIN} file limit (${totalFiles} files), skipping`);
         continue;
       }
 
       // Check total size from tree before fetching
-      const totalSize = [...skillEntries, ...commandEntries].reduce((sum, e) => sum + (e.size ?? 0), 0);
+      const totalSize = [...skillEntries, ...agentEntries].reduce((sum, e) => sum + (e.size ?? 0), 0);
       if (totalSize > 5 * 1024 * 1024) {
         result.warnings.push(`Plugin ${pluginName}: exceeds 5MB total size limit, skipping`);
         continue;
       }
 
-      // Fetch skill files in parallel
-      const skillFetches = skillEntries.map(async (entry) => {
-        const filename = entry.path.split("/").pop() ?? "";
-        const validation = SafePluginFilename.safeParse(filename);
-        if (!validation.success) {
-          result.warnings.push(`Plugin ${pluginName}: unsafe filename ${filename}, skipping`);
-          return null;
-        }
+      const safeName = pluginName.replace(/\//g, "-");
 
-        const contentResult = await fetchRawContent(owner, repo, entry.path, token);
-        if (!contentResult.ok) {
-          result.warnings.push(`Plugin ${pluginName}: failed to fetch ${entry.path}: ${contentResult.message}`);
-          return null;
-        }
-
-        // Preserve subdirectory structure for skill discovery (Claude Code expects <folder>/SKILL.md)
-        // Flatten plugin name slashes to dashes so the folder stays one level deep under .claude/skills/
-        const relativePath = entry.path.replace(`${pluginName}/skills/`, "");
-        const parts = relativePath.split("/");
-        const fileName = parts.pop()!;
-        const safeName = pluginName.replace(/\//g, "-");
-        const folderName = [safeName, ...parts].join("-");
-
-        return {
-          path: `.claude/skills/${folderName}/${fileName}`,
-          content: contentResult.data,
-        };
-      });
-
-      // Fetch command files in parallel
-      const commandFetches = commandEntries.map(async (entry) => {
-        const filename = entry.path.split("/").pop() ?? "";
-        const validation = SafePluginFilename.safeParse(filename);
-        if (!validation.success) {
-          result.warnings.push(`Plugin ${pluginName}: unsafe filename ${filename}, skipping`);
-          return null;
-        }
-
-        const contentResult = await fetchRawContent(owner, repo, entry.path, token);
-        if (!contentResult.ok) {
-          result.warnings.push(`Plugin ${pluginName}: failed to fetch ${entry.path}: ${contentResult.message}`);
-          return null;
-        }
-
-        return {
-          path: `.claude/commands/${pluginName.replace(/\//g, "-")}-${filename}`,
-          content: contentResult.data,
-        };
-      });
-
-      const [skillResults, commandResults] = await Promise.all([
-        Promise.all(skillFetches),
-        Promise.all(commandFetches),
+      // Fetch skill and agent files in parallel
+      const [skillFiles, agentFiles] = await Promise.all([
+        fetchPluginFileBatch(
+          skillEntries, owner, repo, token, pluginName,
+          (entry) => {
+            // Preserve subdirectory structure for skill discovery (Claude Code expects <folder>/SKILL.md)
+            const relativePath = entry.path.replace(`${pluginName}/skills/`, "");
+            const parts = relativePath.split("/");
+            const fileName = parts.pop()!;
+            const folderName = [safeName, ...parts].join("-");
+            return `.claude/skills/${folderName}/${fileName}`;
+          },
+          result.warnings,
+        ),
+        fetchPluginFileBatch(
+          agentEntries, owner, repo, token, pluginName,
+          (entry) => {
+            // Flat naming: .claude/agents/<plugin>-<agent>.md
+            const filename = entry.path.split("/").pop()!;
+            return `.claude/agents/${safeName}-${filename}`;
+          },
+          result.warnings,
+        ),
       ]);
 
-      for (const s of skillResults) {
-        if (s) result.skillFiles.push(s);
-      }
-      for (const c of commandResults) {
-        if (c) result.commandFiles.push(c);
-      }
+      result.skillFiles.push(...skillFiles);
+      result.agentFiles.push(...agentFiles);
     }
   }
 

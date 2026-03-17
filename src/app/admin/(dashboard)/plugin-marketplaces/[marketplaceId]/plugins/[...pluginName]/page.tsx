@@ -76,14 +76,14 @@ export default async function PluginEditorPage({
     return { path: entry.path.replace(`${pluginName}/skills/`, ""), content };
   }));
 
-  // Fetch command files
-  const commandEntries = tree.filter(
-    e => e.type === "blob" && e.path.startsWith(`${pluginName}/commands/`) && e.path.endsWith(".md"),
+  // Fetch agent files
+  const agentEntries = tree.filter(
+    e => e.type === "blob" && e.path.startsWith(`${pluginName}/agents/`) && e.path.endsWith(".md"),
   );
-  const commandResults = await Promise.all(commandEntries.map(async (entry) => {
+  const agentResults = await Promise.all(agentEntries.map(async (entry) => {
     const content = await getContent(entry.path);
     if (content === null) return null;
-    return { path: entry.path.replace(`${pluginName}/commands/`, ""), content };
+    return { path: entry.path.replace(`${pluginName}/agents/`, ""), content };
   }));
 
   // Fetch .mcp.json
@@ -94,7 +94,7 @@ export default async function PluginEditorPage({
   }
 
   const skills = skillResults.filter(Boolean) as Array<{ path: string; content: string }>;
-  const commands = commandResults.filter(Boolean) as Array<{ path: string; content: string }>;
+  const agents = agentResults.filter(Boolean) as Array<{ path: string; content: string }>;
 
   return (
     <div className="space-y-6">
@@ -115,7 +115,7 @@ export default async function PluginEditorPage({
         marketplaceId={marketplaceId}
         pluginName={pluginName}
         initialSkills={skills}
-        initialCommands={commands}
+        initialAgents={agents}
         initialMcpJson={mcpJson}
         readOnly={!isOwned}
       />

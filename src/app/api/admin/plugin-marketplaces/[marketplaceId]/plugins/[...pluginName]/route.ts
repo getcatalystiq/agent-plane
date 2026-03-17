@@ -53,9 +53,9 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
     e => e.type === "blob" && e.path.startsWith(`${pluginName}/skills/`),
   );
 
-  // Find command files
-  const commandEntries = tree.filter(
-    e => e.type === "blob" && e.path.startsWith(`${pluginName}/commands/`) && e.path.endsWith(".md"),
+  // Find agent files
+  const agentEntries = tree.filter(
+    e => e.type === "blob" && e.path.startsWith(`${pluginName}/agents/`) && e.path.endsWith(".md"),
   );
 
   // Check for .mcp.json
@@ -64,16 +64,16 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
   );
 
   // Fetch all file contents in parallel
-  const [skillResults, commandResults, mcpJsonResult] = await Promise.all([
+  const [skillResults, agentResults, mcpJsonResult] = await Promise.all([
     Promise.all(skillEntries.map(async (entry) => {
       const contentResult = await fetchFileContent(owner, repo, entry.path, token);
       if (!contentResult.ok) return null;
       return { path: entry.path.replace(`${pluginName}/skills/`, ""), content: contentResult.data };
     })),
-    Promise.all(commandEntries.map(async (entry) => {
+    Promise.all(agentEntries.map(async (entry) => {
       const contentResult = await fetchFileContent(owner, repo, entry.path, token);
       if (!contentResult.ok) return null;
-      return { path: entry.path.replace(`${pluginName}/commands/`, ""), content: contentResult.data };
+      return { path: entry.path.replace(`${pluginName}/agents/`, ""), content: contentResult.data };
     })),
     mcpJsonEntry
       ? fetchFileContent(owner, repo, mcpJsonEntry.path, token).then(r => r.ok ? r.data : null)
@@ -81,11 +81,11 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
   ]);
 
   const skills = skillResults.filter(Boolean) as Array<{ path: string; content: string }>;
-  const commands = commandResults.filter(Boolean) as Array<{ path: string; content: string }>;
+  const agents = agentResults.filter(Boolean) as Array<{ path: string; content: string }>;
 
   return NextResponse.json({
     skills,
-    commands,
+    agents,
     mcpJson: mcpJsonResult,
     isOwned: marketplace.github_token_enc !== null,
   });
@@ -101,7 +101,7 @@ const PluginFileSchema = z.object({
 
 const SavePluginSchema = z.object({
   skills: z.array(PluginFileSchema),
-  commands: z.array(PluginFileSchema),
+  agents: z.array(PluginFileSchema),
   mcpJson: z.string().nullable(),
 });
 
@@ -121,7 +121,7 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
   const input = SavePluginSchema.parse(body);
 
   // Validate filenames
-  for (const file of [...input.skills, ...input.commands]) {
+  for (const file of [...input.skills, ...input.agents]) {
     const filename = file.path.split("/").pop() ?? file.path;
     const validation = SafePluginFilename.safeParse(filename);
     if (!validation.success) {
@@ -137,10 +137,10 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
     }
   }
 
-  // Validate frontmatter in command .md files
-  for (const file of input.commands) {
+  // Validate frontmatter in agent .md files
+  for (const file of input.agents) {
     if (file.path.endsWith(".md")) {
-      const error = validateFrontmatter(file.content, `command '${file.path}'`);
+      const error = validateFrontmatter(file.content, `agent '${file.path}'`);
       if (error) throw new ValidationError(error);
     }
   }
@@ -174,7 +174,7 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
   // Build file list for push
   const files = [
     ...input.skills.map(f => ({ path: `${pluginName}/skills/${f.path}`, content: f.content })),
-    ...input.commands.map(f => ({ path: `${pluginName}/commands/${f.path}`, content: f.content })),
+    ...input.agents.map(f => ({ path: `${pluginName}/agents/${f.path}`, content: f.content })),
   ];
 
   if (input.mcpJson !== null) {

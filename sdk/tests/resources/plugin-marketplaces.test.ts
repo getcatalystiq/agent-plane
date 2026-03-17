@@ -25,7 +25,7 @@ describe("PluginMarketplacesResource", () => {
         version: "1.0.0",
         author: "Test Author",
         hasSkills: true,
-        hasCommands: false,
+        hasAgents: false,
         hasMcpJson: false,
       },
     ];

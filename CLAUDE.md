@@ -13,7 +13,7 @@ A multi-tenant platform for running Claude Agent SDK agents in isolated Vercel S
 - **Session** — persistent multi-turn conversation with sandbox kept alive; uses Claude Agent SDK `resume: sessionId` for context preservation; each message creates a run with `triggered_by: 'chat'`
 - **Schedule** — per-agent cron configuration (manual/hourly/daily/weekdays/weekly) with timezone-aware execution
 - **MCP Server** — custom OAuth-authenticated tool server registered by admins; agents connect via OAuth 2.1 PKCE
-- **Plugin Marketplace** — GitHub repo containing reusable skills/commands that agents can install
+- **Plugin Marketplace** — GitHub repo containing reusable agents/skills/connectors that agents can install
 - **A2A Protocol** — Agent-to-Agent protocol (Linux Foundation) server; exposes agents to external A2A-compliant clients via Agent Cards and JSON-RPC
 
 **Execution flow (A2A):**
@@ -106,7 +106,7 @@ src/
         run-charts.tsx    # Recharts line charts (runs/day, cost/day per agent)
         agents/           # agent list + detail (edit, connectors, skills, plugins, playground, schedule, A2A info)
         mcp-servers/      # custom MCP server management
-        plugin-marketplaces/  # marketplace list + detail + plugin editor (tabbed: Skills, Commands, Connectors)
+        plugin-marketplaces/  # marketplace list + detail + plugin editor (tabbed: Agents, Skills, Connectors)
         runs/             # run list + detail (transcript viewer, cancel button, run source badge, source filter)
         tenants/          # tenant list + detail + creation (API keys, budget, timezone)
   db/
@@ -241,7 +241,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Git repo agents skip snapshots (need fresh clone)
 - `ENABLE_TOOL_SEARCH=true` is set in the sandbox env to enable dynamic tool discovery for agents with many MCP tools
 - When MCP servers are present, `allowedTools` is suppressed so `mcp__*` tool names aren't blocked
-- Plugin skill files → `.claude/skills/<plugin-name>-<subfolder>/<filename>`; plugin command files → `.claude/commands/<plugin-name>-<filename>`
+- Plugin skill files → `.claude/skills/<plugin-name>-<subfolder>/<filename>`; plugin agent files → `.claude/agents/<plugin-name>-<agent>.md`
 - Network allowlist: `ai-gateway.vercel.sh`, `*.composio.dev`, `*.firecrawl.dev`, `*.githubusercontent.com`, `registry.npmjs.org`, platform API host, custom MCP server hosts
 - Runner ALWAYS uploads transcript to platform via `/api/internal/runs/:id/transcript` with a run-scoped bearer token (not just detached runs)
 
@@ -253,7 +253,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Composio MCP server URL + API key are cached per agent in the `agents` table (encrypted at rest)
 - Custom MCP servers use OAuth 2.1 PKCE; tokens refreshed automatically with 2-phase retry on transient 5xx
 - Agent skills are injected as files into the sandbox at `.claude/skills/<folder>/<path>`
-- Plugin files are injected into the sandbox at `.claude/skills/` and `.claude/commands/`
+- Plugin files are injected into the sandbox at `.claude/skills/` and `.claude/agents/`
 - Process-level caching with TTLs: MCP servers (5 min), plugin trees (5 min), recent pushes (2 min)
 - SSE/NDJSON streams send heartbeats every 15s and auto-detach after 4.5 min for long-running runs
 - Ephemeral Composio asset URLs are persisted to Vercel Blob during transcript capture

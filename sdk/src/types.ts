@@ -288,7 +288,7 @@ export interface PluginListItem {
   version: string | null;
   author: string | null;
   hasSkills: boolean;
-  hasCommands: boolean;
+  hasAgents: boolean;
   hasMcpJson: boolean;
 }
 

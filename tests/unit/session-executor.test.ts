@@ -49,7 +49,7 @@ vi.mock("@/lib/mcp", () => ({
 }));
 
 vi.mock("@/lib/plugins", () => ({
-  fetchPluginContent: vi.fn().mockResolvedValue({ skillFiles: [], commandFiles: [] }),
+  fetchPluginContent: vi.fn().mockResolvedValue({ skillFiles: [], agentFiles: [] }),
 }));
 
 vi.mock("@/lib/env", () => ({
