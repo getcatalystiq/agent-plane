@@ -16,7 +16,7 @@ The integration uses a **Protocol Adapter Layer** — a thin translation layer a
 
 ## Problem Statement
 
-AgentPlane currently uses a custom NDJSON streaming protocol with 7 event types. This is a proprietary format that requires clients to use the `@getcatalystiq/agentplane` SDK. There is no interoperability with the growing AG-UI ecosystem (CopilotKit, LangGraph, CrewAI frontends, Microsoft Agent Framework).
+AgentPlane currently uses a custom NDJSON streaming protocol with 7 event types. This is a proprietary format that requires clients to use the `@getcatalystiq/agent-plane` SDK. There is no interoperability with the growing AG-UI ecosystem (CopilotKit, LangGraph, CrewAI frontends, Microsoft Agent Framework).
 
 AG-UI is becoming the standard protocol for agent-to-frontend communication (analogous to MCP for agent-to-tools). Without AG-UI support, AgentPlane agents are invisible to this ecosystem.
 

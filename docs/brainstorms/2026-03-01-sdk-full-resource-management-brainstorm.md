@@ -9,7 +9,7 @@ Expand the AgentPlane TypeScript SDK to expose full management of skills, plugin
 
 ### Current State
 
-The SDK (`@getcatalystiq/agentplane`) currently exposes:
+The SDK (`@getcatalystiq/agent-plane`) currently exposes:
 - `client.agents` — CRUD (create, get, list, update, delete)
 - `client.runs` — create, createAndWait, get, list, cancel, transcript
 

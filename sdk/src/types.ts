@@ -1,9 +1,9 @@
 // --- Client Options ---
 
 export interface AgentPlaneOptions {
-  /** API key (ap_live_* or ap_test_*). Falls back to AGENTPLANE_API_KEY env var. */
+  /** API key (ap_live_* or ap_test_*). Falls back to AGENT_PLANE_API_KEY env var. */
   apiKey?: string | undefined;
-  /** Base URL for the API. Falls back to AGENTPLANE_BASE_URL env var. */
+  /** Base URL for the API. Falls back to AGENT_PLANE_BASE_URL env var. */
   baseUrl?: string | undefined;
   /** Custom fetch implementation for testing or custom environments. */
   fetch?: typeof globalThis.fetch | undefined;

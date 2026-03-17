@@ -166,7 +166,7 @@ scripts/
   create-api-key.ts       # CLI to generate additional API keys for a tenant
 tests/
   unit/                   # Vitest unit tests
-sdk/                      # TypeScript SDK (published as `@getcatalystiq/agentplane` npm package)
+sdk/                      # TypeScript SDK (published as `@getcatalystiq/agent-plane` npm package)
   src/
     client.ts             # AgentPlane class (HTTPS enforcement, closure-based auth)
     types.ts              # API interfaces (snake_case, matches wire format)

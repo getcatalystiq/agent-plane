@@ -231,7 +231,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
       if (data.redirectUrl) {
         const popup = window.open(data.redirectUrl, "mcp-oauth", "width=600,height=700");
         const handler = (event: MessageEvent) => {
-          if (event.data?.type === "agentplane_mcp_oauth_callback") {
+          if (event.data?.type === "agent_plane_mcp_oauth_callback") {
             popup?.close();
             window.removeEventListener("message", handler);
             loadMcp();

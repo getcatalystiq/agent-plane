@@ -12,7 +12,7 @@ function Nav() {
         </Link>
         <div className="flex items-center gap-6">
           <Link
-            href="https://github.com/getcatalystiq/agentplane"
+            href="https://github.com/getcatalystiq/agent-plane"
             target="_blank"
             rel="noopener noreferrer"
             className="text-[hsl(240,5%,65%)] transition-colors hover:text-white"
@@ -79,7 +79,7 @@ function Hero() {
         {/* CTAs */}
         <div className="mt-10 flex items-center justify-center gap-4">
           <Link
-            href="https://github.com/getcatalystiq/agentplane"
+            href="https://github.com/getcatalystiq/agent-plane"
             target="_blank"
             rel="noopener noreferrer"
             className="group inline-flex h-11 items-center gap-2 rounded-lg bg-white px-6 text-sm font-medium text-[hsl(240,10%,3.9%)] transition-all hover:bg-white/90"
@@ -326,7 +326,7 @@ function CTA() {
         </p>
         <div className="mt-10 flex items-center justify-center gap-4">
           <Link
-            href="https://github.com/getcatalystiq/agentplane"
+            href="https://github.com/getcatalystiq/agent-plane"
             target="_blank"
             rel="noopener noreferrer"
             className="group inline-flex h-12 items-center gap-2 rounded-lg bg-white px-8 text-sm font-medium text-[hsl(240,10%,3.9%)] transition-all hover:bg-white/90"
@@ -350,7 +350,7 @@ function Footer() {
           <span className="text-xs text-[hsl(240,5%,35%)]">AgentPlane</span>
         </div>
         <div className="flex items-center gap-6">
-          <Link href="https://github.com/getcatalystiq/agentplane" target="_blank" rel="noopener noreferrer" className="text-xs text-[hsl(240,5%,35%)] hover:text-[hsl(240,5%,65%)]">
+          <Link href="https://github.com/getcatalystiq/agent-plane" target="_blank" rel="noopener noreferrer" className="text-xs text-[hsl(240,5%,35%)] hover:text-[hsl(240,5%,65%)]">
             GitHub
           </Link>
         </div>

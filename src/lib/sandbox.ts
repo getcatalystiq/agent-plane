@@ -286,10 +286,10 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
 
   // Build env vars for the runner command
   const env: Record<string, string> = {
-    AGENTPLANE_RUN_ID: config.runId,
-    AGENTPLANE_AGENT_ID: config.agent.id,
-    AGENTPLANE_TENANT_ID: config.tenantId,
-    AGENTPLANE_PLATFORM_URL: config.platformApiUrl,
+    AGENT_PLANE_RUN_ID: config.runId,
+    AGENT_PLANE_AGENT_ID: config.agent.id,
+    AGENT_PLANE_TENANT_ID: config.tenantId,
+    AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
   };
 
   env.ANTHROPIC_BASE_URL = "https://ai-gateway.vercel.sh";
@@ -298,7 +298,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   // Disable ToolSearch: the Agent SDK's tool_reference content blocks require
   env.ENABLE_TOOL_SEARCH = "true";
   if (config.runToken) {
-    env.AGENTPLANE_RUN_TOKEN = config.runToken;
+    env.AGENT_PLANE_RUN_TOKEN = config.runToken;
   }
   if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
     env.MCP_SERVERS_JSON = JSON.stringify(config.mcpServers);
@@ -367,9 +367,9 @@ import { writeFileSync, appendFileSync } from 'fs';
 
 const config = ${JSON.stringify(agentConfig)};
 const prompt = ${JSON.stringify(config.prompt)};
-const runId = process.env.AGENTPLANE_RUN_ID;
-const platformUrl = process.env.AGENTPLANE_PLATFORM_URL;
-const runToken = process.env.AGENTPLANE_RUN_TOKEN;
+const runId = process.env.AGENT_PLANE_RUN_ID;
+const platformUrl = process.env.AGENT_PLANE_PLATFORM_URL;
+const runToken = process.env.AGENT_PLANE_RUN_TOKEN;
 
 // Build MCP servers config from JSON env var
 const mcpServers = process.env.MCP_SERVERS_JSON
@@ -389,7 +389,7 @@ async function main() {
   emit({
     type: 'run_started',
     run_id: runId,
-    agent_id: process.env.AGENTPLANE_AGENT_ID,
+    agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
     mcp_server_count: Object.keys(mcpServers).length,
@@ -582,9 +582,9 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
 
   // Build base env for all messages
   const baseEnv: Record<string, string> = {
-    AGENTPLANE_AGENT_ID: config.agent.id,
-    AGENTPLANE_TENANT_ID: config.tenantId,
-    AGENTPLANE_PLATFORM_URL: config.platformApiUrl,
+    AGENT_PLANE_AGENT_ID: config.agent.id,
+    AGENT_PLANE_TENANT_ID: config.tenantId,
+    AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
     ANTHROPIC_BASE_URL: "https://ai-gateway.vercel.sh",
     ANTHROPIC_AUTH_TOKEN: config.aiGatewayApiKey,
     ANTHROPIC_API_KEY: "",
@@ -674,8 +674,8 @@ function buildSessionSandboxInstance(
 
       const env = {
         ...baseEnv,
-        AGENTPLANE_RUN_ID: opts.runId,
-        AGENTPLANE_RUN_TOKEN: opts.runToken,
+        AGENT_PLANE_RUN_ID: opts.runId,
+        AGENT_PLANE_RUN_TOKEN: opts.runToken,
       };
 
       const command = await sandbox.runCommand({
@@ -739,8 +739,8 @@ function emit(event) {
 async function main() {
   emit({
     type: 'run_started',
-    run_id: process.env.AGENTPLANE_RUN_ID,
-    agent_id: process.env.AGENTPLANE_AGENT_ID,
+    run_id: process.env.AGENT_PLANE_RUN_ID,
+    agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
     session_id: sdkSessionId,
@@ -778,14 +778,14 @@ async function main() {
   }
 
   // Upload transcript for detached runs
-  if (process.env.AGENTPLANE_PLATFORM_URL && process.env.AGENTPLANE_RUN_TOKEN) {
+  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_RUN_TOKEN) {
     try {
       const { readFileSync } = await import('fs');
       const transcript = readFileSync(transcriptPath);
-      await fetch(process.env.AGENTPLANE_PLATFORM_URL + '/api/internal/runs/' + process.env.AGENTPLANE_RUN_ID + '/transcript', {
+      await fetch(process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/runs/' + process.env.AGENT_PLANE_RUN_ID + '/transcript', {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer ' + process.env.AGENTPLANE_RUN_TOKEN,
+          'Authorization': 'Bearer ' + process.env.AGENT_PLANE_RUN_TOKEN,
           'Content-Type': 'application/x-ndjson',
         },
         body: transcript,
@@ -833,9 +833,9 @@ export async function reconnectSessionSandbox(
     const hasPluginContent = (config.pluginFiles ?? []).length > 0;
 
     const baseEnv: Record<string, string> = {
-      AGENTPLANE_AGENT_ID: config.agent.id,
-      AGENTPLANE_TENANT_ID: config.tenantId,
-      AGENTPLANE_PLATFORM_URL: config.platformApiUrl,
+      AGENT_PLANE_AGENT_ID: config.agent.id,
+      AGENT_PLANE_TENANT_ID: config.tenantId,
+      AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
       ANTHROPIC_BASE_URL: "https://ai-gateway.vercel.sh",
       ANTHROPIC_AUTH_TOKEN: config.aiGatewayApiKey,
       ANTHROPIC_API_KEY: "",

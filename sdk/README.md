@@ -1,23 +1,23 @@
-# @getcatalystiq/agentplane
+# @getcatalystiq/agent-plane
 
-TypeScript SDK for the [AgentPlane](https://github.com/getcatalystiq/agentplane) API. Run Claude Code agents in isolated sandboxes.
+TypeScript SDK for the [AgentPlane](https://github.com/getcatalystiq/agent-plane) API. Run Claude Code agents in isolated sandboxes.
 
 ## Install
 
 ```sh
-npm install @getcatalystiq/agentplane
+npm install @getcatalystiq/agent-plane
 ```
 
 ## Quick Start
 
 ```ts
-import { AgentPlane } from "@getcatalystiq/agentplane";
+import { AgentPlane } from "@getcatalystiq/agent-plane";
 
 const client = new AgentPlane({
   baseUrl: "https://your-deployment.vercel.app",
   apiKey: "ap_live_...",
 });
-// or set AGENTPLANE_BASE_URL and AGENTPLANE_API_KEY environment variables
+// or set AGENT_PLANE_BASE_URL and AGENT_PLANE_API_KEY environment variables
 
 // Stream events from a run
 const stream = await client.runs.create({
@@ -306,7 +306,7 @@ for await (const event of stream) {
 All API errors throw `AgentPlaneError` with `code` and `status` fields:
 
 ```ts
-import { AgentPlaneError } from "@getcatalystiq/agentplane";
+import { AgentPlaneError } from "@getcatalystiq/agent-plane";
 
 try {
   await client.runs.get("run_nonexistent");
@@ -324,7 +324,7 @@ Error codes: `unauthorized`, `forbidden`, `budget_exceeded`, `not_found`, `valid
 Stream disconnections throw `StreamDisconnectedError` (extends `AgentPlaneError`) with a `run_id` for recovery:
 
 ```ts
-import { StreamDisconnectedError } from "@getcatalystiq/agentplane";
+import { StreamDisconnectedError } from "@getcatalystiq/agent-plane";
 
 try {
   for await (const event of stream) { /* ... */ }
@@ -339,13 +339,13 @@ try {
 
 ```ts
 const client = new AgentPlane({
-  baseUrl: "https://your-deployment.vercel.app", // or AGENTPLANE_BASE_URL env var
-  apiKey: "ap_live_...",                          // or AGENTPLANE_API_KEY env var
+  baseUrl: "https://your-deployment.vercel.app", // or AGENT_PLANE_BASE_URL env var
+  apiKey: "ap_live_...",                          // or AGENT_PLANE_API_KEY env var
   fetch: customFetch,                             // custom fetch implementation
 });
 ```
 
-Both `baseUrl` and `apiKey` are required. They can be passed as options or set via `AGENTPLANE_BASE_URL` and `AGENTPLANE_API_KEY` environment variables. HTTPS is required for all non-localhost URLs.
+Both `baseUrl` and `apiKey` are required. They can be passed as options or set via `AGENT_PLANE_BASE_URL` and `AGENT_PLANE_API_KEY` environment variables. HTTPS is required for all non-localhost URLs.
 
 ## Requirements
 

@@ -35,7 +35,7 @@ origin: docs/brainstorms/2026-03-01-sdk-full-resource-management-brainstorm.md
 
 ## Overview
 
-Expand the `@getcatalystiq/agentplane` TypeScript SDK to expose granular management of skills, plugins, connectors (Composio), custom connectors (MCP), plugin marketplace discovery, and Composio toolkit discovery. This requires both new server-side API routes and new SDK resource classes.
+Expand the `@getcatalystiq/agent-plane` TypeScript SDK to expose granular management of skills, plugins, connectors (Composio), custom connectors (MCP), plugin marketplace discovery, and Composio toolkit discovery. This requires both new server-side API routes and new SDK resource classes.
 
 (see brainstorm: docs/brainstorms/2026-03-01-sdk-full-resource-management-brainstorm.md)
 

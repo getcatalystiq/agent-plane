@@ -226,7 +226,7 @@ export function runStatusToA2a(status: RunStatus): TaskState {
 }
 ```
 
-> **No custom Zod schemas for A2A types.** The SDK defines `Message`, `Part`, `Task`, `AgentCard`, etc. We validate inbound requests using the SDK's `DefaultRequestHandler` which handles protocol validation internally. We only add Zod validation for AgentPlane-specific extensions (e.g., `metadata.agentplane.max_budget_usd`).
+> **No custom Zod schemas for A2A types.** The SDK defines `Message`, `Part`, `Task`, `AgentCard`, etc. We validate inbound requests using the SDK's `DefaultRequestHandler` which handles protocol validation internally. We only add Zod validation for AgentPlane-specific extensions (e.g., `metadata["agent-plane"].max_budget_usd`).
 
 **1.3 A2A Protocol Helpers (`src/lib/a2a.ts`)**
 
@@ -237,7 +237,7 @@ This module bridges AgentPlane concepts to `@a2a-js/sdk` types.
 Helpers:
 
 - `buildAgentCard(tenant, agents): AgentCard` — construct SDK `AgentCard` from tenant + a2a_enabled agents. Include `capabilities: { streaming: true, pushNotifications: false }` (explicitly false in Phase 1). Use **agent name** as skill ID (unique per tenant). Populate `AgentSkill` entries: `description` from agent's `description` field (required — enforce non-null for a2a_enabled agents), `inputModes: ['text']`, `outputModes: ['text']` (Phase 1 TextPart only). Include agent's `max_runtime_seconds` in skill description to help external agents estimate task duration.
-- `runToA2aTask(run): Task` — map AgentPlane `Run` to SDK `Task`. **Phase 1: single TextPart artifact** containing the final result text only. Include `metadata.agentplane.transcript_url` and `metadata.agentplane.duration_ms`. Defer `cost_usd` and `usage` metadata to Phase 2 (no external A2A consumer knows about these proprietary extensions yet — add when real clients request it).
+- `runToA2aTask(run): Task` — map AgentPlane `Run` to SDK `Task`. **Phase 1: single TextPart artifact** containing the final result text only. Include `metadata["agent-plane"].transcript_url` and `metadata["agent-plane"].duration_ms`. Defer `cost_usd` and `usage` metadata to Phase 2 (no external A2A consumer knows about these proprietary extensions yet — add when real clients request it).
 - `runStatusToA2a()` — status mapping (defined above, returns SDK `TaskState`)
 - `RunBackedTaskStore` — implements the SDK's `TaskStore` interface backed by our runs DB table. Maps SDK `Task` CRUD operations to AgentPlane run queries.
 - `SandboxAgentExecutor` — implements SDK's `AgentExecutor` interface. On `execute()`, creates a run via `createRun(triggered_by: 'a2a')`, starts sandbox execution, publishes run events to the SDK's `DefaultExecutionEventBus` as A2A streaming events.
@@ -295,7 +295,7 @@ src/app/api/a2a/[slug]/
 | Route | Logic |
 |---|---|
 | `GET .well-known/agent-card.json` | No auth. Rate limited (60 req/min per IP). Resolve tenant by slug via Neon HTTP driver (not pool). Return uniform 404 for missing/empty tenants. `Cache-Control: public, max-age=300` on success AND 404 (CDN caches both — prevents timing oracle without server-side negative caching infrastructure). Build `AgentCard` via `buildAgentCard()`. Set `pushNotifications: false` explicitly in capabilities (Phase 1 does not support push). |
-| `POST jsonrpc` | Auth (returns `AuthContext` with `keyId`). Rate limited (100 req/min per tenant — **known gap: in-memory rate limiter is per-instance on Vercel; upgrade to Vercel KV for production hardening**). Max 1MB body (Content-Length + streaming byte counter). **Validate inbound message** (parts array non-empty, role is 'user', each `referenceTaskId` is valid UUID v4, contextId: UUID format max 128 chars alphanumeric+hyphens). **Validate `taskId` as UUID v4** before passing to TaskStore/Executor (return `A2AError.invalidParams()`). **Clamp `metadata.agentplane.max_budget_usd`** to `min(requested, agent_default, tenant_remaining_budget)` — never allow external clients to exceed agent's configured limit. Cache `AgentCard` per tenant with 60s TTL (process-level `Map`, matches existing MCP/plugin cache pattern). Create `DefaultRequestHandler` per-request with cached `AgentCard` + `RunBackedTaskStore` + `SandboxAgentExecutor`. Create `ServerCallContext` with tenant `User` after auth. Create `JsonRpcTransportHandler` wrapping the request handler. Call `transportHandler.handle(body, context)`. Returns `JSONRPCResponse` (blocking) or `AsyncGenerator` (streaming — pipe as SSE with heartbeats every 15s). For blocking `message/send`: the executor polls run status with exponential backoff (500ms→5s) via Neon HTTP driver until complete or 55s timeout, then publishes final task via event bus. **Do NOT use `after()`** for execution start. Use `A2AError` static factories for protocol errors (`taskNotFound()`, `invalidParams()`, `internalError()`). **Scope `tasks/get` and `tasks/cancel` to the API key that created the run** via `created_by_key_id` filter (prevents cross-key visibility within a tenant). |
+| `POST jsonrpc` | Auth (returns `AuthContext` with `keyId`). Rate limited (100 req/min per tenant — **known gap: in-memory rate limiter is per-instance on Vercel; upgrade to Vercel KV for production hardening**). Max 1MB body (Content-Length + streaming byte counter). **Validate inbound message** (parts array non-empty, role is 'user', each `referenceTaskId` is valid UUID v4, contextId: UUID format max 128 chars alphanumeric+hyphens). **Validate `taskId` as UUID v4** before passing to TaskStore/Executor (return `A2AError.invalidParams()`). **Clamp `metadata["agent-plane"].max_budget_usd`** to `min(requested, agent_default, tenant_remaining_budget)` — never allow external clients to exceed agent's configured limit. Cache `AgentCard` per tenant with 60s TTL (process-level `Map`, matches existing MCP/plugin cache pattern). Create `DefaultRequestHandler` per-request with cached `AgentCard` + `RunBackedTaskStore` + `SandboxAgentExecutor`. Create `ServerCallContext` with tenant `User` after auth. Create `JsonRpcTransportHandler` wrapping the request handler. Call `transportHandler.handle(body, context)`. Returns `JSONRPCResponse` (blocking) or `AsyncGenerator` (streaming — pipe as SSE with heartbeats every 15s). For blocking `message/send`: the executor polls run status with exponential backoff (500ms→5s) via Neon HTTP driver until complete or 55s timeout, then publishes final task via event bus. **Do NOT use `after()`** for execution start. Use `A2AError` static factories for protocol errors (`taskNotFound()`, `invalidParams()`, `internalError()`). **Scope `tasks/get` and `tasks/cancel` to the API key that created the run** via `created_by_key_id` filter (prevents cross-key visibility within a tenant). |
 
 **`SandboxAgentExecutor` implementation:**
 ```typescript
@@ -518,7 +518,7 @@ if (!result) { /* retry SELECT — another request created it */ }
 **Option B (Fallback): System prompt injection with safeguards**
 - Inject XML tag instructions into system prompt (as originally planned)
 - **CRITICAL:** Only parse signal from the LAST assistant turn — prevents injection via user-supplied A2A message content containing `<a2a_status>completed</a2a_status>`
-- Use collision-resistant delimiter (e.g., `<agentplane_a2a_status>` instead of generic `<a2a_status>`)
+- Use collision-resistant delimiter (e.g., `<agent_plane_a2a_status>` instead of generic `<a2a_status>`)
 - If no signal found, default to `completed` (safe default)
 
 #### Phase 2b: Push Notifications
@@ -650,7 +650,7 @@ server.tool("a2a_send_message", schema, async ({ connection_id, skill_id, messag
 - **Note:** Vercel Sandbox processes run as the same user — `chmod 600` provides zero isolation between agent and MCP server. File-based credential storage with a separate delete step is NOT sufficient.
 
 **SDK updates (Phase 3 deliverable):**
-- Add `a2aConnections` resource to SDK `AgentPlane` class
+- Add `a2aConnections` resource to SDK AgentPlane class
 - Add CRUD methods matching the admin API for A2A connections
 
 **Outbound protocol:** The SDK's `A2AClient` auto-negotiates transport based on the remote agent's Agent Card `preferredTransport` field — no need to hard-code JSON-RPC.
@@ -712,8 +712,8 @@ server.tool("a2a_send_message", schema, async ({ connection_id, skill_id, messag
 | Get run | Yes | Yes (tasks/get) | Yes | |
 | List runs | Yes | No (add `triggeredBy` filter to REST) | Yes (ListTasks in 2a) | |
 | Cancel run | Yes | Yes (tasks/cancel) | Yes | |
-| Get transcript | Yes (inline) | Partial (`metadata.agentplane.transcript_url`) | Yes | **Transcript URL requires REST auth** — pure A2A clients cannot access. Document this. Consider adding transcript content in Task artifact in Phase 2. |
-| Cost/usage data | Yes (Run object) | Yes (`metadata.agentplane.transcript_url`) | Yes | `cost_usd` and `usage` deferred to Phase 2 (no external consumers yet) |
+| Get transcript | Yes (inline) | Partial (`metadata["agent-plane"].transcript_url`) | Yes | **Transcript URL requires REST auth** — pure A2A clients cannot access. Document this. Consider adding transcript content in Task artifact in Phase 2. |
+| Cost/usage data | Yes (Run object) | Yes (`metadata["agent-plane"].transcript_url`) | Yes | `cost_usd` and `usage` deferred to Phase 2 (no external consumers yet) |
 | Multi-turn | Yes (sessions) | No | Yes (2a: contextId → sessions) | |
 | Session pre-warm | Yes (`POST /sessions` no prompt) | No | 2a: add `POST contexts` | Known gap — first A2A message pays cold-start |
 | Session lifecycle | Full CRUD | No | 2a: contexts list/get/delete | |
@@ -741,7 +741,7 @@ server.tool("a2a_send_message", schema, async ({ connection_id, skill_id, messag
 1. **Full A2A round-trip:** Discover Agent Card (verify agent name as skill ID) → send message → receive streaming response → poll GetTask → verify completed status with TextPart artifact + cost metadata + transcript URL
 2. **Blocking timeout fallback:** Send message to slow agent → 55s elapses → receive `working` status → poll GetTask → eventually see `completed`
 3. **Budget rejection:** Send message when tenant budget exhausted → receive `rejected` task
-4. **Budget override:** Send message with `metadata.agentplane.max_budget_usd` → verify budget applied to run
+4. **Budget override:** Send message with `metadata["agent-plane"].max_budget_usd` → verify budget applied to run
 5. **Agent not a2a_enabled:** Send message targeting non-A2A agent → 404
 6. **Tenant enumeration prevention:** GET Agent Card for non-existent slug → same 404 response as slug-with-no-agents
 7. **Body size limit:** Send message > 1MB → 413 rejection
@@ -758,7 +758,7 @@ server.tool("a2a_send_message", schema, async ({ connection_id, skill_id, messag
 - [x] Uniform 404 for non-existent tenants and tenants with zero a2a_enabled agents (`Cache-Control: public, max-age=300` on 404s too)
 - [x] JSON-RPC `message/send` creates run, returns A2A Task (or `working` after 55s). `max_budget_usd` clamped to `min(requested, agent_default, tenant_remaining)`
 - [x] JSON-RPC `message/stream` streams `text/event-stream` SSE with A2A format (via `AsyncGenerator` from `JsonRpcTransportHandler`)
-- [x] JSON-RPC `tasks/get` returns task with final-result TextPart artifact + `metadata.agentplane.transcript_url` + `duration_ms`
+- [x] JSON-RPC `tasks/get` returns task with final-result TextPart artifact + `metadata["agent-plane"].transcript_url` + `duration_ms`
 - [x] JSON-RPC `tasks/cancel` cancels underlying run
 - [x] `tasks/get` and `tasks/cancel` scoped to creating API key (`created_by_key_id`)
 - [x] Input validation: parts array non-empty, role is 'user', taskId/referenceTaskIds are valid UUID v4, contextId format (UUID, max 128 chars)
@@ -841,16 +841,16 @@ SELECT COUNT(*) FROM agents WHERE a2a_enabled = true; -- Expected: 0
 
 ```bash
 # Agent Card returns 404 for non-existent slug
-curl -s -o /dev/null -w "%{http_code}" https://agentplane.vercel.app/api/a2a/nonexistent/.well-known/agent-card.json
+curl -s -o /dev/null -w "%{http_code}" https://agent-plane.vercel.app/api/a2a/nonexistent/.well-known/agent-card.json
 # Expected: 404
 
 # Agent Card returns 404 for slug with no a2a_enabled agents
-curl -s -o /dev/null -w "%{http_code}" https://agentplane.vercel.app/api/a2a/{valid-slug}/.well-known/agent-card.json
+curl -s -o /dev/null -w "%{http_code}" https://agent-plane.vercel.app/api/a2a/{valid-slug}/.well-known/agent-card.json
 # Expected: 404 (until an agent has a2a_enabled=true)
 
 # Middleware does NOT exempt JSON-RPC endpoint
 curl -s -o /dev/null -w "%{http_code}" -X POST \
-  https://agentplane.vercel.app/api/a2a/{slug}/jsonrpc
+  https://agent-plane.vercel.app/api/a2a/{slug}/jsonrpc
 # Expected: 401 (not 404 or 200)
 
 # Body size limit on JSON-RPC endpoint
@@ -858,7 +858,7 @@ curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Authorization: Bearer {key}" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"messageId":"test","role":"user","kind":"message","parts":[{"kind":"text","text":"'"$(python3 -c "print('x'*2000000)")"'"}]}},"id":1}' \
-  https://agentplane.vercel.app/api/a2a/{slug}/jsonrpc
+  https://agent-plane.vercel.app/api/a2a/{slug}/jsonrpc
 # Expected: 413
 ```
 

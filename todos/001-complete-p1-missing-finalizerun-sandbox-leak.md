@@ -69,5 +69,5 @@ Option A for Phase 1, Option B for Phase 2.
 
 ## Resources
 
-- PR #14: https://github.com/getcatalystiq/agentplane/pull/14
+- PR #14: https://github.com/getcatalystiq/agent-plane/pull/14
 - `src/lib/run-executor.ts` — reference implementation of `finalizeRun()` usage

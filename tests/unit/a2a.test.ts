@@ -103,10 +103,10 @@ describe("runToA2aTask", () => {
 
   it("does not include transcript URL in metadata", () => {
     const task = runToA2aTask(baseRun);
-    const agentplaneMeta = task.metadata?.agentplane as Record<string, unknown> | undefined;
-    expect(agentplaneMeta).toBeDefined();
-    expect(agentplaneMeta?.duration_ms).toBe(5000);
-    expect(agentplaneMeta).not.toHaveProperty("transcript_url");
+    const apMeta = task.metadata?.["agent-plane"] as Record<string, unknown> | undefined;
+    expect(apMeta).toBeDefined();
+    expect(apMeta?.duration_ms).toBe(5000);
+    expect(apMeta).not.toHaveProperty("transcript_url");
   });
 
   it("omits metadata when duration is zero", () => {

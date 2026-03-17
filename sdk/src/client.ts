@@ -26,26 +26,26 @@ export class AgentPlane {
     // Resolve API key
     const apiKey =
       options.apiKey ??
-      (typeof process !== "undefined" ? process.env?.["AGENTPLANE_API_KEY"] : undefined);
+      (typeof process !== "undefined" ? process.env?.["AGENT_PLANE_API_KEY"] : undefined);
 
     if (!apiKey) {
       throw new AgentPlaneError(
         "configuration_error",
         0,
-        "API key is required. Pass apiKey in options or set AGENTPLANE_API_KEY environment variable.",
+        "API key is required. Pass apiKey in options or set AGENT_PLANE_API_KEY environment variable.",
       );
     }
 
     // Resolve base URL
     const rawBaseUrl =
       options.baseUrl ??
-      (typeof process !== "undefined" ? process.env?.["AGENTPLANE_BASE_URL"] : undefined);
+      (typeof process !== "undefined" ? process.env?.["AGENT_PLANE_BASE_URL"] : undefined);
 
     if (!rawBaseUrl) {
       throw new AgentPlaneError(
         "configuration_error",
         0,
-        "Base URL is required. Pass baseUrl in options or set AGENTPLANE_BASE_URL environment variable.",
+        "Base URL is required. Pass baseUrl in options or set AGENT_PLANE_BASE_URL environment variable.",
       );
     }
 
@@ -97,7 +97,7 @@ export class AgentPlane {
     const url = this._buildUrl(path, options?.query);
     const headers: Record<string, string> = {
       Authorization: this._getAuthHeader(),
-      "User-Agent": `agentplane-sdk/${VERSION}`,
+      "User-Agent": `agent-plane-sdk/${VERSION}`,
     };
     let body: string | undefined;
     if (options?.body !== undefined) {
@@ -137,7 +137,7 @@ export class AgentPlane {
     const url = this._buildUrl(path);
     const headers: Record<string, string> = {
       Authorization: this._getAuthHeader(),
-      "User-Agent": `agentplane-sdk/${VERSION}`,
+      "User-Agent": `agent-plane-sdk/${VERSION}`,
     };
     let body: string | undefined;
     if (options?.body !== undefined) {

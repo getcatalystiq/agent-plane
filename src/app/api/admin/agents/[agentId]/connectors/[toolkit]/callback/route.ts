@@ -30,7 +30,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
 <script>
   if (window.opener) {
     window.opener.postMessage(
-      { type: 'agentplane_oauth_callback', success: true, toolkit: ${JSON.stringify(payload.toolkit)}, agentId: ${JSON.stringify(payload.agentId)} },
+      { type: 'agent_plane_oauth_callback', success: true, toolkit: ${JSON.stringify(payload.toolkit)}, agentId: ${JSON.stringify(payload.agentId)} },
       ${JSON.stringify(origin)}
     );
   }

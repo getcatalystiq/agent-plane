@@ -470,8 +470,8 @@ function emit(event) {
 async function main() {
   emit({
     type: 'run_started',
-    run_id: process.env.AGENTPLANE_RUN_ID,
-    agent_id: process.env.AGENTPLANE_AGENT_ID,
+    run_id: process.env.AGENT_PLANE_RUN_ID,
+    agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
     session_id: sdkSessionId,
@@ -503,14 +503,14 @@ async function main() {
   }
 
   // Upload transcript for detached runs
-  if (process.env.AGENTPLANE_PLATFORM_URL && process.env.AGENTPLANE_RUN_TOKEN) {
+  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_RUN_TOKEN) {
     try {
       const { readFileSync } = await import('fs');
       const transcript = readFileSync(transcriptPath);
-      await fetch(process.env.AGENTPLANE_PLATFORM_URL + '/api/internal/runs/' + process.env.AGENTPLANE_RUN_ID + '/transcript', {
+      await fetch(process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/runs/' + process.env.AGENT_PLANE_RUN_ID + '/transcript', {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer ' + process.env.AGENTPLANE_RUN_TOKEN,
+          'Authorization': 'Bearer ' + process.env.AGENT_PLANE_RUN_TOKEN,
           'Content-Type': 'application/x-ndjson',
         },
         body: transcript,

@@ -17,7 +17,7 @@ A multi-tenant platform for running [Claude Agent SDK](https://docs.anthropic.co
 - **Playground** — test agents interactively from the admin dashboard with real-time event streaming
 - **Multi-turn sessions** — persistent conversations with context retention across messages; sandbox kept alive between turns; automatic backup/restore on cold start
 - **Configurable runtime** — set max runtime per agent (60–3600 seconds)
-- **TypeScript SDK** — `@getcatalystiq/agentplane` npm package with streaming, auto-polling, and typed events
+- **TypeScript SDK** — `@getcatalystiq/agent-plane` npm package with streaming, auto-polling, and typed events
 - **Admin dashboard** — manage tenants, agents, runs, connectors, plugins, and schedules with analytics charts
 
 ## How It Works
@@ -109,8 +109,8 @@ curl -X POST $BASE_URL/api/a2a/my-org/jsonrpc \
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/getcatalystiq/agentplane.git
-cd agentplane
+git clone https://github.com/getcatalystiq/agent-plane.git
+cd agent-plane
 npm install
 ```
 
@@ -355,14 +355,14 @@ Vercel Cron jobs are configured in `vercel.json`:
 
 ## TypeScript SDK
 
-The `@getcatalystiq/agentplane` package provides a typed client for the AgentPlane API.
+The `@getcatalystiq/agent-plane` package provides a typed client for the AgentPlane API.
 
 ```bash
-npm install @getcatalystiq/agentplane
+npm install @getcatalystiq/agent-plane
 ```
 
 ```ts
-import { AgentPlane } from "@getcatalystiq/agentplane";
+import { AgentPlane } from "@getcatalystiq/agent-plane";
 
 const client = new AgentPlane({ apiKey: "ap_live_..." });
 

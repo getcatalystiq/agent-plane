@@ -1,5 +1,5 @@
 {
-  "name": "agentplane",
+  "name": "agent-plane",
   "version": "0.1.0",
   "private": true,
   "description": "A multi-tenant platform for running Claude Code agents in isolated Vercel Sandboxes, exposed via a REST API.",
@@ -7,11 +7,11 @@
   "author": "CatalystIQ",
   "repository": {
     "type": "git",
-    "url": "https://github.com/getcatalystiq/agentplane.git"
+    "url": "https://github.com/getcatalystiq/agent-plane.git"
   },
-  "homepage": "https://github.com/getcatalystiq/agentplane",
+  "homepage": "https://github.com/getcatalystiq/agent-plane",
   "bugs": {
-    "url": "https://github.com/getcatalystiq/agentplane/issues"
+    "url": "https://github.com/getcatalystiq/agent-plane/issues"
   },
   "keywords": [
     "claude-code",

@@ -12,7 +12,7 @@ Integrate the [AG-UI protocol](https://docs.ag-ui.com/) into AgentPlane so that 
 1. **Ecosystem interoperability** — AG-UI-compatible clients connect out of the box
 2. **Richer streaming** — state sync, frontend tools, activity indicators, reasoning events
 3. **Industry standardization** — adopt an emerging open protocol alongside MCP and A2A
-4. **Zero breaking changes** — existing `@getcatalystiq/agentplane` SDK consumers unaffected
+4. **Zero breaking changes** — existing `@getcatalystiq/agent-plane` SDK consumers unaffected
 
 ## Why This Approach
 

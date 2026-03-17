@@ -3,28 +3,28 @@ import { AgentPlane, AgentPlaneError } from "../src/index";
 
 describe("AgentPlane", () => {
   it("throws if no API key provided", () => {
-    delete process.env["AGENTPLANE_API_KEY"];
+    delete process.env["AGENT_PLANE_API_KEY"];
 
     expect(() => new AgentPlane({ baseUrl: "https://test.example.com" })).toThrow("API key is required");
   });
 
   it("throws if no base URL provided", () => {
-    delete process.env["AGENTPLANE_BASE_URL"];
+    delete process.env["AGENT_PLANE_BASE_URL"];
 
     expect(() => new AgentPlane({ apiKey: "ap_live_test1234567890abcdef12345678" })).toThrow("Base URL is required");
   });
 
   it("reads config from environment variables", () => {
-    process.env["AGENTPLANE_API_KEY"] = "ap_live_test1234567890abcdef12345678";
-    process.env["AGENTPLANE_BASE_URL"] = "https://test.example.com";
+    process.env["AGENT_PLANE_API_KEY"] = "ap_live_test1234567890abcdef12345678";
+    process.env["AGENT_PLANE_BASE_URL"] = "https://test.example.com";
     try {
       const client = new AgentPlane();
       expect(client).toBeDefined();
       expect(client.runs).toBeDefined();
       expect(client.agents).toBeDefined();
     } finally {
-      delete process.env["AGENTPLANE_API_KEY"];
-      delete process.env["AGENTPLANE_BASE_URL"];
+      delete process.env["AGENT_PLANE_API_KEY"];
+      delete process.env["AGENT_PLANE_BASE_URL"];
     }
   });
 
@@ -100,7 +100,7 @@ describe("AgentPlane", () => {
       const [url, init] = mockFetch.mock.calls[0]!;
       expect(url).toBe("https://test.example.com/api/agents");
       expect(init.headers.Authorization).toBe("Bearer ap_live_test1234567890abcdef12345678");
-      expect(init.headers["User-Agent"]).toMatch(/^agentplane-sdk\//);
+      expect(init.headers["User-Agent"]).toMatch(/^agent-plane-sdk\//);
       expect(result).toEqual({ id: "agent_1", name: "test" });
     });
 

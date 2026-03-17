@@ -1,5 +1,5 @@
 {
-  "name": "@getcatalystiq/agentplane",
+  "name": "@getcatalystiq/agent-plane",
   "version": "0.4.0",
   "description": "TypeScript SDK for the AgentPlane API",
   "type": "module",
@@ -37,7 +37,7 @@
     "vitest": "^4"
   },
   "keywords": [
-    "agentplane",
+    "agent-plane",
     "claude",
     "agent",
     "sdk",

@@ -179,4 +179,4 @@ export interface PluginFileSet {
 - A2A protocol changes
 - Hooks or LSP server support in plugins (future work)
 - `settings.json` support for plugins (future work)
-- SDK (`@getcatalystiq/agentplane`) changes beyond removing command references
+- SDK (`@getcatalystiq/agent-plane`) changes beyond removing command references

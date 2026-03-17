@@ -7,8 +7,8 @@ Thanks for your interest in contributing! Here's how to get started.
 1. **Clone the repo**
 
    ```bash
-   git clone https://github.com/getcatalystiq/agentplane.git
-   cd agentplane
+   git clone https://github.com/getcatalystiq/agent-plane.git
+   cd agent-plane
    ```
 
 2. **Install dependencies**
@@ -65,7 +65,7 @@ This runs TypeScript type-checking and the Next.js production build.
 
 ## Reporting Issues
 
-Open an issue at [github.com/getcatalystiq/agentplane/issues](https://github.com/getcatalystiq/agentplane/issues) with:
+Open an issue at [github.com/getcatalystiq/agent-plane/issues](https://github.com/getcatalystiq/agent-plane/issues) with:
 
 - A clear description of the problem or suggestion
 - Steps to reproduce (for bugs)

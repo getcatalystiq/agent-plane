@@ -81,7 +81,7 @@ Each tenant's Agent Card lists their agents as "skills":
 {
   "name": "Acme Corp Agents",
   "provider": { "organization": "Acme Corp" },
-  "url": "https://agentplane.vercel.app/api/a2a/acme",
+  "url": "https://agent-plane.vercel.app/api/a2a/acme",
   "capabilities": {
     "streaming": true,
     "pushNotifications": true

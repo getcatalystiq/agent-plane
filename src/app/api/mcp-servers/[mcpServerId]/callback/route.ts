@@ -72,7 +72,7 @@ function renderCallbackHtml(
 <script>
   if (window.opener) {
     window.opener.postMessage({
-      type: 'agentplane_mcp_oauth_callback',
+      type: 'agent_plane_mcp_oauth_callback',
       success: ${success},
       mcpServerId: '${mcpServerId}',
       agentId: '${agentId}',

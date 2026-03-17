@@ -145,7 +145,7 @@ export const POST = withErrorHandler(async (
   // Extract budget from A2A metadata
   const params = body.params as Record<string, unknown> | undefined;
   const msgMeta = (params?.message as Record<string, unknown> | undefined)?.metadata as Record<string, unknown> | undefined;
-  const apMeta = msgMeta?.agentplane as Record<string, unknown> | undefined;
+  const apMeta = msgMeta?.["agent-plane"] as Record<string, unknown> | undefined;
   const requestedMaxBudget = typeof apMeta?.max_budget_usd === "number" ? apMeta.max_budget_usd : undefined;
 
   // Create SDK components per-request
