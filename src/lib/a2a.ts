@@ -136,6 +136,9 @@ export async function buildAgentCard(
       stateTransitionHistory: false,
     },
     skills,
+    additionalInterfaces: [
+      { transport: "JSONRPC", url: `${baseUrl}/api/a2a/${tenantSlug}/jsonrpc` },
+    ],
     provider: {
       organization: tenantName,
       url: baseUrl,
@@ -175,7 +178,7 @@ export function runToA2aTask(run: z.infer<typeof RunForTaskRow>): Task {
 
   const metadata: Record<string, unknown> = {};
   if (run.duration_ms > 0) {
-    metadata["agentplane"] = {
+    metadata["agent-plane"] = {
       duration_ms: run.duration_ms,
     };
   }
