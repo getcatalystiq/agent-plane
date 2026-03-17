@@ -14,7 +14,7 @@ interface PluginEditorClientProps {
   marketplaceId: string;
   pluginName: string;
   initialSkills: FlatFile[];
-  initialCommands: FlatFile[];
+  initialAgents: FlatFile[];
   initialMcpJson: string | null;
   readOnly: boolean;
 }
@@ -23,14 +23,14 @@ export function PluginEditorClient({
   marketplaceId,
   pluginName,
   initialSkills,
-  initialCommands,
+  initialAgents,
   initialMcpJson,
   readOnly,
 }: PluginEditorClientProps) {
   const [skills, setSkills] = useState(initialSkills);
-  const [commands, setCommands] = useState(initialCommands);
+  const [agents, setAgents] = useState(initialAgents);
   const [mcpJson, setMcpJson] = useState(initialMcpJson ?? "");
-  const [activeTab, setActiveTab] = useState<"skills" | "commands" | "connectors">("skills");
+  const [activeTab, setActiveTab] = useState<"agents" | "skills" | "connectors">("agents");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -40,8 +40,8 @@ export function PluginEditorClient({
     setSkills(updated);
   }, []);
 
-  const handleCommandsChange = useCallback((updated: FlatFile[]) => {
-    setCommands(updated);
+  const handleAgentsChange = useCallback((updated: FlatFile[]) => {
+    setAgents(updated);
   }, []);
 
   // No-op save handlers since we use hideSave + onChange
@@ -58,7 +58,7 @@ export function PluginEditorClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           skills,
-          commands,
+          agents,
           mcpJson: mcpJson || null,
         }),
       });
@@ -80,8 +80,8 @@ export function PluginEditorClient({
   }
 
   const tabs = [
+    { id: "agents" as const, label: "Agents", count: agents.length },
     { id: "skills" as const, label: "Skills", count: skills.length },
-    { id: "commands" as const, label: "Commands", count: commands.length },
     { id: "connectors" as const, label: "Connectors", count: mcpJson ? 1 : 0 },
   ];
   return (
@@ -118,6 +118,20 @@ export function PluginEditorClient({
       </div>
 
       {/* Tab content */}
+      {activeTab === "agents" && (
+        <FileTreeEditor
+          initialFiles={initialAgents}
+          onSave={noopSave}
+          onChange={readOnly ? undefined : handleAgentsChange}
+          readOnly={readOnly}
+          hideSave={!readOnly}
+          title="Agents"
+          addFolderLabel="Agent"
+          newFileTemplate={{ filename: "agent.md", content: "---\nname: new-agent\ndescription: Describe what this agent does\n---\n\nYou are a specialized agent.\n" }}
+          savedVersion={savedVersion}
+        />
+      )}
+
       {activeTab === "skills" && (
         <FileTreeEditor
           initialFiles={initialSkills}
@@ -128,20 +142,6 @@ export function PluginEditorClient({
           title="Skills"
           addFolderLabel="Skill"
           newFileTemplate={{ filename: "SKILL.md", content: "# New\n\nDescribe this skill...\n" }}
-          savedVersion={savedVersion}
-        />
-      )}
-
-      {activeTab === "commands" && (
-        <FileTreeEditor
-          initialFiles={initialCommands}
-          onSave={noopSave}
-          onChange={readOnly ? undefined : handleCommandsChange}
-          readOnly={readOnly}
-          hideSave={!readOnly}
-          title="Commands"
-          addFolderLabel="Command"
-          newFileTemplate={{ filename: "command.md", content: "# New Command\n\nDescribe this command...\n" }}
           savedVersion={savedVersion}
         />
       )}

@@ -96,8 +96,8 @@ export default async function MarketplaceDetailPage({
                       <p className="text-xs text-muted-foreground mb-3">{plugin.description}</p>
                     )}
                     <div className="flex gap-1.5">
+                      {plugin.hasAgents && <Badge variant="secondary" className="text-xs">Agents</Badge>}
                       {plugin.hasSkills && <Badge variant="secondary" className="text-xs">Skills</Badge>}
-                      {plugin.hasCommands && <Badge variant="secondary" className="text-xs">Commands</Badge>}
                       {plugin.hasMcpJson && <Badge variant="secondary" className="text-xs">MCP</Badge>}
                     </div>
                   </CardContent>

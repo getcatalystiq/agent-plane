@@ -24,7 +24,7 @@ interface AvailablePlugin {
   description: string | null;
   version: string | null;
   hasSkills: boolean;
-  hasCommands: boolean;
+  hasAgents: boolean;
   hasMcpJson: boolean;
 }
 
@@ -223,8 +223,8 @@ export function PluginsManager({
                                   <p className="text-xs text-muted-foreground truncate">{ap.description}</p>
                                 )}
                                 <div className="flex gap-1 mt-1">
+                                  {ap.hasAgents && <Badge variant="secondary" className="text-[10px] px-1 py-0">Agents</Badge>}
                                   {ap.hasSkills && <Badge variant="secondary" className="text-[10px] px-1 py-0">Skills</Badge>}
-                                  {ap.hasCommands && <Badge variant="secondary" className="text-[10px] px-1 py-0">Commands</Badge>}
                                   {ap.hasMcpJson && <Badge variant="secondary" className="text-[10px] px-1 py-0">MCP</Badge>}
                                 </div>
                               </div>

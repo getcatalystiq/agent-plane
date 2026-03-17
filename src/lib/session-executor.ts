@@ -128,7 +128,7 @@ export async function prepareSessionSandbox(
       aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
       mcpServers: mcpResult.servers,
       mcpErrors: mcpResult.errors,
-      pluginFiles: [...pluginResult.skillFiles, ...pluginResult.commandFiles],
+      pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],
       maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
     };
 
@@ -164,7 +164,7 @@ export async function prepareSessionSandbox(
     aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
     mcpServers: mcpResult.servers,
     mcpErrors: mcpResult.errors,
-    pluginFiles: [...pluginResult.skillFiles, ...pluginResult.commandFiles],
+    pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],
     maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
   };
 

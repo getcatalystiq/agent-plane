@@ -3,7 +3,6 @@ import {
   DefaultRequestHandler,
   JsonRpcTransportHandler,
   ServerCallContext,
-  A2AError,
 } from "@a2a-js/sdk/server";
 import type { JSONRPCResponse, Message } from "@a2a-js/sdk";
 import { withErrorHandler } from "@/lib/api";

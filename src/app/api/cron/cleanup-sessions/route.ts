@@ -6,7 +6,6 @@ import { getIdleSessions, getStuckSessions } from "@/lib/sessions";
 import { deleteSessionFile } from "@/lib/session-files";
 import { logger } from "@/lib/logger";
 import { verifyCronSecret } from "@/lib/cron-auth";
-import type { TenantId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 

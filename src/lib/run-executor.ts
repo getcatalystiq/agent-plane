@@ -62,7 +62,7 @@ export async function prepareRunExecution(
     aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
     mcpServers: mcpResult.servers,
     mcpErrors: mcpResult.errors,
-    pluginFiles: [...pluginResult.skillFiles, ...pluginResult.commandFiles],
+    pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],
   });
 
   await transitionRunStatus(runId, tenantId, "pending", "running", {

@@ -38,7 +38,7 @@ import {
   ConflictError,
   ConcurrencyLimitError,
 } from "@/lib/errors";
-import type { TenantId, AgentId, SessionId } from "@/lib/types";
+import type { TenantId, AgentId } from "@/lib/types";
 
 const tenantId = "tenant-1" as TenantId;
 const agentId = "agent-1" as AgentId;
