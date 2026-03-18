@@ -123,7 +123,31 @@ const A2aAgentRow = z.object({
   max_runtime_seconds: z.coerce.number(),
   a2a_tags: z.array(z.string()).default([]),
   skills: z.unknown().default([]),
+  plugins: z.unknown().default([]),
 });
+
+type SkillFile = { path: string; content: string };
+type AgentSkillEntry = { folder: string; files?: SkillFile[] };
+type AgentPluginEntry = { marketplace_id: string; plugin_name: string };
+
+/** Extract first meaningful description line from SKILL.md content */
+function extractSkillDescription(content: string): string | null {
+  const lines = content.split("\n");
+  let inFrontmatter = false;
+  let frontmatterDone = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!frontmatterDone && trimmed === "---") {
+      inFrontmatter = !inFrontmatter;
+      if (!inFrontmatter) frontmatterDone = true;
+      continue;
+    }
+    if (inFrontmatter) continue;
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.length > 10) return trimmed.slice(0, 200);
+  }
+  return null;
+}
 
 interface BuildAgentCardOptions {
   agentId: string;
@@ -138,7 +162,7 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
   const sql = getHttpClient();
 
   const rows = await sql`
-    SELECT id, slug, name, description, model, max_turns, max_runtime_seconds, a2a_tags, skills
+    SELECT id, slug, name, description, model, max_turns, max_runtime_seconds, a2a_tags, skills, plugins
     FROM agents
     WHERE id = ${agentId}
       AND a2a_enabled = true
@@ -149,24 +173,55 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
   const agent = A2aAgentRow.parse(rows[0]);
   const jsonrpcUrl = `${baseUrl}/api/a2a/${tenantSlug}/${agentSlug}/jsonrpc`;
 
-  // Build skills list from agent's configured skills
-  const agentSkills: AgentSkill[] = Array.isArray(agent.skills)
-    ? (agent.skills as Array<{ name?: string; description?: string; tags?: string[] }>).map((s) => ({
-        id: s.name ?? agent.name,
-        name: s.name ?? agent.name,
-        description: s.description ?? `Skill provided by ${agent.name}`,
-        inputModes: ["text/plain"],
-        outputModes: ["text/plain"],
-        tags: s.tags ?? agent.a2a_tags,
-      }))
-    : [{
-        id: agent.name,
-        name: agent.name,
-        description: agent.description || `Agent: ${agent.name}`,
-        inputModes: ["text/plain"],
-        outputModes: ["text/plain"],
-        tags: agent.a2a_tags,
-      }];
+  const agentSkills: AgentSkill[] = [];
+
+  // Skills from agents.skills JSONB: { folder, files: [{path, content}] }[]
+  const ownSkills = Array.isArray(agent.skills) ? (agent.skills as AgentSkillEntry[]) : [];
+  for (const skill of ownSkills) {
+    if (!skill.folder) continue;
+    // Extract description from SKILL.md file if present
+    const skillMd = skill.files?.find((f) =>
+      f.path.toLowerCase().endsWith("skill.md") || f.path.toLowerCase() === "skill.md",
+    );
+    const description = (skillMd && extractSkillDescription(skillMd.content)) ||
+      `${skill.folder} skill`;
+    agentSkills.push({
+      id: skill.folder,
+      name: skill.folder,
+      description,
+      inputModes: ["text/plain"],
+      outputModes: ["text/plain"],
+      tags: agent.a2a_tags,
+    });
+  }
+
+  // Skills from agents.plugins JSONB: { marketplace_id, plugin_name }[]
+  const pluginEntries = Array.isArray(agent.plugins) ? (agent.plugins as AgentPluginEntry[]) : [];
+  for (const plugin of pluginEntries) {
+    if (!plugin.plugin_name) continue;
+    // plugin_name may be "vendor/skill-name" — use last segment as display name
+    const name = plugin.plugin_name.split("/").pop() ?? plugin.plugin_name;
+    agentSkills.push({
+      id: `plugin:${plugin.plugin_name}`,
+      name,
+      description: `${name} (plugin skill)`,
+      inputModes: ["text/plain"],
+      outputModes: ["text/plain"],
+      tags: [],
+    });
+  }
+
+  // Fallback: represent the agent itself as a single skill
+  if (agentSkills.length === 0) {
+    agentSkills.push({
+      id: agent.name,
+      name: agent.name,
+      description: agent.description || `Agent: ${agent.name}`,
+      inputModes: ["text/plain"],
+      outputModes: ["text/plain"],
+      tags: agent.a2a_tags,
+    });
+  }
 
   return {
     name: agent.name,
