@@ -3,6 +3,7 @@ import { queryOne, query, execute } from "@/db";
 import { TenantRow, AgentRow, RunRow, TimezoneSchema } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
 import { z } from "zod";
+import { removeToolkitConnections } from "@/lib/composio";
 
 export const dynamic = "force-dynamic";
 
@@ -73,4 +74,31 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
 
   const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [tenantId]);
   return NextResponse.json(tenant);
+});
+
+export const DELETE = withErrorHandler(async (_request: NextRequest, context) => {
+  const { tenantId } = await (context as RouteContext).params;
+
+  const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [tenantId]);
+  if (!tenant) {
+    return NextResponse.json({ error: { message: "Tenant not found" } }, { status: 404 });
+  }
+
+  // Clean up Composio connections for all agents
+  const agents = await query(AgentRow, "SELECT * FROM agents WHERE tenant_id = $1", [tenantId]);
+  for (const agent of agents) {
+    if (agent.composio_toolkits.length > 0) {
+      removeToolkitConnections(tenantId, agent.composio_toolkits).catch(() => {});
+    }
+  }
+
+  // Cascade delete in FK-safe order
+  await execute("DELETE FROM mcp_connections WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)", [tenantId]);
+  await execute("DELETE FROM runs WHERE tenant_id = $1", [tenantId]);
+  await execute("DELETE FROM sessions WHERE tenant_id = $1", [tenantId]);
+  await execute("DELETE FROM agents WHERE tenant_id = $1", [tenantId]);
+  await execute("DELETE FROM api_keys WHERE tenant_id = $1", [tenantId]);
+  await execute("DELETE FROM tenants WHERE id = $1", [tenantId]);
+
+  return NextResponse.json({ deleted: true });
 });

@@ -14,6 +14,7 @@ import { TenantEditForm } from "./edit-form";
 import { ApiKeysSection } from "./api-keys";
 import { AddAgentForm } from "../../agents/add-agent-form";
 import { DeleteAgentButton } from "../../agents/delete-agent-button";
+import { DeleteTenantButton } from "./delete-tenant-button";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +71,7 @@ export default async function TenantDetailPage({
         backLabel="Tenants"
         title={tenant.name}
         badge={<Badge variant={tenant.status === "active" ? "default" : "destructive"}>{tenant.status}</Badge>}
+        actions={<DeleteTenantButton tenantId={tenant.id} tenantName={tenant.name} />}
       />
 
       <div className="grid grid-cols-4 gap-4">
