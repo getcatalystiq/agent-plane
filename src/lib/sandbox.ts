@@ -573,12 +573,17 @@ function buildRunnerScript(config: SandboxConfig): string {
   const hasSkills = config.agent.skills.length > 0;
   const hasPluginContent = (config.pluginFiles ?? []).length > 0;
   const hasMcp = config.mcpServers && Object.keys(config.mcpServers).length > 0;
+  const hasCallback = config.callbackData && config.callbackData.tools.length > 0;
+  // Build allowedTools: include wildcards for each MCP server so the SDK eagerly loads them
+  const mcpWildcards = Object.keys(config.mcpServers ?? {}).map(name => `mcp__${name}__*`);
+  if (hasCallback) mcpWildcards.push('mcp__agentco__*');
+  const allowedTools = hasMcp || hasCallback
+    ? [...config.agent.allowed_tools, ...mcpWildcards]
+    : config.agent.allowed_tools;
   const agentConfig = {
     model: config.agent.model,
     permissionMode: config.agent.permission_mode,
-    // Don't restrict allowedTools when MCP servers are present,
-    // otherwise MCP tool names (mcp__*) get blocked
-    ...(hasMcp ? {} : { allowedTools: config.agent.allowed_tools }),
+    allowedTools,
     maxTurns: config.agent.max_turns,
     maxBudgetUsd: config.agent.max_budget_usd,
     ...((hasSkills || hasPluginContent) ? { settingSources: ["project"] } : {}),
