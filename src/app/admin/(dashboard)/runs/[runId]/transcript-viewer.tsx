@@ -19,7 +19,7 @@ interface ContentBlock {
 }
 
 interface ConversationItem {
-  role: "system" | "assistant" | "tool" | "result" | "error";
+  role: "system" | "assistant" | "tool" | "result" | "error" | "a2a_incoming";
   text?: string;
   toolName?: string;
   toolInput?: unknown;
@@ -34,6 +34,8 @@ interface ConversationItem {
   subtype?: string;
   error?: string;
   timestamp?: string;
+  callbackUrl?: string;
+  sender?: string;
 }
 
 function buildConversation(events: TranscriptEvent[]): ConversationItem[] {
@@ -95,6 +97,13 @@ function buildConversation(events: TranscriptEvent[]): ConversationItem[] {
         durationMs: Number(event.duration_ms || 0),
         text: String(event.result || ""),
       });
+    } else if (event.type === "a2a_incoming") {
+      items.push({
+        role: "a2a_incoming",
+        sender: String(event.sender || "unknown"),
+        callbackUrl: event.callback_url ? String(event.callback_url) : undefined,
+        timestamp: event.timestamp ? String(event.timestamp) : undefined,
+      });
     } else if (event.type === "error") {
       items.push({
         role: "error",
@@ -136,6 +145,8 @@ function ConversationView({ items }: { items: ConversationItem[] }) {
     <div className="space-y-3">
       {items.map((item, i) => {
         switch (item.role) {
+          case "a2a_incoming":
+            return <A2AIncomingItem key={i} item={item} />;
           case "system":
             return <SystemItem key={i} item={item} />;
           case "assistant":
@@ -150,6 +161,25 @@ function ConversationView({ items }: { items: ConversationItem[] }) {
             return null;
         }
       })}
+    </div>
+  );
+}
+
+function A2AIncomingItem({ item }: { item: ConversationItem }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/30 px-4 py-3">
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className="text-[10px]">A2A incoming</Badge>
+        <span className="text-xs text-muted-foreground">from <span className="font-mono">{item.sender}</span></span>
+        {item.timestamp && (
+          <span className="text-xs text-muted-foreground ml-auto">{new Date(item.timestamp).toLocaleTimeString()}</span>
+        )}
+      </div>
+      {item.callbackUrl && (
+        <div className="mt-1 text-xs text-muted-foreground">
+          Callback: <span className="font-mono">{item.callbackUrl}</span>
+        </div>
+      )}
     </div>
   );
 }

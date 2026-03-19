@@ -450,10 +450,15 @@ export class SandboxAgentExecutor implements AgentExecutor {
         (p) => p.data && typeof p.data === "object" && (p.data as Record<string, unknown>).type === "ac_callback",
       );
 
+      // Parse callback fields once
+      const cb = callbackData
+        ? callbackData.data as Record<string, unknown>
+        : undefined;
+      const callbackUrl = cb?.callback_url as string | undefined;
+
       // Build prompt: text parts + serialized callback data so the agent can use it
       let prompt = textParts.map((p) => p.text).join("\n");
-      if (callbackData) {
-        const cb = callbackData.data as Record<string, unknown>;
+      if (cb) {
         prompt += `\n\n## Callback Connection\ncallback_url: ${cb.callback_url}\ncallback_token: ${cb.callback_token}\n`;
         if (cb.available_tools) {
           prompt += `\navailable_tools:\n${JSON.stringify(cb.available_tools, null, 2)}\n`;
@@ -462,10 +467,9 @@ export class SandboxAgentExecutor implements AgentExecutor {
 
       // Extract callback hostname for network policy
       let callbackHostname: string | undefined;
-      if (callbackData) {
+      if (callbackUrl) {
         try {
-          const cb = callbackData.data as Record<string, unknown>;
-          callbackHostname = new URL(cb.callback_url as string).hostname;
+          callbackHostname = new URL(callbackUrl).hostname;
         } catch { /* invalid URL, skip */ }
       }
 
@@ -492,6 +496,20 @@ export class SandboxAgentExecutor implements AgentExecutor {
         },
       );
 
+      // Log incoming A2A message as the first transcript event
+      const a2aIncomingEvent = JSON.stringify({
+        type: "a2a_incoming",
+        run_id: run.id,
+        context_id: requestContext.contextId,
+        task_id: taskId,
+        sender: this.deps.createdByKeyId ?? "unknown",
+        text_parts: textParts.length,
+        data_parts: dataParts.length,
+        has_callback: !!cb,
+        callback_url: callbackUrl,
+        timestamp: new Date().toISOString(),
+      });
+
       // Prepare and start sandbox execution
       const { sandbox, logIterator, transcriptChunks } = await prepareRunExecution({
         agent,
@@ -504,6 +522,9 @@ export class SandboxAgentExecutor implements AgentExecutor {
         maxRuntimeSeconds: agent.max_runtime_seconds,
         extraAllowedHostnames: callbackHostname ? [callbackHostname] : [],
       });
+
+      // Inject the A2A incoming event as the first transcript entry
+      transcriptChunks.unshift(a2aIncomingEvent);
 
       // Consume log stream, publish A2A events
       let lastAssistantText = "";
