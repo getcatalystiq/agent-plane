@@ -93,6 +93,11 @@ export default async function RunDetailPage({
             <p className="text-xs text-muted-foreground mt-0.5 font-normal">{run.status}</p>
           </MetricCard>
         )}
+        <MetricCard label="Runner">
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${run.runner === "vercel-ai-sdk" ? "bg-blue-500/10 text-blue-400" : "bg-orange-500/10 text-orange-400"}`}>
+            {run.runner === "vercel-ai-sdk" ? "AI SDK" : "Claude SDK"}
+          </span>
+        </MetricCard>
         <MetricCard label="Cost"><span className="font-mono">${run.cost_usd != null ? run.cost_usd.toFixed(4) : "—"}</span></MetricCard>
         <MetricCard label="Turns">{run.num_turns}</MetricCard>
         <MetricCard label="Duration">
