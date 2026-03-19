@@ -4,6 +4,7 @@ import type {
   Task,
   TaskState,
   TextPart,
+  DataPart,
   Message,
   TaskStatusUpdateEvent,
   TaskArtifactUpdateEvent,
@@ -433,14 +434,40 @@ export class SandboxAgentExecutor implements AgentExecutor {
         final: false,
       } as TaskStatusUpdateEvent);
 
-      // Extract prompt from user message
+      // Extract prompt from user message (text parts + data parts)
       const textParts = requestContext.userMessage.parts.filter(
         (p): p is TextPart => p.kind === "text",
       );
       if (textParts.length === 0) {
         throw A2AError.invalidParams("Message must contain at least one text part");
       }
-      const prompt = textParts.map((p) => p.text).join("\n");
+
+      // Extract data parts (e.g. ac_callback with callback_url, callback_token, available_tools)
+      const dataParts = requestContext.userMessage.parts.filter(
+        (p): p is DataPart => p.kind === "data",
+      );
+      const callbackData = dataParts.find(
+        (p) => p.data && typeof p.data === "object" && (p.data as Record<string, unknown>).type === "ac_callback",
+      );
+
+      // Build prompt: text parts + serialized callback data so the agent can use it
+      let prompt = textParts.map((p) => p.text).join("\n");
+      if (callbackData) {
+        const cb = callbackData.data as Record<string, unknown>;
+        prompt += `\n\n## Callback Connection\ncallback_url: ${cb.callback_url}\ncallback_token: ${cb.callback_token}\n`;
+        if (cb.available_tools) {
+          prompt += `\navailable_tools:\n${JSON.stringify(cb.available_tools, null, 2)}\n`;
+        }
+      }
+
+      // Extract callback hostname for network policy
+      let callbackHostname: string | undefined;
+      if (callbackData) {
+        try {
+          const cb = callbackData.data as Record<string, unknown>;
+          callbackHostname = new URL(cb.callback_url as string).hostname;
+        } catch { /* invalid URL, skip */ }
+      }
 
       const agent = this.deps.agent;
 
@@ -475,6 +502,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
         effectiveBudget,
         effectiveMaxTurns: agent.max_turns,
         maxRuntimeSeconds: agent.max_runtime_seconds,
+        extraAllowedHostnames: callbackHostname ? [callbackHostname] : [],
       });
 
       // Consume log stream, publish A2A events

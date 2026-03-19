@@ -135,6 +135,8 @@ export interface SandboxConfig {
   mcpServers?: Record<string, McpServerConfig>;
   mcpErrors?: string[];
   pluginFiles?: Array<{ path: string; content: string }>;
+  /** Additional hostnames to allow in the sandbox network policy (e.g. A2A callback URLs). */
+  extraAllowedHostnames?: string[];
 }
 
 export interface SandboxInstance {
@@ -220,6 +222,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
       "registry.npmjs.org",
       new URL(config.platformApiUrl).hostname,
       ...mcpHostnames,
+      ...(config.extraAllowedHostnames ?? []),
     ],
   };
 
