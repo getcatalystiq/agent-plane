@@ -75,12 +75,13 @@ export default async function AgentDetailPage({
 
       <AgentEditForm agent={agent} />
 
-      {agent.a2a_enabled && tenant && (
+      {tenant && (
         <A2aInfoSection
           agentId={agent.id}
           tenantSlug={tenant.slug}
           agentSlug={agent.slug}
           baseUrl={getCallbackBaseUrl()}
+          initialEnabled={agent.a2a_enabled}
           initialTags={agent.a2a_tags}
         />
       )}

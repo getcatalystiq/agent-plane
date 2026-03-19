@@ -9,11 +9,31 @@ import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTi
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 
-const MODELS = [
-  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-  { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
-  { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+const MODEL_GROUPS = [
+  { provider: "Anthropic", models: [
+    { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
+    { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+  ]},
+  { provider: "OpenAI", models: [
+    { value: "openai/gpt-4o", label: "GPT-4o" },
+    { value: "openai/gpt-4o-mini", label: "GPT-4o Mini" },
+    { value: "openai/o3", label: "o3" },
+  ]},
+  { provider: "Google", models: [
+    { value: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ]},
+  { provider: "Other", models: [
+    { value: "mistral/mistral-large", label: "Mistral Large" },
+    { value: "xai/grok-3", label: "Grok 3" },
+    { value: "deepseek/deepseek-chat", label: "DeepSeek Chat" },
+  ]},
 ];
+
+function isClaudeModel(model: string): boolean {
+  return !model.includes("/") || model.startsWith("anthropic/");
+}
 
 interface Tenant {
   id: string;
@@ -35,6 +55,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
     name: "",
     description: "",
     model: "claude-sonnet-4-6",
+    runner: "" as string, // empty = use default for model
     permission_mode: "bypassPermissions",
     max_turns: "100",
     max_budget_usd: "1.00",
@@ -47,6 +68,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
       name: "",
       description: "",
       model: "claude-sonnet-4-6",
+      runner: "",
       permission_mode: "bypassPermissions",
       max_turns: "100",
       max_budget_usd: "1.00",
@@ -68,6 +90,7 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
           name: form.name,
           description: form.description || null,
           model: form.model,
+          runner: form.runner || null,
           permission_mode: form.permission_mode,
           max_turns: parseInt(form.max_turns),
           max_budget_usd: parseFloat(form.max_budget_usd),
@@ -127,21 +150,45 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
                   placeholder="What does this agent do?"
                 />
               </FormField>
+              <FormField label="Model">
+                <Select
+                  value={form.model}
+                  onChange={(e) => setForm((f) => ({
+                    ...f,
+                    model: e.target.value,
+                    runner: isClaudeModel(e.target.value) ? f.runner : "vercel-ai-sdk",
+                  }))}
+                >
+                  {MODEL_GROUPS.map((g) => (
+                    <optgroup key={g.provider} label={g.provider}>
+                      {g.models.map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </Select>
+              </FormField>
               <div className="grid grid-cols-2 gap-3">
-                <FormField label="Model">
-                  <Select
-                    value={form.model}
-                    onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
-                  >
-                    {MODELS.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </Select>
+                <FormField label="Runner">
+                  {isClaudeModel(form.model) ? (
+                    <Select
+                      value={form.runner || "claude-agent-sdk"}
+                      onChange={(e) => setForm((f) => ({ ...f, runner: e.target.value === "claude-agent-sdk" ? "" : e.target.value }))}
+                    >
+                      <option value="claude-agent-sdk">Claude Agent SDK</option>
+                      <option value="vercel-ai-sdk">Vercel AI SDK</option>
+                    </Select>
+                  ) : (
+                    <Select value="vercel-ai-sdk" disabled>
+                      <option value="vercel-ai-sdk">Vercel AI SDK</option>
+                    </Select>
+                  )}
                 </FormField>
                 <FormField label="Permission Mode">
                   <Select
                     value={form.permission_mode}
                     onChange={(e) => setForm((f) => ({ ...f, permission_mode: e.target.value }))}
+                    disabled={!isClaudeModel(form.model) || form.runner === "vercel-ai-sdk"}
                   >
                     <option value="default">default</option>
                     <option value="acceptEdits">acceptEdits</option>

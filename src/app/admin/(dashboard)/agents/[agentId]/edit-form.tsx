@@ -8,17 +8,38 @@ import { Select } from "@/components/ui/select";
 import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
 
-const MODELS = [
-  { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
-  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-  { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+const MODEL_GROUPS = [
+  { provider: "Anthropic", models: [
+    { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
+    { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+  ]},
+  { provider: "OpenAI", models: [
+    { value: "openai/gpt-4o", label: "GPT-4o" },
+    { value: "openai/gpt-4o-mini", label: "GPT-4o Mini" },
+    { value: "openai/o3", label: "o3" },
+  ]},
+  { provider: "Google", models: [
+    { value: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ]},
+  { provider: "Other", models: [
+    { value: "mistral/mistral-large", label: "Mistral Large" },
+    { value: "xai/grok-3", label: "Grok 3" },
+    { value: "deepseek/deepseek-chat", label: "DeepSeek Chat" },
+  ]},
 ];
+
+function isClaudeModel(m: string): boolean {
+  return !m.includes("/") || m.startsWith("anthropic/");
+}
 
 interface Agent {
   id: string;
   name: string;
   description: string | null;
   model: string;
+  runner: string | null;
   permission_mode: string;
   max_turns: number;
   max_budget_usd: number;
@@ -31,6 +52,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
   const [name, setName] = useState(agent.name);
   const [description, setDescription] = useState(agent.description ?? "");
   const [model, setModel] = useState(agent.model);
+  const [runner, setRunner] = useState(agent.runner ?? "");
   const [permissionMode, setPermissionMode] = useState(agent.permission_mode);
   const [maxTurns, setMaxTurns] = useState(agent.max_turns.toString());
   const [maxBudget, setMaxBudget] = useState(agent.max_budget_usd.toString());
@@ -42,6 +64,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
     name !== agent.name ||
     description !== (agent.description ?? "") ||
     model !== agent.model ||
+    runner !== (agent.runner ?? "") ||
     permissionMode !== agent.permission_mode ||
     maxTurns !== agent.max_turns.toString() ||
     maxBudget !== agent.max_budget_usd.toString() ||
@@ -58,6 +81,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           name,
           description: description || null,
           model,
+          runner: runner || null,
           permission_mode: permissionMode,
           max_turns: parseInt(maxTurns),
           max_budget_usd: parseFloat(maxBudget),
@@ -96,11 +120,32 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           </div>
           <div className="col-span-2">
             <FormField label="Model">
-              <Select value={model} onChange={(e) => setModel(e.target.value)}>
-                {MODELS.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
+              <Select value={model} onChange={(e) => {
+                setModel(e.target.value);
+                if (!isClaudeModel(e.target.value)) setRunner("vercel-ai-sdk");
+              }}>
+                {MODEL_GROUPS.map((g) => (
+                  <optgroup key={g.provider} label={g.provider}>
+                    {g.models.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </optgroup>
                 ))}
               </Select>
+            </FormField>
+          </div>
+          <div className="col-span-1">
+            <FormField label="Runner">
+              {isClaudeModel(model) ? (
+                <Select value={runner || "claude-agent-sdk"} onChange={(e) => setRunner(e.target.value === "claude-agent-sdk" ? "" : e.target.value)}>
+                  <option value="claude-agent-sdk">Claude SDK</option>
+                  <option value="vercel-ai-sdk">AI SDK</option>
+                </Select>
+              ) : (
+                <Select value="vercel-ai-sdk" disabled>
+                  <option value="vercel-ai-sdk">AI SDK</option>
+                </Select>
+              )}
             </FormField>
           </div>
           <div className="col-span-1">

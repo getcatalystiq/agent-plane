@@ -10,14 +10,18 @@ export function A2aInfoSection({
   tenantSlug,
   agentSlug,
   baseUrl,
+  initialEnabled,
   initialTags,
 }: {
   agentId: string;
   tenantSlug: string;
   agentSlug: string;
   baseUrl: string;
+  initialEnabled: boolean;
   initialTags: string[];
 }) {
+  const [enabled, setEnabled] = useState(initialEnabled);
+  const [toggling, setToggling] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [cardPreview, setCardPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -29,6 +33,21 @@ export function A2aInfoSection({
   const endpointUrl = `${baseUrl}/api/a2a/${tenantSlug}/${agentSlug}`;
   const jsonRpcUrl = `${baseUrl}/api/a2a/${tenantSlug}/${agentSlug}/jsonrpc`;
   const agentCardUrl = `${baseUrl}/api/a2a/${tenantSlug}/${agentSlug}/.well-known/agent-card.json`;
+
+  async function toggleA2a() {
+    setToggling(true);
+    try {
+      const next = !enabled;
+      await fetch(`/api/admin/agents/${agentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ a2a_enabled: next }),
+      });
+      setEnabled(next);
+    } finally {
+      setToggling(false);
+    }
+  }
 
   async function saveTags(nextTags: string[]) {
     setSavingTags(true);
@@ -85,9 +104,23 @@ export function A2aInfoSection({
   }
 
   return (
-    <div className="rounded-lg border border-indigo-500/25 p-5">
-      <SectionHeader title="A2A Protocol" />
-      <div className="space-y-3">
+    <div className="rounded-lg border border-muted-foreground/25 p-5">
+      <div className="flex items-center justify-between mb-4">
+        <SectionHeader title="A2A Protocol" className="mb-0" />
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          disabled={toggling}
+          onClick={toggleA2a}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 ${enabled ? "bg-indigo-500" : "bg-muted-foreground/30"}`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${enabled ? "translate-x-5" : "translate-x-0"}`}
+          />
+        </button>
+      </div>
+      {enabled && <div className="space-y-3">
         <div className="grid grid-cols-2 gap-4 items-start">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">URL</label>
@@ -172,7 +205,7 @@ export function A2aInfoSection({
             </div>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
