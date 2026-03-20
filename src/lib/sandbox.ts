@@ -714,6 +714,8 @@ export interface SessionSandboxConfig {
   mcpErrors?: string[];
   pluginFiles?: Array<{ path: string; content: string }>;
   maxIdleTimeoutMs?: number; // default 30 min
+  /** AgentCo callback data for MCP bridge injection. */
+  callbackData?: CallbackData;
 }
 
 export interface SessionSandboxInstance extends SandboxInstance {
@@ -757,6 +759,11 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     .filter((s): s is Extract<typeof s, { url: string }> => "url" in s)
     .map((s) => new URL(s.url).hostname);
 
+  // Allow callback URL hostname for AgentCo bridge
+  const callbackHostnames = config.callbackData?.url
+    ? [new URL(config.callbackData.url).hostname]
+    : [];
+
   const timeoutMs = config.maxIdleTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
 
   const networkPolicy = {
@@ -769,6 +776,7 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
       "registry.npmjs.org",
       new URL(config.platformApiUrl).hostname,
       ...mcpHostnames,
+      ...callbackHostnames,
     ],
   };
 
@@ -815,9 +823,19 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     return { path: resolved, content: Buffer.from(f.content) };
   });
 
-  // Write skill + plugin files (no runner yet)
-  if (skillFiles.length > 0 || pluginFiles.length > 0) {
-    await sandbox.writeFiles([...skillFiles, ...pluginFiles]);
+  // Build AgentCo bridge files if callback data is present
+  const bridgeFiles: Array<{ path: string; content: Buffer }> = [];
+  if (config.callbackData && config.callbackData.tools.length > 0) {
+    bridgeFiles.push(
+      { path: "/vercel/sandbox/agentco-bridge.mjs", content: Buffer.from(buildBridgeScript()) },
+      { path: "/vercel/sandbox/agentco-tools.json", content: Buffer.from(JSON.stringify(config.callbackData.tools)) },
+    );
+  }
+
+  // Write skill + plugin + bridge files (no runner yet)
+  const allFiles = [...skillFiles, ...pluginFiles, ...bridgeFiles];
+  if (allFiles.length > 0) {
+    await sandbox.writeFiles(allFiles);
   }
 
   logger.info("Session sandbox created", {
@@ -825,7 +843,8 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     sandbox_id: sandbox.sandboxId,
   });
 
-  const hasMcp = config.mcpServers && Object.keys(config.mcpServers).length > 0;
+  const hasCallbackBridge = !!(config.callbackData && config.callbackData.tools.length > 0);
+  const hasMcp = (config.mcpServers && Object.keys(config.mcpServers).length > 0) || hasCallbackBridge;
   const hasSkills = config.agent.skills.length > 0;
   const hasPluginContent = (config.pluginFiles ?? []).length > 0;
 
@@ -840,8 +859,19 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     AI_GATEWAY_API_KEY: config.aiGatewayApiKey,
     ENABLE_TOOL_SEARCH: "true",
   };
-  if (hasMcp) {
-    baseEnv.MCP_SERVERS_JSON = JSON.stringify(config.mcpServers);
+
+  // Build MCP servers config — inject agentco bridge alongside other servers
+  const mcpServersForSession: Record<string, unknown> = { ...config.mcpServers };
+  if (config.callbackData && config.callbackData.tools.length > 0) {
+    mcpServersForSession['agentco'] = {
+      command: 'node',
+      args: ['/vercel/sandbox/agentco-bridge.mjs'],
+    };
+    baseEnv.AGENTCO_CALLBACK_URL = config.callbackData.url;
+    baseEnv.AGENTCO_CALLBACK_TOKEN = config.callbackData.token;
+  }
+  if (Object.keys(mcpServersForSession).length > 0) {
+    baseEnv.MCP_SERVERS_JSON = JSON.stringify(mcpServersForSession);
   }
 
   return buildSessionSandboxInstance(sandbox, config, baseEnv, !!hasMcp, hasSkills, hasPluginContent);
