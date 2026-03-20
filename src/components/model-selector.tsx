@@ -220,9 +220,20 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
               )}
             </div>
 
-            <Command.List className="max-h-[360px] overflow-y-auto p-1">
+            {/* Column headers — outside scroll area so they stay fixed */}
+            {!loading && models && (
+              <div className="grid grid-cols-[1fr_60px_70px_70px_80px] items-center border-b border-muted-foreground/15 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                <span>Model</span>
+                <span className="text-right">Context</span>
+                <span className="text-right">Input</span>
+                <span className="text-right">Output</span>
+                <span className="text-right pr-1">Tags</span>
+              </div>
+            )}
+
+            <Command.List className="max-h-[340px] overflow-y-auto">
               {loading && (
-                <div className="space-y-1 p-2">
+                <div className="space-y-1 p-3">
                   {[1, 2, 3, 4, 5].map((i) => (
                     <div key={i} className="h-8 animate-pulse rounded bg-muted-foreground/10" />
                   ))}
@@ -230,38 +241,27 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
               )}
 
               {error && (
-                <div className="px-3 py-2 text-xs text-yellow-400">
+                <div className="px-4 py-2 text-xs text-yellow-400">
                   Failed to load models from gateway. Showing cached data.
                 </div>
               )}
 
-              <Command.Empty className="px-3 py-4 text-center text-sm text-muted-foreground">
+              <Command.Empty className="px-4 py-4 text-center text-sm text-muted-foreground">
                 No models found.
               </Command.Empty>
-
-              {/* Column headers */}
-              {!loading && models && (
-                <div className="grid grid-cols-[1fr_65px_75px_75px_70px] gap-1 px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                  <span>Model</span>
-                  <span className="text-right">Context</span>
-                  <span className="text-right">Input</span>
-                  <span className="text-right">Output</span>
-                  <span className="text-center">Tags</span>
-                </div>
-              )}
 
               {Object.entries(grouped).map(([provider, providerModels]) => (
                 <Command.Group
                   key={provider}
                   heading={provider.charAt(0).toUpperCase() + provider.slice(1)}
-                  className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:text-muted-foreground"
+                  className="[&_[cmdk-group-heading]]:px-4 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:text-muted-foreground"
                 >
                   {providerModels.map((m) => (
                     <Command.Item
                       key={m.id}
                       value={m.id}
                       onSelect={() => handleSelect(m.id)}
-                      className="grid cursor-pointer grid-cols-[1fr_70px_80px_80px_auto] items-center gap-1 rounded-md px-3 py-1.5 text-sm data-[selected=true]:bg-accent"
+                      className="mx-1 grid cursor-pointer grid-cols-[1fr_60px_70px_70px_80px] items-center rounded-md px-3 py-1.5 text-sm data-[selected=true]:bg-accent"
                     >
                       <span className="truncate">
                         {m.name || m.id}
@@ -280,7 +280,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
                       <span className="text-right text-xs text-muted-foreground">
                         {formatPrice(m.pricing.outputPerMillionTokens)}
                       </span>
-                      <span className="flex justify-center gap-0.5">
+                      <span className="flex justify-end gap-0.5 pr-1">
                         {m.tags
                           .filter((t) => TAG_LABELS[t])
                           .map((t) => (
