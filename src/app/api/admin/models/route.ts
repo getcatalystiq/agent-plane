@@ -1,13 +1,9 @@
-import { NextRequest } from "next/server";
-import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { listCatalogModels } from "@/lib/model-catalog";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withErrorHandler(async (request: NextRequest) => {
-  await authenticateApiKey(request.headers.get("authorization"));
-
+export const GET = withErrorHandler(async () => {
   const models = await listCatalogModels();
   return jsonResponse({ models });
 });

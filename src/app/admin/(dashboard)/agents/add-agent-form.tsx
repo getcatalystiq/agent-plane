@@ -8,29 +8,8 @@ import { Select } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
+import { ModelSelector } from "@/components/model-selector";
 import { supportsClaudeRunner } from "@/lib/models";
-
-const MODEL_GROUPS = [
-  { provider: "Anthropic", models: [
-    { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
-    { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
-  ]},
-  { provider: "OpenAI", models: [
-    { value: "openai/gpt-4o", label: "GPT-4o" },
-    { value: "openai/gpt-4o-mini", label: "GPT-4o Mini" },
-    { value: "openai/o3", label: "o3" },
-  ]},
-  { provider: "Google", models: [
-    { value: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  ]},
-  { provider: "Other", models: [
-    { value: "mistral/mistral-large", label: "Mistral Large" },
-    { value: "xai/grok-3", label: "Grok 3" },
-    { value: "deepseek/deepseek-chat", label: "DeepSeek Chat" },
-  ]},
-];
 
 interface Tenant {
   id: string;
@@ -148,22 +127,15 @@ export function AddAgentForm({ tenants, defaultTenantId }: Props) {
                 />
               </FormField>
               <FormField label="Model">
-                <Select
+                <ModelSelector
                   value={form.model}
-                  onChange={(e) => setForm((f) => ({
+                  onChange={(modelId) => setForm((f) => ({
                     ...f,
-                    model: e.target.value,
-                    runner: supportsClaudeRunner(e.target.value) ? f.runner : "vercel-ai-sdk",
+                    model: modelId,
+                    runner: supportsClaudeRunner(modelId) ? f.runner : "vercel-ai-sdk",
+                    permission_mode: supportsClaudeRunner(modelId) ? f.permission_mode : "bypassPermissions",
                   }))}
-                >
-                  {MODEL_GROUPS.map((g) => (
-                    <optgroup key={g.provider} label={g.provider}>
-                      {g.models.map((m) => (
-                        <option key={m.value} value={m.value}>{m.label}</option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </Select>
+                />
               </FormField>
               <div className="grid grid-cols-2 gap-3">
                 <FormField label="Runner">

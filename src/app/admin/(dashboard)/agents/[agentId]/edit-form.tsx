@@ -7,29 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
+import { ModelSelector } from "@/components/model-selector";
 import { supportsClaudeRunner } from "@/lib/models";
-
-const MODEL_GROUPS = [
-  { provider: "Anthropic", models: [
-    { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
-    { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
-  ]},
-  { provider: "OpenAI", models: [
-    { value: "openai/gpt-4o", label: "GPT-4o" },
-    { value: "openai/gpt-4o-mini", label: "GPT-4o Mini" },
-    { value: "openai/o3", label: "o3" },
-  ]},
-  { provider: "Google", models: [
-    { value: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  ]},
-  { provider: "Other", models: [
-    { value: "mistral/mistral-large", label: "Mistral Large" },
-    { value: "xai/grok-3", label: "Grok 3" },
-    { value: "deepseek/deepseek-chat", label: "DeepSeek Chat" },
-  ]},
-];
 
 interface Agent {
   id: string;
@@ -99,7 +78,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         <div className="grid grid-cols-12 gap-4">
           <div className="col-span-2">
             <FormField label="Name">
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
+              <Input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} />
             </FormField>
           </div>
           <div className="col-span-3">
@@ -108,29 +87,29 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="What does this agent do?"
+                disabled={saving}
               />
             </FormField>
           </div>
           <div className="col-span-2">
             <FormField label="Model">
-              <Select value={model} onChange={(e) => {
-                setModel(e.target.value);
-                if (!supportsClaudeRunner(e.target.value)) setRunner("vercel-ai-sdk");
-              }}>
-                {MODEL_GROUPS.map((g) => (
-                  <optgroup key={g.provider} label={g.provider}>
-                    {g.models.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </optgroup>
-                ))}
-              </Select>
+              <ModelSelector
+                value={model}
+                disabled={saving}
+                onChange={(modelId) => {
+                  setModel(modelId);
+                  if (!supportsClaudeRunner(modelId)) {
+                    setRunner("vercel-ai-sdk");
+                    setPermissionMode("bypassPermissions");
+                  }
+                }}
+              />
             </FormField>
           </div>
           <div className="col-span-1">
             <FormField label="Runner">
               {supportsClaudeRunner(model) ? (
-                <Select value={runner || "claude-agent-sdk"} onChange={(e) => setRunner(e.target.value === "claude-agent-sdk" ? "" : e.target.value)}>
+                <Select value={runner || "claude-agent-sdk"} onChange={(e) => setRunner(e.target.value === "claude-agent-sdk" ? "" : e.target.value)} disabled={saving}>
                   <option value="claude-agent-sdk">Claude SDK</option>
                   <option value="vercel-ai-sdk">AI SDK</option>
                 </Select>
@@ -143,21 +122,21 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           </div>
           <div className="col-span-1">
             <FormField label="Max Turns">
-              <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
+              <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} disabled={saving} />
             </FormField>
           </div>
           <div className="col-span-1">
             <FormField label="Max Budget">
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
-                <Input type="number" step="0.01" min="0.01" max="100" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} className="pl-6" />
+                <Input type="number" step="0.01" min="0.01" max="100" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} className="pl-6" disabled={saving} />
               </div>
             </FormField>
           </div>
           <div className="col-span-1">
             <FormField label="Max Runtime">
               <div className="relative">
-                <Input type="number" min="1" max="60" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)} className="pr-10" />
+                <Input type="number" min="1" max="60" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)} className="pr-10" disabled={saving} />
                 <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">min</span>
               </div>
             </FormField>
@@ -165,7 +144,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           {(supportsClaudeRunner(model) && (runner === "" || runner === "claude-agent-sdk")) && (
             <div className="col-span-2">
               <FormField label="Permission Mode">
-                <Select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value)}>
+                <Select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value)} disabled={saving}>
                   <option value="default">default</option>
                   <option value="acceptEdits">acceptEdits</option>
                   <option value="bypassPermissions">bypassPermissions</option>
