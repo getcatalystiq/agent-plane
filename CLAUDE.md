@@ -1,6 +1,6 @@
 # AgentPlane
 
-A multi-tenant platform for running Claude Agent SDK agents in isolated Vercel Sandboxes, exposed via a REST API.
+A multi-tenant platform for running AI agents in isolated Vercel Sandboxes, exposed via a REST API. Supports any model via Vercel AI Gateway with dual runner architecture (Claude Agent SDK + Vercel AI SDK).
 
 ## Architecture
 
@@ -8,7 +8,7 @@ A multi-tenant platform for running Claude Agent SDK agents in isolated Vercel S
 
 **Core concepts:**
 - **Tenant** — isolated workspace with its own API keys, agents, budget, and timezone
-- **Agent** — configuration (model, tools, permissions, skills, plugins, git repo, schedule, max runtime) that runs Claude Agent SDK
+- **Agent** — configuration (model, runner, tools, permissions, skills, plugins, git repo, schedule, max runtime). Supports any Vercel AI Gateway model. Runner auto-selected: Claude Agent SDK for Anthropic models, Vercel AI SDK (ToolLoopAgent) for all others
 - **Run** — a single agent execution triggered by API, schedule, playground, chat, or A2A; streams NDJSON events; tracks `triggered_by` source
 - **Session** — persistent multi-turn conversation with sandbox kept alive; uses Claude Agent SDK `resume: sessionId` for context preservation; each message creates a run with `triggered_by: 'chat'`
 - **Schedule** — per-agent cron configuration (manual/hourly/daily/weekdays/weekly) with timezone-aware execution
@@ -29,10 +29,10 @@ A multi-tenant platform for running Claude Agent SDK agents in isolated Vercel S
 1. Client POSTs to `/api/agents/:id/runs` (or `/api/runs`) with a prompt
 2. MCP config is built (Composio toolkits + custom MCP servers resolved, tokens refreshed in parallel)
 3. A Vercel Sandbox is created from a pre-built SDK snapshot (falls back to fresh npm install if no snapshot); skill + plugin files injected
-4. Claude Agent SDK `query()` runs inside the sandbox
+4. Runner selected based on agent model: Claude Agent SDK `query()` for Anthropic models, Vercel AI SDK `ToolLoopAgent` for others
 5. Events stream back over NDJSON (`run_started`, `assistant`, `tool_use`, `tool_result`, `result`, `text_delta`)
 6. Ephemeral asset URLs (e.g. Composio/Firecrawl) are replaced with permanent Vercel Blob URLs
-7. Transcript stored in Vercel Blob; token usage + cost recorded in DB
+7. Transcript stored in Vercel Blob; token usage + cost recorded in DB (cost computed from model catalog pricing for AI SDK runs)
 8. Long-running streams (>4.5 min) detach with a `stream_detached` event; clients poll `/api/runs/:id`
 
 **Execution flow (sessions):**
@@ -120,10 +120,16 @@ src/
     validation.ts         # Zod request/response schemas
     auth.ts               # API key authentication + tenant RLS context + A2A single-query auth
     admin-auth.ts         # admin JWT + cookie auth
-    sandbox.ts            # Vercel Sandbox creation + SDK snapshot management + Claude Agent SDK runner + session sandbox + skill/plugin injection
+    sandbox.ts            # Vercel Sandbox creation + SDK snapshot management + dual runner (Claude SDK + AI SDK) + session sandbox + skill/plugin injection + AgentCo bridge
     run-executor.ts       # run preparation + execution abstraction (sandbox setup, transcript, billing)
     sessions.ts           # session lifecycle (create, transition, stop, idle/stuck queries)
     session-executor.ts   # session message execution (sandbox prepare/reconnect, message run, finalize)
+    model-catalog.ts      # Model catalog: CatalogModel type, listCatalogModels() with 15-min cache from Vercel AI Gateway
+    models.ts             # Model detection, runner routing (RunnerType, supportsClaudeRunner, resolveEffectiveRunner)
+    runners/
+      vercel-ai-shared.ts       # Shared code snippets for Vercel AI SDK runners (preamble, tools, MCP, agent execution)
+      vercel-ai-runner.ts       # One-shot Vercel AI SDK runner (ToolLoopAgent, skills prompt, skill registry)
+      vercel-ai-session-runner.ts  # Session Vercel AI SDK runner (conversation history, ToolLoopAgent)
     session-files.ts      # session file backup/restore to Vercel Blob (multipart upload)
     schedule.ts           # schedule config management, cron expression building, timezone-aware scheduling
     timezone.ts           # browser-safe timezone validation using Intl.DateTimeFormat
@@ -151,6 +157,7 @@ src/
     utils.ts              # misc helpers
   components/
     file-tree-editor.tsx  # nested folder editor with CodeMirror (language-aware)
+    model-selector.tsx    # searchable model combobox (cmdk + Radix Popover, AI Gateway catalog)
     toolkit-multiselect.tsx  # Composio toolkit picker (search, logos)
     local-date.tsx        # client-side date formatting
     ui/                   # shared UI primitives (badge, button, card, dialog, confirm-dialog, form-field, etc.)
@@ -235,15 +242,28 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 
 ## Sandbox & Runner
 
-- Sandboxes are created from a pre-built SDK snapshot (with `@anthropic-ai/claude-agent-sdk` pre-installed); falls back to fresh npm install if no snapshot exists
+- Sandboxes are created from a pre-built SDK snapshot (with `@anthropic-ai/claude-agent-sdk`, `ai`, `@ai-sdk/mcp`, `@modelcontextprotocol/sdk`, `zod` pre-installed); falls back to fresh npm install if no snapshot exists
 - SDK snapshots are refreshed daily at 4am UTC via `/api/cron/refresh-snapshot`; old snapshots (>24h) are cleaned up automatically
+- **Dual runner architecture:** Claude Agent SDK for Anthropic models (session resumption, permission modes, `.claude/` conventions), Vercel AI SDK `ToolLoopAgent` for all other providers
+- Vercel AI SDK runner uses `createGateway({ apiKey })` from `ai` package; `AI_GATEWAY_API_KEY` env var set in sandbox
+- Vercel AI SDK runner tools (9 total): `load_skill`, `sandbox__read_file`, `sandbox__write_file`, `sandbox__list_files`, `sandbox__bash`, `sandbox__web_fetch`, `sandbox__web_search`, `sandbox__complete_task`, plus MCP tools
+- Vercel AI SDK skills follow the skill-as-tool pattern: system prompt lists skills by name/description, `load_skill` tool loads full instructions on-demand
+- Vercel AI SDK sessions manage conversation history via `session-history.json` (message array replayed each turn) instead of Claude SDK's `resume` feature
+- `ToolLoopAgent` uses combined stop conditions: `stepCountIs(maxTurns)` + `hasToolCall('sandbox__complete_task')`
+- Runner shared code in `src/lib/runners/vercel-ai-shared.ts`: preamble, tool definitions, MCP setup, agent execution
+- Claude SDK shared code in `sandbox.ts`: `claudeSdkPreamble()`, `claudeSdkStreamLoop()`, `claudeSdkErrorAndCleanup()`
 - Snapshot ID is cached at the process level with TTL; `findSdkSnapshot()` looks up existing snapshots, `refreshSdkSnapshot()` creates new ones
 - Git repo agents skip snapshots (need fresh clone)
 - `ENABLE_TOOL_SEARCH=true` is set in the sandbox env to enable dynamic tool discovery for agents with many MCP tools
 - When MCP servers are present, `allowedTools` is suppressed so `mcp__*` tool names aren't blocked
 - Plugin skill files → `.claude/skills/<plugin-name>-<subfolder>/<filename>`; plugin agent files → `.claude/agents/<plugin-name>-<agent>.md`
-- Network allowlist: `ai-gateway.vercel.sh`, `*.composio.dev`, `*.firecrawl.dev`, `*.githubusercontent.com`, `registry.npmjs.org`, platform API host, custom MCP server hosts
+- Network allowlist: `ai-gateway.vercel.sh`, `*.composio.dev`, `*.firecrawl.dev`, `*.githubusercontent.com`, `html.duckduckgo.com`, `registry.npmjs.org`, platform API host, custom MCP server hosts, AgentCo callback hosts
 - Runner ALWAYS uploads transcript to platform via `/api/internal/runs/:id/transcript` with a run-scoped bearer token (not just detached runs)
+- AgentCo callback bridge: stdio MCP server injected into sandbox when A2A request includes callback data; env vars passed explicitly via `StdioClientTransport({ env })` for subprocess inheritance
+- Model catalog (`/api/admin/models`, `/api/models`): fetches from `GET https://ai-gateway.vercel.sh/v1/models`, 15-min cache, Zod validation, stale-on-error fallback
+- Cost computation for Vercel AI SDK runs: `parseResultEvent` looks up model pricing from catalog, calculates `(input_tokens × price + output_tokens × price) / 1M`
+- Run `runner` column set at creation time via `resolveEffectiveRunner()` (no longer defaults to claude-agent-sdk)
+- Transcript viewer supports both Claude SDK (nested `assistant.message.content` blocks) and Vercel AI SDK (flat `tool_use`, `tool_result`, `run_started`, `mcp_error` events) formats
 
 ## Patterns & Conventions
 
@@ -291,3 +311,5 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - A2A SSE streaming sends heartbeats (15s), `data: [DONE]\n\n` sentinel on completion
 - `a2aHeaders()` helper shared between JSON-RPC and Agent Card routes for consistent `A2A-Version` + `A2A-Request-Id` headers
 - Admin UI: A2A badge on agent list, A2A info section on agent detail (endpoint URLs + Agent Card preview), source filter on runs page
+- Admin UI model selector: cmdk + Radix Popover combobox fetching live models from Vercel AI Gateway; shows context window, pricing, capability tags; supports search, provider filter, custom model entry
+- Admin UI edit form: two rows — Name/Desc/Model/Runner on top, Max Turns/Budget/Runtime/Permission Mode on bottom; form disabled during save; API errors displayed inline
