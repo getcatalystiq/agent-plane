@@ -175,7 +175,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
 
       <Popover.Portal>
         <Popover.Content
-          className="dark z-50 w-[600px] rounded-lg border border-muted-foreground/25 bg-card text-card-foreground shadow-xl"
+          className="z-50 w-[600px] rounded-lg border border-muted-foreground/25 bg-card text-card-foreground shadow-xl"
           sideOffset={4}
           align="start"
           onOpenAutoFocus={(e) => e.preventDefault()}

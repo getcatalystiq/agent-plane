@@ -1,24 +1,24 @@
 # AgentPlane
 
-A multi-tenant platform for running [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) agents in isolated [Vercel Sandboxes](https://vercel.com/docs/sandbox), exposed via a REST API.
+A multi-tenant platform for running AI agents in isolated [Vercel Sandboxes](https://vercel.com/docs/sandbox), exposed via a REST API. Supports any model via [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) with dual runner architecture ([Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) + [Vercel AI SDK](https://sdk.vercel.ai)).
 
-**Claude Agents as an API** — one POST request to launch an agent with skills, MCP connectors, streaming, and full observability. Built for platforms.
+**AI Agents as an API** — one POST request to launch an agent with skills, MCP connectors, streaming, and full observability. Built for platforms.
 
 ### Features
 
-- **Claude Agent SDK inside** — full agent with tool use, file editing, and bash running in an isolated sandbox
+- **Any model, any provider** — supports all models via Vercel AI Gateway; dual runner: Claude Agent SDK for Anthropic models, Vercel AI SDK for everything else
 - **Isolated sandboxes** — every run spins up a Vercel Sandbox from a pre-built SDK snapshot (~3s cold start) with its own filesystem, network policy, and resource limits
-- **Skills & plugins** — inject custom skills and marketplace plugins into agents before execution
+- **Skills & plugins** — inject custom skills and tenant-scoped marketplace plugins into agents before execution
 - **Scheduled runs** — configure agents to run on a schedule (hourly, daily, weekdays, weekly) with timezone-aware execution
 - **Multi-tenant** — row-level security, per-tenant API keys, budget controls, and rate limiting
-- **MCP connectors** — connect agents to external tools via Composio (GitHub, Slack, Firecrawl) or custom OAuth 2.1 MCP servers
+- **MCP connectors** — connect agents to external tools via Composio (GitHub, Slack, Firecrawl) or tenant-scoped custom OAuth 2.1 MCP servers
 - **A2A protocol** — expose agents to external A2A-compliant clients (LangGraph, CrewAI, Semantic Kernel, etc.) via Agent Cards and JSON-RPC; streaming SSE, idempotency, budget clamping
-- **Full observability** — every run stores a transcript, token usage, cost, duration, and trigger source (API/schedule/playground/A2A)
+- **Full observability** — every run stores a transcript, token usage, cost, duration, and trigger source (API/schedule/playground/chat/A2A)
 - **Playground** — test agents interactively from the admin dashboard with real-time event streaming
 - **Multi-turn sessions** — persistent conversations with context retention across messages; sandbox kept alive between turns; automatic backup/restore on cold start
 - **Configurable runtime** — set max runtime per agent (60–3600 seconds)
 - **TypeScript SDK** — `@getcatalystiq/agent-plane` npm package with streaming, auto-polling, and typed events
-- **Admin dashboard** — manage tenants, agents, runs, connectors, plugins, and schedules with analytics charts
+- **Admin dashboard** — manage companies, agents, runs, connectors, plugins, and schedules; tabbed agent detail; AgentCo-inspired design system
 
 ## How It Works
 
@@ -234,8 +234,8 @@ npm run dev
 ```
 
 The app runs at [http://localhost:3000](http://localhost:3000):
-- **Landing page** at `/` — public marketing page ("Claude Agents as an API")
-- **Admin dashboard** at `/admin` — manage tenants, agents, runs, connectors, and plugins
+- **Landing page** at `/` — public marketing page ("AI Agents as an API")
+- **Admin dashboard** at `/admin` — manage companies, agents, runs, connectors, plugins, and settings
 
 ## Environment Variables
 
@@ -311,8 +311,9 @@ API keys are hashed with SHA-256 and optionally encrypted at rest with AES-256-G
 | | `/api/admin/agents/*` | Agent CRUD + connectors + MCP connections + plugin suggestions |
 | | `/api/admin/composio/toolkits` | List available Composio toolkits |
 | | `/api/admin/composio/tools` | List tools for a toolkit |
-| | `/api/admin/mcp-servers/*` | Custom MCP server CRUD |
-| | `/api/admin/plugin-marketplaces/*` | Marketplace CRUD + plugin listing + file editing |
+| | `/api/admin/models` | List available models from AI Gateway catalog |
+| | `/api/admin/mcp-servers/*` | Tenant-scoped MCP server CRUD |
+| | `/api/admin/plugin-marketplaces/*` | Tenant-scoped marketplace CRUD + plugin listing + file editing |
 | | `/api/admin/tenants/*` | Tenant CRUD + API key management |
 | | `/api/admin/runs/*` | Admin run viewing + cancellation |
 | | `/api/admin/sessions/*` | Admin session management + playground messaging |

@@ -12,8 +12,8 @@ A multi-tenant platform for running AI agents in isolated Vercel Sandboxes, expo
 - **Run** — a single agent execution triggered by API, schedule, playground, chat, or A2A; streams NDJSON events; tracks `triggered_by` source
 - **Session** — persistent multi-turn conversation with sandbox kept alive; uses Claude Agent SDK `resume: sessionId` for context preservation; each message creates a run with `triggered_by: 'chat'`
 - **Schedule** — per-agent cron configuration (manual/hourly/daily/weekdays/weekly) with timezone-aware execution
-- **MCP Server** — custom OAuth-authenticated tool server registered by admins; agents connect via OAuth 2.1 PKCE
-- **Plugin Marketplace** — GitHub repo containing reusable agents/skills/connectors that agents can install
+- **MCP Server** — tenant-scoped custom OAuth-authenticated tool server; agents connect via OAuth 2.1 PKCE
+- **Plugin Marketplace** — tenant-scoped GitHub repo containing reusable agents/skills/connectors that agents can install
 - **A2A Protocol** — Agent-to-Agent protocol (Linux Foundation) server; exposes agents to external A2A-compliant clients via Agent Cards and JSON-RPC
 
 **Execution flow (A2A):**
@@ -104,15 +104,15 @@ src/
       (dashboard)/
         page.tsx          # dashboard overview (stat cards + run/cost charts)
         run-charts.tsx    # Recharts line charts (runs/day, cost/day per agent)
-        agents/           # agent list + detail (edit, connectors, skills, plugins, playground, schedule, A2A info)
+        agents/           # agent list + tabbed detail (General, Connectors, Skills, Plugins, Schedules, Runs)
         mcp-servers/      # custom MCP server management
         plugin-marketplaces/  # marketplace list + detail + plugin editor (tabbed: Agents, Skills, Connectors)
         runs/             # run list + detail (transcript viewer, cancel button, run source badge, source filter)
-        tenants/          # tenant list + detail + creation (API keys, budget, timezone)
+        settings/         # company settings (name, slug, timezone, budget, logo, API keys, danger zone)
   db/
     index.ts              # DB client (Pool, query helpers, RLS context, transactions)
     migrate.ts            # migration runner
-    migrations/           # sequential SQL migration files (001–017)
+    migrations/           # sequential SQL migration files (001–022)
   lib/
     a2a.ts                # A2A protocol: status mapping, Agent Card builder/cache, RunBackedTaskStore, SandboxAgentExecutor, input validation
     types.ts              # branded types, domain interfaces, StreamEvent union
@@ -160,13 +160,18 @@ src/
     model-selector.tsx    # searchable model combobox (cmdk + Radix Popover, AI Gateway catalog)
     toolkit-multiselect.tsx  # Composio toolkit picker (search, logos)
     local-date.tsx        # client-side date formatting
-    ui/                   # shared UI primitives (badge, button, card, dialog, confirm-dialog, form-field, etc.)
+    layout/
+      company-switcher.tsx   # tenant/company dropdown selector
+      top-bar.tsx            # breadcrumb navigation bar
+    ui/                   # shared UI primitives (badge, button, card, dialog, confirm-dialog, form-field, tabs, etc.)
       copy-button.tsx        # clipboard copy button with checkmark feedback
       run-source-badge.tsx   # color-coded badge for run trigger source (API, Schedule, Playground, Chat, A2A)
       detail-page-header.tsx # standardized detail page header
       section-header.tsx     # consistent section headers
       confirm-dialog.tsx     # managed confirmation dialog (replaces browser confirm())
       form-field.tsx         # form field wrapper with label + error display
+      tabs.tsx               # line-style tabs matching AgentCo design
+      theme-toggle.tsx       # dark mode toggle
   middleware.ts           # auth middleware (API key, JWT cookie, OAuth callback bypass)
 scripts/
   create-tenant.ts        # CLI to provision tenant + API key
@@ -201,14 +206,14 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 - Agent names are unique per tenant
 - RLS enforced via `app.current_tenant_id` session config (fail-closed via `NULLIF`)
 - Tenant-scoped transactions via `withTenantTransaction()`
-- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–017), run via `npm run migrate`
-- `tenants` table includes: `timezone` column for schedule evaluation
+- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–022), run via `npm run migrate`
+- `tenants` table includes: `timezone` column for schedule evaluation, `logo_url` (base64 data URL or external URL)
 - `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600), `a2a_enabled` (boolean, default false; partial index on `tenant_id WHERE a2a_enabled = true`)
 - `runs` table includes: `triggered_by` column (`api`, `schedule`, `playground`, `chat`, `a2a`) to track run source; `created_by_key_id` FK to api_keys (audit trail for A2A); `session_id` FK to sessions table for chat messages
 - `sessions` table includes: `sandbox_id` (NULL when stopped), `sdk_session_id` (Claude Agent SDK session), `session_blob_url` (Vercel Blob backup), `status` (creating/active/idle/stopped), `message_count`, `idle_since`, `last_backup_at`; state machine: creating→active/idle/stopped, active→idle/stopped, idle→active/stopped; max 5 concurrent sessions per tenant
-- `mcp_servers` — admin-managed global registry (OAuth 2.1 client credentials, no RLS)
+- `mcp_servers` — tenant-scoped registry (OAuth 2.1 client credentials, RLS enforced); unique slug per tenant
 - `mcp_connections` — per-agent OAuth connections (tenant-scoped RLS, unique per agent-server pair)
-- `plugin_marketplaces` — global registry of GitHub repos; optional encrypted GitHub token for push-to-repo editing
+- `plugin_marketplaces` — tenant-scoped registry of GitHub repos (RLS enforced); unique github_repo per tenant; optional encrypted GitHub token for push-to-repo editing
 
 ## Environment Variables
 
@@ -276,8 +281,11 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Plugin files are injected into the sandbox at `.claude/skills/` and `.claude/agents/`
 - Process-level caching with TTLs: MCP servers (5 min), plugin trees (5 min), recent pushes (2 min)
 - SSE/NDJSON streams send heartbeats every 15s and auto-detach after 4.5 min for long-running runs
-- Ephemeral Composio asset URLs are persisted to Vercel Blob during transcript capture
+- Ephemeral asset URLs (Composio/Firecrawl) are persisted to Vercel Blob in both platform-finalized and runner-uploaded transcripts
+- Non-Anthropic models always force Vercel AI SDK runner via `resolveEffectiveRunner()`, ignoring stored runner preference
+- `load_skill` tool accepts parameter name variants (`name`, `skill_name`, `skill_identifier`) for cross-model compatibility
 - Admin UI is always dark mode via `.dark` class on the layout root; Tailwind v4 dark variant is configured with `@variant dark (&:where(.dark, .dark *))` in `globals.css`
+- Admin UI uses system font stack (no Geist) to match AgentCo design
 - Landing page (`/`) is a dark-mode marketing page with hero, features, how-it-works, architecture, and CTA sections
 - Sandbox network policy allowlists: AI Gateway, Composio, Firecrawl, GitHub, npm registry, platform API, custom MCP servers
 - Max 10 concurrent runs per tenant; atomic concurrent run check prevents TOCTOU races
@@ -310,6 +318,11 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - A2A `cancelTask` handles both `pending` and `running` states; stops sandbox via `reconnectSandbox()` (mirrors `/api/runs/:id/cancel`)
 - A2A SSE streaming sends heartbeats (15s), `data: [DONE]\n\n` sentinel on completion
 - `a2aHeaders()` helper shared between JSON-RPC and Agent Card routes for consistent `A2A-Version` + `A2A-Request-Id` headers
+- Admin UI terminology: "tenant" is renamed to "company" throughout the UI (API still uses "tenant")
+- Admin UI navigation: top bar with breadcrumb (serves as page title, no redundant h1), company switcher dropdown, all pages scoped to active company
+- Admin UI agent detail: tabbed interface (General, Connectors, Skills, Plugins, Schedules, Runs) with line-style tabs; metrics cards under General tab
+- Admin UI settings page (`/admin/settings`): company form (name, slug, timezone, budget, logo upload), API keys section, danger zone
 - Admin UI: A2A badge on agent list, A2A info section on agent detail (endpoint URLs + Agent Card preview), source filter on runs page
 - Admin UI model selector: cmdk + Radix Popover combobox fetching live models from Vercel AI Gateway; shows context window, pricing, capability tags; supports search, provider filter, custom model entry
 - Admin UI edit form: two rows — Name/Desc/Model/Runner on top, Max Turns/Budget/Runtime/Permission Mode on bottom; form disabled during save; API errors displayed inline
+- Admin UI components: `DetailPageHeader` used consistently on all detail pages; `tabs.tsx` for line-style tabs; `company-switcher.tsx` for tenant selection; `top-bar.tsx` for breadcrumb navigation
