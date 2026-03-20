@@ -201,8 +201,8 @@ if (mcpServersJson) {
         const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
         transport = new StdioClientTransport({ command: cfg.command, args: cfg.args || [] });
       } else if (cfg.url) {
-        // SSE/HTTP transport (Composio, custom MCP servers)
-        transport = { type: 'sse', url: cfg.url, headers: cfg.headers || {} };
+        // HTTP Streamable transport (recommended for production MCP servers)
+        transport = { type: 'http', url: cfg.url, headers: cfg.headers || {} };
       } else {
         throw new Error('MCP server ' + name + ' has no url or command');
       }

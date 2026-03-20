@@ -186,7 +186,7 @@ if (mcpServersJson) {
         const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
         transport = new StdioClientTransport({ command: cfg.command, args: cfg.args || [] });
       } else if (cfg.url) {
-        transport = { type: 'sse', url: cfg.url, headers: cfg.headers || {} };
+        transport = { type: 'http', url: cfg.url, headers: cfg.headers || {} };
       } else {
         throw new Error('MCP server ' + name + ' has no url or command');
       }
