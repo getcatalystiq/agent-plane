@@ -59,7 +59,7 @@ export default async function AgentDetailPage({
         actions={<AgentHeaderActions agentId={agent.id} tenantId={agent.tenant_id} />}
         subtitle={
           <p className="text-sm text-muted-foreground">
-            Tenant: <Link href={`/admin/tenants/${agent.tenant_id}`} className="text-primary hover:underline">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</Link>
+            Tenant: <span className="text-foreground">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</span>
           </p>
         }
       />
