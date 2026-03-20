@@ -254,10 +254,17 @@ async function main() {
       },
     });
 
+    let fullText = '';
     for await (const chunk of result.fullStream) {
       if (chunk.type === 'text-delta') {
+        fullText += chunk.textDelta;
         console.log(JSON.stringify({ type: 'text_delta', text: chunk.textDelta }));
       }
+    }
+
+    // Emit assistant event with full text (mirrors Claude SDK runner format)
+    if (fullText) {
+      emit({ type: 'assistant', message: { content: [{ type: 'text', text: fullText }] } });
     }
 
     // Append assistant response to history

@@ -274,11 +274,18 @@ async function main() {
     });
 
     // Stream text deltas ONLY — tool events come from onStepFinish
+    let fullText = '';
     for await (const chunk of result.fullStream) {
       if (chunk.type === 'text-delta') {
+        fullText += chunk.textDelta;
         // text_delta: streamed to stdout only, NOT written to transcript
         console.log(JSON.stringify({ type: 'text_delta', text: chunk.textDelta }));
       }
+    }
+
+    // Emit assistant event with full text (mirrors Claude SDK runner format)
+    if (fullText) {
+      emit({ type: 'assistant', message: { content: [{ type: 'text', text: fullText }] } });
     }
 
     const totalUsage = await result.totalUsage;
