@@ -42,15 +42,11 @@ export function buildVercelAiSessionRunnerScript(config: SessionRunnerConfig): s
   // execSync is used intentionally for the bash tool — security is provided
   // by the Vercel Sandbox boundary (network allowlist, isolated filesystem).
   return `
-import { streamText, stopWhen, stepCountIs, createGateway } from 'ai';
-const gateway = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY ?? '' });
-import { createMCPClient } from '@ai-sdk/mcp';
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { execSync } from 'child_process';
 
 const modelId = ${JSON.stringify(config.agent.model)};
-const model = gateway(modelId);
 const prompt = ${JSON.stringify(config.prompt)};
 const runId = process.env.AGENT_PLANE_RUN_ID;
 const platformUrl = process.env.AGENT_PLANE_PLATFORM_URL;
@@ -172,6 +168,9 @@ const builtinTools = {
   },
 };
 
+// --- Dynamic imports (catchable by main's error handler) ---
+const { createMCPClient } = await import('@ai-sdk/mcp');
+
 // --- MCP tools ---
 const mcpServersJson = process.env.MCP_SERVERS_JSON;
 const mcpClients = [];
@@ -214,6 +213,10 @@ if (mcpServersJson) {
 
 // --- Main execution ---
 async function main() {
+  const { streamText, stopWhen, stepCountIs, createGateway } = await import('ai');
+  const gateway = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY ?? '' });
+  const model = gateway(modelId);
+
   const history = loadHistory();
   history.messages.push({ role: 'user', content: prompt });
 
