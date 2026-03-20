@@ -322,16 +322,11 @@ function ToolItem({ item }: { item: ConversationItem }) {
 function ResultItem({ item }: { item: ConversationItem }) {
   const success = item.subtype === "success";
   return (
-    <div className={`rounded-md p-3 ${success ? "bg-green-950 border border-green-800" : "bg-red-950 border border-red-800"}`}>
-      <p className={`text-sm font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
+    <div className={`rounded-md px-3 py-2 flex items-center gap-3 ${success ? "bg-green-950 border border-green-900" : "bg-red-950 border border-red-900"}`}>
+      <span className={`text-xs font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
         {success ? "Completed" : "Failed"}
-      </p>
-      {item.text && (
-        <div className="mt-1 text-sm prose prose-sm dark:prose-invert max-w-none">
-          <ReactMarkdown>{item.text}</ReactMarkdown>
-        </div>
-      )}
-      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mt-2">
+      </span>
+      <div className="flex flex-wrap gap-3 text-xs text-zinc-400">
         {item.numTurns != null && item.numTurns > 0 && <span>{item.numTurns} turns</span>}
         {item.costUsd != null && item.costUsd > 0 && <span>${item.costUsd.toFixed(4)}</span>}
         {item.durationMs != null && item.durationMs > 0 && <span>{(item.durationMs / 1000).toFixed(1)}s</span>}
