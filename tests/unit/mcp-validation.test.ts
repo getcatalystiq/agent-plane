@@ -7,6 +7,7 @@ import {
 
 describe("CreateMcpServerSchema", () => {
   const valid = {
+    tenant_id: "00000000-0000-4000-8000-000000000001",
     name: "Test MCP Server",
     slug: "test-mcp-server",
     description: "A test server",
