@@ -130,14 +130,11 @@ function renderEvent(event: PlaygroundEvent, idx: number) {
     const success = event.subtype === "success";
     const costUsd = event.cost_usd ?? event.total_cost_usd;
     return (
-      <div key={idx} className={`rounded-md p-3 ${success ? "bg-green-950 border border-green-800" : "bg-red-950 border border-red-800"}`}>
-        <p className={`text-sm font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
+      <div key={idx} className={`rounded-md px-3 py-2 flex items-center gap-3 ${success ? "bg-green-950/50 border border-green-800/50" : "bg-red-950/50 border border-red-800/50"}`}>
+        <span className={`text-xs font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
           {success ? "Completed" : "Failed"}
-        </p>
-        {event.result != null && (
-          <p className="text-sm mt-1 text-foreground whitespace-pre-wrap">{String(event.result)}</p>
-        )}
-        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mt-2">
+        </span>
+        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
           {event.num_turns != null && <span>{String(event.num_turns)} turns</span>}
           {costUsd != null && Number(costUsd) > 0 && <span>${Number(costUsd).toFixed(4)}</span>}
           {event.duration_ms != null && <span>{(Number(event.duration_ms) / 1000).toFixed(1)}s</span>}
