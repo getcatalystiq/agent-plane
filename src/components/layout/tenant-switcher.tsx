@@ -8,6 +8,7 @@ interface Tenant {
   id: string;
   name: string;
   slug: string;
+  logo_url: string | null;
 }
 
 const AVATAR_COLORS = [
@@ -161,16 +162,20 @@ export function TenantSwitcher() {
       >
         {activeTenant ? (
           <>
-            <span
-              className="w-5 h-5 rounded text-[9px] font-bold text-white flex items-center justify-center shrink-0"
-              style={{
-                backgroundColor: getAvatarColor(
-                  activeTenantIndex >= 0 ? activeTenantIndex : 0
-                ),
-              }}
-            >
-              {getInitial(activeTenant.name)}
-            </span>
+            {activeTenant.logo_url ? (
+              <img src={activeTenant.logo_url} alt="" className="w-5 h-5 rounded object-cover shrink-0" />
+            ) : (
+              <span
+                className="w-5 h-5 rounded text-[9px] font-bold text-white flex items-center justify-center shrink-0"
+                style={{
+                  backgroundColor: getAvatarColor(
+                    activeTenantIndex >= 0 ? activeTenantIndex : 0
+                  ),
+                }}
+              >
+                {getInitial(activeTenant.name)}
+              </span>
+            )}
             <span className="text-[13px] font-semibold tracking-[-0.01em] truncate flex-1 text-left">
               {activeTenant.name}
             </span>
@@ -228,12 +233,16 @@ export function TenantSwitcher() {
                     role="option"
                     aria-selected={isSelected}
                   >
-                    <span
-                      className="w-5 h-5 rounded text-[9px] font-bold text-white flex items-center justify-center shrink-0"
-                      style={{ backgroundColor: getAvatarColor(index) }}
-                    >
-                      {getInitial(tenant.name)}
-                    </span>
+                    {tenant.logo_url ? (
+                      <img src={tenant.logo_url} alt="" className="w-5 h-5 rounded object-cover shrink-0" />
+                    ) : (
+                      <span
+                        className="w-5 h-5 rounded text-[9px] font-bold text-white flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: getAvatarColor(index) }}
+                      >
+                        {getInitial(tenant.name)}
+                      </span>
+                    )}
                     <span className="truncate flex-1 text-left">
                       {tenant.name}
                     </span>

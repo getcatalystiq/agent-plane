@@ -37,6 +37,7 @@ const UpdateTenantSchema = z.object({
   monthly_budget_usd: z.number().min(0).optional(),
   name: z.string().min(1).max(255).optional(),
   timezone: TimezoneSchema.optional(),
+  logo_url: z.string().max(500_000).nullable().optional(),
 });
 
 export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
@@ -63,6 +64,10 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   if (input.timezone !== undefined) {
     sets.push(`timezone = $${idx++}`);
     params.push(input.timezone);
+  }
+  if (input.logo_url !== undefined) {
+    sets.push(`logo_url = $${idx++}`);
+    params.push(input.logo_url);
   }
 
   if (sets.length === 0) {

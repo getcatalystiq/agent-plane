@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { SectionHeader } from "@/components/ui/section-header";
 import { queryOne } from "@/db";
 import { PluginMarketplaceRow } from "@/lib/validation";
@@ -41,22 +40,20 @@ export default async function MarketplaceDetailPage({
 
   return (
     <div className="space-y-6">
-      <DetailPageHeader
-        backHref="/admin/plugin-marketplaces"
-        backLabel="Marketplaces"
-        title={marketplace.name}
-        badge={isOwned ? <Badge variant="secondary">Owned</Badge> : undefined}
-        subtitle={
-          <a
-            href={`https://github.com/${marketplace.github_repo}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-mono text-xs text-primary hover:underline"
-          >
-            {marketplace.github_repo}
-          </a>
-        }
-      />
+      <div>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-semibold">{marketplace.name}</h1>
+          {isOwned && <Badge variant="secondary">Owned</Badge>}
+        </div>
+        <a
+          href={`https://github.com/${marketplace.github_repo}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-mono text-xs text-primary hover:underline"
+        >
+          {marketplace.github_repo}
+        </a>
+      </div>
 
       {/* Token configuration */}
       <Card>

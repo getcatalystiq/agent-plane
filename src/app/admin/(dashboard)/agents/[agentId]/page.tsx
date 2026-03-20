@@ -1,16 +1,8 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { MetricCard } from "@/components/ui/metric-card";
-import { RunStatusBadge } from "@/components/ui/run-status-badge";
-import { RunSourceBadge } from "@/components/ui/run-source-badge";
-import { PaginationBar, parsePaginationParams } from "@/components/ui/pagination-bar";
-import { DetailPageHeader } from "@/components/ui/detail-page-header";
-import { SectionHeader } from "@/components/ui/section-header";
-import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
-import { LocalDate } from "@/components/local-date";
 import { queryOne, query } from "@/db";
-import { AgentRow, RunRow, TenantRow, ScheduleRow } from "@/lib/validation";
+import { AgentRow, TenantRow, ScheduleRow } from "@/lib/validation";
 import { AgentEditForm } from "./edit-form";
 import { A2aInfoSection } from "./a2a-info-section";
 import { SkillsEditor } from "./skills-editor";
@@ -24,22 +16,17 @@ export const dynamic = "force-dynamic";
 
 export default async function AgentDetailPage({
   params,
-  searchParams,
 }: {
   params: Promise<{ agentId: string }>;
-  searchParams: Promise<{ page?: string; pageSize?: string }>;
 }) {
   const { agentId } = await params;
-  const { page: pageParam, pageSize: pageSizeParam } = await searchParams;
-  const { page, pageSize, offset } = parsePaginationParams(pageParam, pageSizeParam);
 
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   if (!agent) notFound();
 
   const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [agent.tenant_id]);
 
-  const [runs, countResult, schedules] = await Promise.all([
-    query(RunRow, "SELECT * FROM runs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3", [agentId, pageSize, offset]),
+  const [countResult, schedules] = await Promise.all([
     queryOne(
       z.object({ total: z.number() }),
       "SELECT COUNT(*)::int AS total FROM runs WHERE agent_id = $1",
@@ -52,17 +39,10 @@ export default async function AgentDetailPage({
 
   return (
     <div className="space-y-6">
-      <DetailPageHeader
-        backHref="/admin/agents"
-        backLabel="Agents"
-        title={agent.name}
-        actions={<AgentHeaderActions agentId={agent.id} tenantId={agent.tenant_id} />}
-        subtitle={
-          <p className="text-sm text-muted-foreground">
-            Tenant: <span className="text-foreground">{tenant?.name ?? agent.tenant_id.slice(0, 8)}</span>
-          </p>
-        }
-      />
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">{agent.name}</h1>
+        <AgentHeaderActions agentId={agent.id} tenantId={agent.tenant_id} />
+      </div>
 
       <div className="grid grid-cols-6 gap-4">
         <MetricCard label="Runs">{totalRuns}</MetricCard>
@@ -98,54 +78,6 @@ export default async function AgentDetailPage({
         timezone={tenant?.timezone ?? "UTC"}
       />
 
-      {/* Runs */}
-      <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <SectionHeader title="Runs" />
-        <AdminTable footer={
-          <PaginationBar
-            page={page}
-            pageSize={pageSize}
-            total={totalRuns}
-            buildHref={(p, ps) => `/admin/agents/${agentId}?page=${p}&pageSize=${ps}`}
-          />
-        }>
-          <AdminTableHead>
-            <Th>Run ID</Th>
-            <Th>Status</Th>
-            <Th>Source</Th>
-            <Th>Prompt</Th>
-            <Th align="right">Cost</Th>
-            <Th align="right">Turns</Th>
-            <Th align="right">Duration</Th>
-            <Th>Created</Th>
-          </AdminTableHead>
-          <tbody>
-            {runs.map((r) => (
-              <AdminTableRow key={r.id}>
-                <td className="p-3 font-mono text-xs">
-                  <Link href={`/admin/runs/${r.id}?from=agent`} className="text-primary hover:underline">
-                    {r.id.slice(0, 8)}...
-                  </Link>
-                </td>
-                <td className="p-3"><RunStatusBadge status={r.status} /></td>
-                <td className="p-3">
-                  <RunSourceBadge triggeredBy={r.triggered_by} />
-                </td>
-                <td className="p-3 max-w-xs text-muted-foreground text-xs truncate" title={r.prompt}>
-                  {r.prompt.slice(0, 60)}{r.prompt.length > 60 ? "…" : ""}
-                </td>
-                <td className="p-3 text-right font-mono">${r.cost_usd != null ? r.cost_usd.toFixed(4) : "—"}</td>
-                <td className="p-3 text-right">{r.num_turns}</td>
-                <td className="p-3 text-right text-muted-foreground text-xs">
-                  {r.duration_ms > 0 ? `${(r.duration_ms / 1000).toFixed(1)}s` : "—"}
-                </td>
-                <td className="p-3 text-muted-foreground text-xs"><LocalDate value={r.created_at} /></td>
-              </AdminTableRow>
-            ))}
-            {runs.length === 0 && <EmptyRow colSpan={8}>No runs</EmptyRow>}
-          </tbody>
-        </AdminTable>
-      </div>
     </div>
   );
 }

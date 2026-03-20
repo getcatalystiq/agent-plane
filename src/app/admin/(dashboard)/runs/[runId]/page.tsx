@@ -3,7 +3,6 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { MetricCard } from "@/components/ui/metric-card";
 import { RunStatusBadge } from "@/components/ui/run-status-badge";
-import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { LocalDate } from "@/components/local-date";
 import { z } from "zod";
 import { queryOne } from "@/db";
@@ -15,13 +14,10 @@ export const dynamic = "force-dynamic";
 
 export default async function RunDetailPage({
   params,
-  searchParams,
 }: {
   params: Promise<{ runId: string }>;
-  searchParams: Promise<{ from?: string }>;
 }) {
   const { runId } = await params;
-  const { from } = await searchParams;
 
   const run = await queryOne(RunRow, "SELECT * FROM runs WHERE id = $1", [runId]);
   if (!run) notFound();
@@ -66,22 +62,17 @@ export default async function RunDetailPage({
     }
   }
 
-  const backHref = from === "agent" ? `/admin/agents/${run.agent_id}` : "/admin/runs";
-  const backLabel = from === "agent" ? "Agent" : "Runs";
-
   return (
     <div className="space-y-6">
-      <DetailPageHeader
-        backHref={backHref}
-        backLabel={backLabel}
-        title={<span className="font-mono">{run.id.slice(0, 12)}...</span>}
-        badge={<RunStatusBadge status={run.status} />}
-        actions={
-          (run.status === "running" || run.status === "pending") ? (
-            <CancelRunButton runId={run.id} />
-          ) : undefined
-        }
-      />
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-semibold font-mono">{run.id.slice(0, 12)}...</h1>
+          <RunStatusBadge status={run.status} />
+        </div>
+        {(run.status === "running" || run.status === "pending") && (
+          <CancelRunButton runId={run.id} />
+        )}
+      </div>
 
       {/* A2A request origin */}
       {run.triggered_by === "a2a" && requestedByKeyName && (

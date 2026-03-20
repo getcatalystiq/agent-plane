@@ -332,6 +332,7 @@ export const TenantRow = z.object({
   status: z.enum(["active", "suspended"]),
   current_month_spend: z.coerce.number(),
   timezone: z.string().default("UTC"),
+  logo_url: z.string().nullable().default(null),
   spend_period_start: z.coerce.string(),
   created_at: z.coerce.string(),
 });

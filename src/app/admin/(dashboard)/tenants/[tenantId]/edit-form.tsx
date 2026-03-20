@@ -14,6 +14,7 @@ interface Tenant {
   status: string;
   monthly_budget_usd: number;
   timezone: string;
+  logo_url: string | null;
 }
 
 const TIMEZONES = [

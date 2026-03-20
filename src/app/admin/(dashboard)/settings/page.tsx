@@ -46,6 +46,7 @@ export default async function SettingsPage() {
         status: tenant.status,
         timezone: tenant.timezone,
         monthly_budget_usd: tenant.monthly_budget_usd,
+        logo_url: tenant.logo_url,
       }} />
 
       {/* API Keys */}

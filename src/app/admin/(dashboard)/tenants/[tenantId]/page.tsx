@@ -5,7 +5,6 @@ import { Badge } from "@/components/ui/badge";
 import { MetricCard } from "@/components/ui/metric-card";
 import { RunStatusBadge } from "@/components/ui/run-status-badge";
 import { PaginationBar, parsePaginationParams } from "@/components/ui/pagination-bar";
-import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { SectionHeader } from "@/components/ui/section-header";
 import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
 import { queryOne, query } from "@/db";
@@ -66,13 +65,13 @@ export default async function TenantDetailPage({
 
   return (
     <div className="space-y-6">
-      <DetailPageHeader
-        backHref="/admin/tenants"
-        backLabel="Tenants"
-        title={tenant.name}
-        badge={<Badge variant={tenant.status === "active" ? "default" : "destructive"}>{tenant.status}</Badge>}
-        actions={<DeleteTenantButton tenantId={tenant.id} tenantName={tenant.name} />}
-      />
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-semibold">{tenant.name}</h1>
+          <Badge variant={tenant.status === "active" ? "default" : "destructive"}>{tenant.status}</Badge>
+        </div>
+        <DeleteTenantButton tenantId={tenant.id} tenantName={tenant.name} />
+      </div>
 
       <div className="grid grid-cols-4 gap-4">
         <MetricCard label="Monthly Budget"><span className="font-mono">${tenant.monthly_budget_usd.toFixed(2)}</span></MetricCard>

@@ -15,9 +15,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           __html: `(function(){try{var t=localStorage.getItem('ap-theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark');else document.documentElement.classList.remove('dark')}catch(e){}})()`,
         }}
       />
-      <div className="flex min-h-screen bg-background text-foreground">
+      <div className="flex h-screen overflow-hidden bg-background text-foreground">
         {/* Sidebar */}
-        <aside className="w-56 border-r border-border flex flex-col">
+        <aside className="w-56 border-r border-border flex flex-col shrink-0">
           <TenantSwitcher />
           <SidebarNav />
           <div className="p-2 border-t border-border flex items-center justify-between">
@@ -27,10 +27,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </aside>
 
         {/* Main content */}
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden">
           <TopBar />
-          <div className="flex-1 overflow-auto p-6">{children}</div>
-        </main>
+          <main className="flex-1 overflow-auto p-6">{children}</main>
+        </div>
       </div>
     </>
   );
