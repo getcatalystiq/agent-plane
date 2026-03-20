@@ -75,11 +75,11 @@ export default async function AgentDetailPage({
         connectors={
           <ConnectorsManager agentId={agent.id} toolkits={agent.composio_toolkits} composioAllowedTools={agent.composio_allowed_tools} hasPlugins={agent.plugins.length > 0} />
         }
-        pluginsAndSkills={
-          <div className="space-y-6">
-            <PluginsManager agentId={agent.id} initialPlugins={agent.plugins} />
-            <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
-          </div>
+        skills={
+          <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
+        }
+        plugins={
+          <PluginsManager agentId={agent.id} initialPlugins={agent.plugins} />
         }
         schedules={
           <ScheduleEditor

@@ -7,13 +7,15 @@ export function AgentTabs({
   general,
   runs,
   connectors,
-  pluginsAndSkills,
+  skills,
+  plugins,
   schedules,
 }: {
   general: ReactNode;
   runs: ReactNode;
   connectors: ReactNode;
-  pluginsAndSkills: ReactNode;
+  skills: ReactNode;
+  plugins: ReactNode;
   schedules: ReactNode;
 }) {
   return (
@@ -21,7 +23,8 @@ export function AgentTabs({
       tabs={[
         { label: "General", content: general },
         { label: "Connectors", content: connectors },
-        { label: "Plugins & Skills", content: pluginsAndSkills },
+        { label: "Skills", content: skills },
+        { label: "Plugins", content: plugins },
         { label: "Schedules", content: schedules },
         { label: "Runs", content: runs },
       ]}
