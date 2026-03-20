@@ -4,6 +4,7 @@ import { query } from "@/db";
 import { z } from "zod";
 import { AddMcpServerForm } from "./add-server-form";
 import { DeleteServerButton } from "./delete-server-button";
+import { getActiveTenantId } from "@/lib/active-tenant";
 
 const McpServerWithStats = z.object({
   id: z.string(),
@@ -22,6 +23,16 @@ const McpServerWithStats = z.object({
 export const dynamic = "force-dynamic";
 
 export default async function McpServersPage() {
+  const tenantId = await getActiveTenantId();
+
+  if (!tenantId) {
+    return (
+      <div className="flex items-center justify-center py-12 text-muted-foreground">
+        Select a tenant from the sidebar.
+      </div>
+    );
+  }
+
   const servers = await query(
     McpServerWithStats,
     `SELECT ms.*,
@@ -29,15 +40,16 @@ export default async function McpServersPage() {
        COUNT(mc.id) FILTER (WHERE mc.status = 'active')::int AS active_count
      FROM mcp_servers ms
      LEFT JOIN mcp_connections mc ON mc.mcp_server_id = ms.id
+     WHERE ms.tenant_id = $1
      GROUP BY ms.id
      ORDER BY ms.name`,
-    [],
+    [tenantId],
   );
 
   return (
     <div className="space-y-6">
       <div className="flex items-center">
-        <AddMcpServerForm />
+        <AddMcpServerForm tenantId={tenantId} />
       </div>
 
       <AdminTable>

@@ -56,6 +56,7 @@ const SkillsSchema = z
 // --- Plugin Marketplace Validation ---
 
 export const CreatePluginMarketplaceSchema = z.object({
+  tenant_id: z.string().uuid(),
   name: z.string().min(1).max(100),
   github_repo: z.string()
     .regex(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/, "Must be owner/repo format"),
@@ -64,6 +65,7 @@ export const CreatePluginMarketplaceSchema = z.object({
 
 export const PluginMarketplaceRow = z.object({
   id: z.string(),
+  tenant_id: z.string(),
   name: z.string(),
   github_repo: z.string(),
   github_token_enc: z.string().nullable().default(null),
@@ -75,6 +77,7 @@ export type PluginMarketplace = z.infer<typeof PluginMarketplaceRow>;
 
 export const PluginMarketplacePublicRow = z.object({
   id: z.string(),
+  tenant_id: z.string(),
   name: z.string(),
   github_repo: z.string(),
   created_at: z.coerce.date(),
@@ -390,6 +393,7 @@ export type AgentInternal = z.infer<typeof AgentRowInternal>;
 const RESERVED_MCP_SLUGS = ["composio"];
 
 export const CreateMcpServerSchema = z.object({
+  tenant_id: z.string().uuid(),
   name: z.string().min(1).max(100),
   slug: z
     .string()
@@ -434,6 +438,7 @@ export type UpdateMcpConnectionInput = z.infer<typeof UpdateMcpConnectionSchema>
 
 export const McpServerRow = z.object({
   id: z.string(),
+  tenant_id: z.string(),
   name: z.string(),
   slug: z.string(),
   description: z.string(),

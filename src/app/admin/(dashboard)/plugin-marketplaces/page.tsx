@@ -5,6 +5,7 @@ import { query } from "@/db";
 import { z } from "zod";
 import { AddMarketplaceForm } from "./add-marketplace-form";
 import { DeleteMarketplaceButton } from "./delete-marketplace-button";
+import { getActiveTenantId } from "@/lib/active-tenant";
 
 const MarketplaceWithStats = z.object({
   id: z.string(),
@@ -18,20 +19,31 @@ const MarketplaceWithStats = z.object({
 export const dynamic = "force-dynamic";
 
 export default async function PluginMarketplacesPage() {
+  const tenantId = await getActiveTenantId();
+
+  if (!tenantId) {
+    return (
+      <div className="flex items-center justify-center py-12 text-muted-foreground">
+        Select a tenant from the sidebar.
+      </div>
+    );
+  }
+
   const marketplaces = await query(
     MarketplaceWithStats,
     `SELECT pm.id, pm.name, pm.github_repo, pm.created_at,
        (SELECT COUNT(*)::int FROM agents WHERE plugins @> jsonb_build_array(jsonb_build_object('marketplace_id', pm.id::text))) AS agent_count,
        (pm.github_token_enc IS NOT NULL) AS is_owned
      FROM plugin_marketplaces pm
+     WHERE pm.tenant_id = $1
      ORDER BY pm.name`,
-    [],
+    [tenantId],
   );
 
   return (
     <div className="space-y-6">
       <div className="flex items-center">
-        <AddMarketplaceForm />
+        <AddMarketplaceForm tenantId={tenantId} />
       </div>
 
       <AdminTable>

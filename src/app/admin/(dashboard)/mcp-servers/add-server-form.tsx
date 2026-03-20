@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTi
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 
-export function AddMcpServerForm() {
+export function AddMcpServerForm({ tenantId }: { tenantId: string }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -39,6 +39,7 @@ export function AddMcpServerForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          tenant_id: tenantId,
           name: form.name,
           slug: form.slug,
           description: form.description,

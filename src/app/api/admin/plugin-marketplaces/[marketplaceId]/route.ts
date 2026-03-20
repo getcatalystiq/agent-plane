@@ -13,14 +13,24 @@ export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ marketplaceId: string }> };
 
-export const GET = withErrorHandler(async (_request: NextRequest, context) => {
+export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const { marketplaceId } = await (context as RouteContext).params;
+  const tenantId = request.nextUrl.searchParams.get("tenant_id");
 
-  const marketplace = await queryOne(
-    PluginMarketplaceRow,
-    "SELECT * FROM plugin_marketplaces WHERE id = $1",
-    [marketplaceId],
-  );
+  let marketplace;
+  if (tenantId) {
+    marketplace = await queryOne(
+      PluginMarketplaceRow,
+      "SELECT * FROM plugin_marketplaces WHERE id = $1 AND tenant_id = $2",
+      [marketplaceId, tenantId],
+    );
+  } else {
+    marketplace = await queryOne(
+      PluginMarketplaceRow,
+      "SELECT * FROM plugin_marketplaces WHERE id = $1",
+      [marketplaceId],
+    );
+  }
   if (!marketplace) throw new NotFoundError("Plugin marketplace not found");
 
   return NextResponse.json(marketplace);
@@ -28,12 +38,22 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
 
 export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   const { marketplaceId } = await (context as RouteContext).params;
+  const tenantId = request.nextUrl.searchParams.get("tenant_id");
 
-  const marketplace = await queryOne(
-    PluginMarketplaceRow,
-    "SELECT * FROM plugin_marketplaces WHERE id = $1",
-    [marketplaceId],
-  );
+  let marketplace;
+  if (tenantId) {
+    marketplace = await queryOne(
+      PluginMarketplaceRow,
+      "SELECT * FROM plugin_marketplaces WHERE id = $1 AND tenant_id = $2",
+      [marketplaceId, tenantId],
+    );
+  } else {
+    marketplace = await queryOne(
+      PluginMarketplaceRow,
+      "SELECT * FROM plugin_marketplaces WHERE id = $1",
+      [marketplaceId],
+    );
+  }
   if (!marketplace) throw new NotFoundError("Plugin marketplace not found");
 
   const body = await request.json();
@@ -79,8 +99,19 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
 
 const AgentRefCount = z.object({ count: z.coerce.number() });
 
-export const DELETE = withErrorHandler(async (_request: NextRequest, context) => {
+export const DELETE = withErrorHandler(async (request: NextRequest, context) => {
   const { marketplaceId } = await (context as RouteContext).params;
+  const tenantId = request.nextUrl.searchParams.get("tenant_id");
+
+  // Verify marketplace exists (and optionally belongs to tenant)
+  if (tenantId) {
+    const existing = await queryOne(
+      PluginMarketplaceRow,
+      "SELECT * FROM plugin_marketplaces WHERE id = $1 AND tenant_id = $2",
+      [marketplaceId, tenantId],
+    );
+    if (!existing) throw new NotFoundError("Plugin marketplace not found");
+  }
 
   // Check if any agents reference this marketplace in their plugins JSONB
   const refCount = await queryOne(

@@ -71,10 +71,18 @@ export async function getMcpServersByIds(
   return servers;
 }
 
-export async function listMcpServers(): Promise<McpServer[]> {
+export async function listMcpServers(tenantId?: string): Promise<McpServer[]> {
+  const cols = "id, tenant_id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, oauth_metadata, created_at, updated_at";
+  if (tenantId) {
+    return query(
+      McpServerRow,
+      `SELECT ${cols} FROM mcp_servers WHERE tenant_id = $1 ORDER BY name`,
+      [tenantId],
+    );
+  }
   return query(
     McpServerRow,
-    "SELECT id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, oauth_metadata, created_at, updated_at FROM mcp_servers ORDER BY name",
+    `SELECT ${cols} FROM mcp_servers ORDER BY name`,
   );
 }
 
@@ -82,6 +90,7 @@ export async function listMcpServers(): Promise<McpServer[]> {
 
 export async function registerMcpServer(
   input: {
+    tenantId: string;
     name: string;
     slug: string;
     description: string;
@@ -92,6 +101,8 @@ export async function registerMcpServer(
   callbackBaseUrl: string,
 ): Promise<McpServer> {
   const env = getEnv();
+
+  const returnCols = "id, tenant_id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, oauth_metadata, created_at, updated_at";
 
   // Step 1: Discover OAuth metadata
   const metadata = await discoverOAuthMetadata(input.baseUrl);
@@ -125,11 +136,12 @@ export async function registerMcpServer(
     // Insert with pre-generated ID
     const row = await queryOne(
       McpServerRow,
-      `INSERT INTO mcp_servers (id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, client_secret_enc, oauth_metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, oauth_metadata, created_at, updated_at`,
+      `INSERT INTO mcp_servers (id, tenant_id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, client_secret_enc, oauth_metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING ${returnCols}`,
       [
         serverId,
+        input.tenantId,
         input.name,
         input.slug,
         input.description,
@@ -148,10 +160,11 @@ export async function registerMcpServer(
   // No DCR endpoint — insert without client credentials
   const row = await queryOne(
     McpServerRow,
-    `INSERT INTO mcp_servers (name, slug, description, logo_url, base_url, mcp_endpoint_path, oauth_metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, name, slug, description, logo_url, base_url, mcp_endpoint_path, client_id, oauth_metadata, created_at, updated_at`,
+    `INSERT INTO mcp_servers (tenant_id, name, slug, description, logo_url, base_url, mcp_endpoint_path, oauth_metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING ${returnCols}`,
     [
+      input.tenantId,
       input.name,
       input.slug,
       input.description,

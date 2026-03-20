@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTi
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 
-export function AddMarketplaceForm() {
+export function AddMarketplaceForm({ tenantId }: { tenantId: string }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -25,6 +25,7 @@ export function AddMarketplaceForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          tenant_id: tenantId,
           name: form.name,
           github_repo: form.github_repo,
           ...(form.github_token && { github_token: form.github_token }),

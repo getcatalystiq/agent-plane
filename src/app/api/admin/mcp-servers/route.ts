@@ -7,8 +7,9 @@ import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withErrorHandler(async () => {
-  const servers = await listMcpServers();
+export const GET = withErrorHandler(async (request: NextRequest) => {
+  const tenantId = request.nextUrl.searchParams.get("tenant_id");
+  const servers = await listMcpServers(tenantId ?? undefined);
   return NextResponse.json({ data: servers });
 });
 
@@ -20,10 +21,11 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
   await validatePublicUrl(input.base_url);
 
   const callbackBaseUrl = getCallbackBaseUrl();
-  logger.info("Registering MCP server", { slug: input.slug, base_url: input.base_url, callbackBaseUrl });
+  logger.info("Registering MCP server", { slug: input.slug, base_url: input.base_url, tenant_id: input.tenant_id, callbackBaseUrl });
 
   const server = await registerMcpServer(
     {
+      tenantId: input.tenant_id,
       name: input.name,
       slug: input.slug,
       description: input.description,

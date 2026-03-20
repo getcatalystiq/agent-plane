@@ -40,11 +40,8 @@ export default async function MarketplaceDetailPage({
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold">{marketplace.name}</h1>
-          {isOwned && <Badge variant="secondary">Owned</Badge>}
-        </div>
+      <div className="flex items-center gap-3">
+        {isOwned && <Badge variant="secondary">Owned</Badge>}
         <a
           href={`https://github.com/${marketplace.github_repo}`}
           target="_blank"
