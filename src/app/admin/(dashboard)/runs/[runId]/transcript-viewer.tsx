@@ -320,11 +320,21 @@ function ToolItem({ item }: { item: ConversationItem }) {
 }
 
 function ResultItem({ item }: { item: ConversationItem }) {
-  if (!item.text) return null;
+  const success = item.subtype === "success";
   return (
-    <div className="rounded-md border border-green-500/30 bg-green-500/5 px-4 py-3">
-      <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-        <ReactMarkdown>{item.text}</ReactMarkdown>
+    <div className={`rounded-md p-3 ${success ? "bg-green-950 border border-green-800" : "bg-red-950 border border-red-800"}`}>
+      <p className={`text-sm font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
+        {success ? "Completed" : "Failed"}
+      </p>
+      {item.text && (
+        <div className="mt-1 text-sm prose prose-sm dark:prose-invert max-w-none">
+          <ReactMarkdown>{item.text}</ReactMarkdown>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mt-2">
+        {item.numTurns != null && item.numTurns > 0 && <span>{item.numTurns} turns</span>}
+        {item.costUsd != null && item.costUsd > 0 && <span>${item.costUsd.toFixed(4)}</span>}
+        {item.durationMs != null && item.durationMs > 0 && <span>{(item.durationMs / 1000).toFixed(1)}s</span>}
       </div>
     </div>
   );
