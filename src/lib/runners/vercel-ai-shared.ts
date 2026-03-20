@@ -289,12 +289,13 @@ export function buildAgentExecution(mode: "oneshot" | "session"): string {
       onStepFinish: ({ toolCalls, toolResults }) => {
         if (toolCalls) {
           for (const tc of toolCalls) {
-            emit({ type: 'tool_use', tool_name: tc.toolName, name: tc.toolName, input: tc.args, tool_use_id: tc.toolCallId });
+            emit({ type: 'tool_use', tool_name: tc.toolName, name: tc.toolName, input: tc.args ?? {}, tool_use_id: tc.toolCallId });
           }
         }
         if (toolResults) {
           for (const tr of toolResults) {
-            emit({ type: 'tool_result', tool_use_id: tr.toolCallId, result: truncateToolResult(tr.result) });
+            const output = tr.result !== undefined && tr.result !== null ? tr.result : '(no output)';
+            emit({ type: 'tool_result', tool_use_id: tr.toolCallId, tool_name: tr.toolName, result: truncateToolResult(typeof output === 'string' ? output : JSON.stringify(output)) });
           }
         }
       },
