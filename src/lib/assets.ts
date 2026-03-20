@@ -3,8 +3,9 @@ import { randomUUID } from "crypto";
 import { logger } from "./logger";
 
 // Matches Composio temporary R2 pre-signed URLs (expire after X-Amz-Expires seconds)
+// Excludes backslash to avoid capturing JSON escape sequences (e.g. \" in NDJSON)
 const COMPOSIO_TEMP_URL_REGEX =
-  /https:\/\/temp\.[a-f0-9]+\.r2\.cloudflarestorage\.com\/[^\s"'<>\])},]+/g;
+  /https:\/\/temp\.[a-f0-9]+\.r2\.cloudflarestorage\.com\/[^\s"'<>\\)\])},]+/g;
 
 const MIME_TO_EXT: Record<string, string> = {
   "image/png": "png",

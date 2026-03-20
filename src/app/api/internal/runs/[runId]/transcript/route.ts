@@ -6,6 +6,7 @@ import { getEnv } from "@/lib/env";
 import { uploadTranscript } from "@/lib/transcripts";
 import { transitionRunStatus } from "@/lib/runs";
 import { parseResultEvent } from "@/lib/transcript-utils";
+import { processLineAssets } from "@/lib/assets";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
 import type { RunId, TenantId } from "@/lib/types";
@@ -67,7 +68,11 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   try {
-    const transcript = lines.join("\n") + "\n";
+    // Replace ephemeral asset URLs (e.g. Composio/R2) with permanent Blob URLs
+    const processedLines = await Promise.all(
+      lines.map((line) => processLineAssets(line, tenantId, typedRunId)),
+    );
+    const transcript = processedLines.join("\n") + "\n";
     const blobUrl = await uploadTranscript(tenantId, typedRunId, transcript);
     const resultData = await parseResultEvent(lines[lines.length - 1]);
 
