@@ -241,7 +241,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
 
               {/* Column headers */}
               {!loading && models && (
-                <div className="grid grid-cols-[1fr_70px_80px_80px_auto] gap-1 px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                <div className="grid grid-cols-[1fr_65px_75px_75px_70px] gap-1 px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                   <span>Model</span>
                   <span className="text-right">Context</span>
                   <span className="text-right">Input</span>
