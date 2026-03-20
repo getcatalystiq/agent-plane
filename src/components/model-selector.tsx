@@ -222,7 +222,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
 
             {/* Column headers — outside scroll area so they stay fixed */}
             {!loading && models && (
-              <div className="grid grid-cols-[1fr_60px_70px_70px_80px] items-center border-b border-muted-foreground/15 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+              <div className="mx-1 grid grid-cols-[1fr_60px_70px_70px_80px] items-center border-b border-muted-foreground/15 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 <span>Model</span>
                 <span className="text-right">Context</span>
                 <span className="text-right">Input</span>
