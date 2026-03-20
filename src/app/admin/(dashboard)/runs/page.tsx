@@ -110,10 +110,8 @@ export default async function RunsPage({
                 </Link>
               </td>
               <td className="p-3 text-xs">{r.agent_name}</td>
-              <td className="p-3">
-                <Link href={`/admin/tenants/${r.tenant_id}`} className="text-primary hover:underline text-xs">
-                  {r.tenant_name}
-                </Link>
+              <td className="p-3 text-xs text-muted-foreground">
+                {r.tenant_name}
               </td>
               <td className="p-3"><RunStatusBadge status={r.status} /></td>
               <td className="p-3">

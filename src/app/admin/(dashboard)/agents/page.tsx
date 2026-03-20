@@ -86,10 +86,8 @@ export default async function AgentsPage() {
               <td className="p-3 text-muted-foreground text-xs max-w-xs truncate" title={a.description ?? undefined}>
                 {a.description ?? "—"}
               </td>
-              <td className="p-3">
-                <Link href={`/admin/tenants/${a.tenant_id}`} className="text-primary hover:underline text-xs">
-                  {a.tenant_name}
-                </Link>
+              <td className="p-3 text-xs text-muted-foreground">
+                {a.tenant_name}
               </td>
               <td className="p-3 font-mono text-xs text-muted-foreground">{a.model}</td>
               <td className="p-3">

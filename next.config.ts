@@ -1,6 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  async redirects() {
+    return [
+      {
+        source: "/admin/tenants/:path*",
+        destination: "/admin/settings",
+        permanent: false,
+      },
+    ];
+  },
   async headers() {
     return [
       {
