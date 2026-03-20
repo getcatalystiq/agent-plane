@@ -84,84 +84,88 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
         </Button>
       </SectionHeader>
       <div>
-        <div className="grid grid-cols-12 gap-4">
-          <div className="col-span-2">
-            <FormField label="Name">
-              <Input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} />
-            </FormField>
-          </div>
-          <div className="col-span-3">
-            <FormField label="Description">
-              <Input
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="What does this agent do?"
-                disabled={saving}
-              />
-            </FormField>
-          </div>
-          <div className="col-span-2">
-            <FormField label="Model">
-              <ModelSelector
-                value={model}
-                disabled={saving}
-                onChange={(modelId) => {
-                  setModel(modelId);
-                  if (!supportsClaudeRunner(modelId)) {
-                    setRunner("vercel-ai-sdk");
-                    setPermissionMode("bypassPermissions");
-                  }
-                }}
-              />
-            </FormField>
-          </div>
-          <div className="col-span-1">
-            <FormField label="Runner">
-              {supportsClaudeRunner(model) ? (
-                <Select value={runner || "claude-agent-sdk"} onChange={(e) => setRunner(e.target.value === "claude-agent-sdk" ? "" : e.target.value)} disabled={saving}>
-                  <option value="claude-agent-sdk">Claude SDK</option>
-                  <option value="vercel-ai-sdk">AI SDK</option>
-                </Select>
-              ) : (
-                <Select value="vercel-ai-sdk" disabled>
-                  <option value="vercel-ai-sdk">AI SDK</option>
-                </Select>
-              )}
-            </FormField>
-          </div>
-          <div className="col-span-1">
-            <FormField label="Max Turns">
-              <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} disabled={saving} />
-            </FormField>
-          </div>
-          <div className="col-span-1">
-            <FormField label="Max Budget">
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
-                <Input type="number" step="0.01" min="0.01" max="100" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} className="pl-6" disabled={saving} />
-              </div>
-            </FormField>
-          </div>
-          <div className="col-span-1">
-            <FormField label="Max Runtime">
-              <div className="relative">
-                <Input type="number" min="1" max="60" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)} className="pr-10" disabled={saving} />
-                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">min</span>
-              </div>
-            </FormField>
-          </div>
-          {(supportsClaudeRunner(model) && (runner === "" || runner === "claude-agent-sdk")) && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-12 gap-4">
             <div className="col-span-2">
-              <FormField label="Permission Mode">
-                <Select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value)} disabled={saving}>
-                  <option value="default">default</option>
-                  <option value="acceptEdits">acceptEdits</option>
-                  <option value="bypassPermissions">bypassPermissions</option>
-                  <option value="plan">plan</option>
-                </Select>
+              <FormField label="Name">
+                <Input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} />
               </FormField>
             </div>
-          )}
+            <div className="col-span-4">
+              <FormField label="Description">
+                <Input
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="What does this agent do?"
+                  disabled={saving}
+                />
+              </FormField>
+            </div>
+            <div className="col-span-3">
+              <FormField label="Model">
+                <ModelSelector
+                  value={model}
+                  disabled={saving}
+                  onChange={(modelId) => {
+                    setModel(modelId);
+                    if (!supportsClaudeRunner(modelId)) {
+                      setRunner("vercel-ai-sdk");
+                      setPermissionMode("bypassPermissions");
+                    }
+                  }}
+                />
+              </FormField>
+            </div>
+            <div className="col-span-3">
+              <FormField label="Runner">
+                {supportsClaudeRunner(model) ? (
+                  <Select value={runner || "claude-agent-sdk"} onChange={(e) => setRunner(e.target.value === "claude-agent-sdk" ? "" : e.target.value)} disabled={saving}>
+                    <option value="claude-agent-sdk">Claude SDK</option>
+                    <option value="vercel-ai-sdk">AI SDK</option>
+                  </Select>
+                ) : (
+                  <Select value="vercel-ai-sdk" disabled>
+                    <option value="vercel-ai-sdk">AI SDK</option>
+                  </Select>
+                )}
+              </FormField>
+            </div>
+          </div>
+          <div className="grid grid-cols-12 gap-4">
+            <div className="col-span-2">
+              <FormField label="Max Turns">
+                <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} disabled={saving} />
+              </FormField>
+            </div>
+            <div className="col-span-2">
+              <FormField label="Max Budget">
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                  <Input type="number" step="0.01" min="0.01" max="100" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} className="pl-6" disabled={saving} />
+                </div>
+              </FormField>
+            </div>
+            <div className="col-span-2">
+              <FormField label="Max Runtime">
+                <div className="relative">
+                  <Input type="number" min="1" max="60" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)} className="pr-10" disabled={saving} />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">min</span>
+                </div>
+              </FormField>
+            </div>
+            {(supportsClaudeRunner(model) && (runner === "" || runner === "claude-agent-sdk")) && (
+              <div className="col-span-3">
+                <FormField label="Permission Mode">
+                  <Select value={permissionMode} onChange={(e) => setPermissionMode(e.target.value)} disabled={saving}>
+                    <option value="default">default</option>
+                    <option value="acceptEdits">acceptEdits</option>
+                    <option value="bypassPermissions">bypassPermissions</option>
+                    <option value="plan">plan</option>
+                  </Select>
+                </FormField>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

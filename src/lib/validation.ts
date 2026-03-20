@@ -235,7 +235,7 @@ export const CreateAgentSchema = z.object({
   skills: SkillsSchema.default([]),
   plugins: AgentPluginsSchema.default([]),
   model: z.string().min(1).max(100)
-    .regex(/^[a-z0-9-]+(?:\/[a-z0-9._:-]{1,80})?$/, "Model ID must be lowercase alphanumeric, optionally with provider/ prefix")
+    .regex(/^[a-z0-9._-]+(?:\/[a-z0-9._:-]{1,80})?$/, "Model ID must be lowercase alphanumeric with dots/hyphens, optionally with provider/ prefix")
     .default("claude-sonnet-4-6"),
   runner: RunnerTypeSchema.nullable().default(null),
   allowed_tools: z
@@ -272,7 +272,7 @@ export const UpdateAgentSchema = z.object({
   skills: SkillsSchema,
   plugins: AgentPluginsSchema,
   model: z.string().min(1).max(100)
-    .regex(/^[a-z0-9-]+(?:\/[a-z0-9._:-]{1,80})?$/, "Model ID must be lowercase alphanumeric, optionally with provider/ prefix"),
+    .regex(/^[a-z0-9._-]+(?:\/[a-z0-9._:-]{1,80})?$/, "Model ID must be lowercase alphanumeric with dots/hyphens, optionally with provider/ prefix"),
   runner: RunnerTypeSchema.nullable(),
   allowed_tools: z.array(z.string().min(1).max(100)),
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),

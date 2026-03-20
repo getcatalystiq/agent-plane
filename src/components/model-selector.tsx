@@ -154,9 +154,6 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
           className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <span className="truncate text-left">
-            {displayProvider && !value.includes("/") && (
-              <span className="text-muted-foreground mr-1">{displayProvider} /</span>
-            )}
             {displayName}
           </span>
           {selectedModel === undefined && value && models && (
