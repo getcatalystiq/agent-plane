@@ -58,7 +58,7 @@ export function SkillsEditor({ agentId, initialSkills }: { agentId: string; init
       title="Skills"
       saveLabel="Save Skills"
       addFolderLabel="Folder"
-      newFileTemplate={{ filename: "SKILL.md", content: "# New\n\nDescribe this skill...\n" }}
+      newFileTemplate={{ filename: "SKILL.md", content: "---\nname: New Skill\ndescription: Describe when this skill should be triggered\n---\n\n# Instructions\n\nDescribe what this skill does...\n" }}
     />
     </div>
   );
