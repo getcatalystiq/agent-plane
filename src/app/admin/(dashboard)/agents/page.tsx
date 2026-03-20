@@ -54,8 +54,7 @@ export default async function AgentsPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold">Agents</h1>
+      <div className="flex items-center justify-end mb-6">
         <AddAgentForm tenants={tenants.map((t) => ({ id: t.id, name: t.name }))} />
       </div>
       <AdminTable>

@@ -77,8 +77,7 @@ export default async function RunsPage({
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold">Runs</h1>
+      <div className="flex items-center justify-end mb-6">
         <SourceFilter current={sourceFilter} />
       </div>
       <AdminTable className="overflow-x-auto" footer={

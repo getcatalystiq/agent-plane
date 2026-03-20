@@ -1,7 +1,6 @@
 import { cookies } from "next/headers";
 import { query, queryOne } from "@/db";
 import { TenantRow, ApiKeyRow } from "@/lib/validation";
-import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { TenantForm } from "./tenant-form";
 import { ApiKeysSection } from "./api-keys-section";
 import { DeleteTenantButton } from "./delete-tenant-button";
@@ -39,12 +38,6 @@ export default async function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <DetailPageHeader
-        backHref="/admin"
-        backLabel="Dashboard"
-        title="Settings"
-      />
-
       {/* Tenant Details */}
       <TenantForm tenant={{
         id: tenant.id,

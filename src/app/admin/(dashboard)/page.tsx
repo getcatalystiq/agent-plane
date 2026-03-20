@@ -51,8 +51,6 @@ export default async function AdminDashboardPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">Dashboard</h1>
-
       <div className="grid grid-cols-5 gap-4">
         <MetricCard label="Tenants">
           {stats?.tenant_count ?? 0}
