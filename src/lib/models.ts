@@ -26,6 +26,8 @@ export function resolveEffectiveRunner(
   model: string,
   agentRunner: RunnerType | null | undefined,
 ): RunnerType {
+  // Non-Anthropic models can only use Vercel AI SDK — ignore stored runner
+  if (!supportsClaudeRunner(model)) return "vercel-ai-sdk";
   if (agentRunner) return agentRunner;
   return defaultRunnerForModel(model);
 }
