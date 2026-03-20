@@ -143,7 +143,7 @@ export async function transitionRunStatus(
     "cost_usd", "total_input_tokens", "total_output_tokens",
     "cache_read_tokens", "cache_creation_tokens", "num_turns",
     "duration_ms", "duration_api_ms", "model_usage",
-    "transcript_blob_url", "error_type", "error_messages",
+    "transcript_blob_url", "error_type", "error_messages", "runner",
   ]);
 
   if (updates) {
