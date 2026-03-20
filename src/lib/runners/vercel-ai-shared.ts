@@ -68,14 +68,20 @@ const { z } = await import('zod');
 
 const builtinTools = {
   load_skill: {
-    description: 'Load a skill to get specialized instructions. Use this when a task matches an available skill listed in the system prompt.',
+    description: 'Load a skill to get specialized instructions. Call with the "name" parameter set to the exact skill name from the Available Skills list.',
     parameters: z.object({
-      name: z.string().describe('The skill name to load (from the Available Skills list)'),
+      name: z.string().optional().describe('The exact skill name to load'),
+      skill_name: z.string().optional().describe('Alias for name'),
+      skill_identifier: z.string().optional().describe('Alias for name'),
     }),
-    execute: async ({ name }) => {
-      const skill = skillRegistry.find(s => s.name.toLowerCase() === name.toLowerCase());
+    execute: async ({ name, skill_name, skill_identifier }) => {
+      const resolved = name || skill_name || skill_identifier;
+      if (!resolved) {
+        return { error: 'Missing skill name. Available: ' + skillRegistry.map(s => s.name).join(', ') + '. Call with: { "name": "<skill_name>" }' };
+      }
+      const skill = skillRegistry.find(s => s.name.toLowerCase() === resolved.toLowerCase());
       if (!skill) {
-        return { error: 'Skill not found: ' + name + '. Available: ' + skillRegistry.map(s => s.name).join(', ') };
+        return { error: 'Skill not found: ' + resolved + '. Available: ' + skillRegistry.map(s => s.name).join(', ') };
       }
       return { name: skill.name, skillDirectory: skill.path.replace(/\\/[^/]+$/, ''), content: skill.content };
     }
