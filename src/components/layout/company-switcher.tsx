@@ -176,7 +176,7 @@ export function CompanySwitcher() {
                 {getInitial(activeCompany.name)}
               </span>
             )}
-            <span className="text-[13px] font-semibold tracking-[-0.01em] truncate flex-1 text-left">
+            <span className="text-[13px] font-semibold text-foreground tracking-[-0.01em] truncate min-w-0">
               {activeCompany.name}
             </span>
           </>
