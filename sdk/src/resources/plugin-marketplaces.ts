@@ -1,5 +1,5 @@
 import type { AgentPlane } from "../client";
-import type { PluginMarketplace, PluginListItem } from "../types";
+import type { PluginMarketplace, PluginListItem, PluginDetail } from "../types";
 
 /**
  * Plugin marketplace management. Provides CRUD access to the tenant-scoped
@@ -58,5 +58,13 @@ export class PluginMarketplacesResource {
       `/api/plugin-marketplaces/${encodeURIComponent(marketplaceId)}/plugins`,
     );
     return resp.data;
+  }
+
+  /** Get plugin detail (metadata, agents, skills). */
+  async getPlugin(marketplaceId: string, pluginName: string): Promise<PluginDetail> {
+    return this._client._request<PluginDetail>(
+      "GET",
+      `/api/plugin-marketplaces/${encodeURIComponent(marketplaceId)}/plugins/${pluginName}`,
+    );
   }
 }

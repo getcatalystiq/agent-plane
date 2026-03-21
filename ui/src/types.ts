@@ -79,6 +79,7 @@ export interface AgentPlaneClient {
     list(): Promise<unknown[]>;
     get(marketplaceId: string): Promise<unknown>;
     listPlugins(marketplaceId: string): Promise<unknown[]>;
+    getPlugin(marketplaceId: string, pluginName: string): Promise<unknown>;
     create(params: Record<string, unknown>): Promise<unknown>;
     delete(marketplaceId: string): Promise<void>;
     updateToken(marketplaceId: string, params: Record<string, unknown>): Promise<unknown>;

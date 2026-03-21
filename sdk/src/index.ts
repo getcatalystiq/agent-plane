@@ -40,6 +40,8 @@ export type {
   // Plugin Marketplaces
   PluginMarketplace,
   PluginListItem,
+  PluginDetail,
+  PluginAgentMeta,
   // Models
   CatalogModel,
   // Dashboard

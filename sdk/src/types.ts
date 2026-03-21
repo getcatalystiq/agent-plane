@@ -292,6 +292,22 @@ export interface PluginListItem {
   hasMcpJson: boolean;
 }
 
+export interface PluginAgentMeta {
+  filename: string;
+  name: string;
+  description: string | null;
+}
+
+export interface PluginDetail {
+  name: string;
+  displayName: string;
+  description: string | null;
+  version: string | null;
+  agents: PluginAgentMeta[];
+  skills: string[];
+  hasMcpJson: boolean;
+}
+
 // --- Stream Events ---
 
 export interface RunStartedEvent {

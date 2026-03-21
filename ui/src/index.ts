@@ -87,6 +87,9 @@ export type { PluginMarketplaceListPageProps } from "./components/pages/plugin-m
 export { PluginMarketplaceDetailPage } from "./components/pages/plugin-marketplace-detail-page";
 export type { PluginMarketplaceDetailPageProps } from "./components/pages/plugin-marketplace-detail-page";
 
+export { PluginDetailPage } from "./components/pages/plugin-detail-page";
+export type { PluginDetailPageProps } from "./components/pages/plugin-detail-page";
+
 export { SettingsPage } from "./components/pages/settings-page";
 export type { SettingsPageProps } from "./components/pages/settings-page";
 

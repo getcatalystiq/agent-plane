@@ -142,7 +142,7 @@ export function PluginMarketplaceDetailPage({ marketplaceId, initialData, initia
             {plugins.map((plugin) => (
               <LinkComponent
                 key={plugin.name}
-                href={`${basePath}/plugin-marketplaces/${marketplaceId}/${plugin.name}`}
+                href={`${basePath}/plugin-marketplaces/${marketplaceId}/plugins/${plugin.name}`}
               >
                 <Card className="hover:border-primary/50 transition-colors cursor-pointer h-full">
                   <CardHeader className="pb-2">
