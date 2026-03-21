@@ -30,7 +30,7 @@ export class PluginMarketplacesResource {
     return this._client._request<PluginMarketplace>(
       "POST",
       "/api/plugin-marketplaces",
-      data,
+      { body: data },
     );
   }
 
@@ -47,7 +47,7 @@ export class PluginMarketplacesResource {
     return this._client._request<PluginMarketplace>(
       "PATCH",
       `/api/plugin-marketplaces/${encodeURIComponent(marketplaceId)}`,
-      data,
+      { body: data },
     );
   }
 

@@ -64,7 +64,7 @@ export function McpServerListPage({ initialData }: McpServerListPageProps) {
     setCreating(true);
     setCreateError("");
     try {
-      await client.customConnectors.createServer!(createForm);
+      await client.customConnectors.createServer(createForm);
       setShowCreate(false);
       setCreateForm(emptyForm);
       mutate("mcp-servers");
@@ -86,7 +86,7 @@ export function McpServerListPage({ initialData }: McpServerListPageProps) {
     setEditing(true);
     setEditError("");
     try {
-      await client.customConnectors.updateServer!(editTarget.id, editForm);
+      await client.customConnectors.updateServer(editTarget.id, editForm);
       setEditTarget(null);
       mutate("mcp-servers");
     } catch (err) {
@@ -101,7 +101,7 @@ export function McpServerListPage({ initialData }: McpServerListPageProps) {
     setDeleting(true);
     setDeleteError("");
     try {
-      await client.customConnectors.deleteServer!(deleteTarget.id);
+      await client.customConnectors.deleteServer(deleteTarget.id);
       setDeleteTarget(null);
       mutate("mcp-servers");
     } catch (err) {

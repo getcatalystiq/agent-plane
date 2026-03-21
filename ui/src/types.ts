@@ -45,13 +45,14 @@ export interface AgentPlaneClient {
   };
   customConnectors: {
     listServers(): Promise<unknown[]>;
+    createServer(params: Record<string, unknown>): Promise<unknown>;
+    updateServer(serverId: string, params: Record<string, unknown>): Promise<unknown>;
+    deleteServer(serverId: string): Promise<void>;
     list(agentId: string): Promise<unknown[]>;
     delete(agentId: string, serverId: string): Promise<void>;
     updateAllowedTools(agentId: string, serverId: string, allowedTools: string[]): Promise<void>;
     listTools(agentId: string, serverId: string): Promise<unknown[]>;
     initiateOauth(agentId: string, serverId: string): Promise<{ redirectUrl: string }>;
-    createServer?(params: Record<string, unknown>): Promise<unknown>;
-    deleteServer?(serverId: string): Promise<void>;
   };
   models: {
     list(): Promise<unknown[]>;
@@ -76,11 +77,11 @@ export interface AgentPlaneClient {
   };
   pluginMarketplaces: {
     list(): Promise<unknown[]>;
-    get?(marketplaceId: string): Promise<unknown>;
+    get(marketplaceId: string): Promise<unknown>;
     listPlugins(marketplaceId: string): Promise<unknown[]>;
-    create?(params: Record<string, unknown>): Promise<unknown>;
-    delete?(marketplaceId: string): Promise<void>;
-    updateToken?(marketplaceId: string, params: Record<string, unknown>): Promise<unknown>;
+    create(params: Record<string, unknown>): Promise<unknown>;
+    delete(marketplaceId: string): Promise<void>;
+    updateToken(marketplaceId: string, params: Record<string, unknown>): Promise<unknown>;
   };
 }
 
