@@ -42,6 +42,9 @@ export type {
   PluginListItem,
   PluginDetail,
   PluginAgentMeta,
+  PluginFile,
+  PluginFiles,
+  PluginSaveResult,
   // Models
   CatalogModel,
   // Dashboard

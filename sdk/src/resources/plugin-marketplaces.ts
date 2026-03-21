@@ -1,5 +1,5 @@
 import type { AgentPlane } from "../client";
-import type { PluginMarketplace, PluginListItem, PluginDetail } from "../types";
+import type { PluginMarketplace, PluginListItem, PluginDetail, PluginFiles, PluginSaveResult } from "../types";
 
 /**
  * Plugin marketplace management. Provides CRUD access to the tenant-scoped
@@ -65,6 +65,27 @@ export class PluginMarketplacesResource {
     return this._client._request<PluginDetail>(
       "GET",
       `/api/plugin-marketplaces/${encodeURIComponent(marketplaceId)}/plugins/${pluginName}`,
+    );
+  }
+
+  /** Get full plugin file contents for editing. */
+  async getPluginFiles(marketplaceId: string, pluginName: string): Promise<PluginFiles> {
+    return this._client._request<PluginFiles>(
+      "GET",
+      `/api/admin/plugin-marketplaces/${encodeURIComponent(marketplaceId)}/plugins/${pluginName}`,
+    );
+  }
+
+  /** Save edited plugin files back to GitHub. */
+  async savePluginFiles(
+    marketplaceId: string,
+    pluginName: string,
+    data: { skills: { path: string; content: string }[]; agents: { path: string; content: string }[]; mcpJson: string | null },
+  ): Promise<PluginSaveResult> {
+    return this._client._request<PluginSaveResult>(
+      "PUT",
+      `/api/admin/plugin-marketplaces/${encodeURIComponent(marketplaceId)}/plugins/${pluginName}`,
+      { body: data },
     );
   }
 }

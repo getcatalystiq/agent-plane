@@ -308,6 +308,22 @@ export interface PluginDetail {
   hasMcpJson: boolean;
 }
 
+export interface PluginFile {
+  path: string;
+  content: string;
+}
+
+export interface PluginFiles {
+  skills: PluginFile[];
+  agents: PluginFile[];
+  mcpJson: string | null;
+  isOwned: boolean;
+}
+
+export interface PluginSaveResult {
+  commitSha: string;
+}
+
 // --- Stream Events ---
 
 export interface RunStartedEvent {

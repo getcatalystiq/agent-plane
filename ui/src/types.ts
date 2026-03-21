@@ -80,6 +80,8 @@ export interface AgentPlaneClient {
     get(marketplaceId: string): Promise<unknown>;
     listPlugins(marketplaceId: string): Promise<unknown[]>;
     getPlugin(marketplaceId: string, pluginName: string): Promise<unknown>;
+    getPluginFiles(marketplaceId: string, pluginName: string): Promise<unknown>;
+    savePluginFiles(marketplaceId: string, pluginName: string, data: { skills: { path: string; content: string }[]; agents: { path: string; content: string }[]; mcpJson: string | null }): Promise<unknown>;
     create(params: Record<string, unknown>): Promise<unknown>;
     delete(marketplaceId: string): Promise<void>;
     updateToken(marketplaceId: string, params: Record<string, unknown>): Promise<unknown>;

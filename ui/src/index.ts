@@ -90,6 +90,9 @@ export type { PluginMarketplaceDetailPageProps } from "./components/pages/plugin
 export { PluginDetailPage } from "./components/pages/plugin-detail-page";
 export type { PluginDetailPageProps } from "./components/pages/plugin-detail-page";
 
+// Note: PluginEditorPage (full CodeMirror-based editor) is exported from
+// "@getcatalystiq/agent-plane-ui/editor" to keep CodeMirror out of the core bundle.
+
 export { SettingsPage } from "./components/pages/settings-page";
 export type { SettingsPageProps } from "./components/pages/settings-page";
 

@@ -10,7 +10,7 @@ export default defineConfig({
   dts: true,
   treeshake: true,
   splitting: true,
-  external: ["react", "react-dom", "@getcatalystiq/agent-plane", "swr", "react-markdown", "recharts"],
+  external: ["react", "react-dom", "@getcatalystiq/agent-plane", "swr", "react-markdown", "recharts", "@uiw/react-codemirror", "@codemirror/lang-markdown", "@codemirror/lang-javascript", "@codemirror/lang-json", "@codemirror/theme-one-dark"],
   outDir: "dist",
   clean: true,
 });
