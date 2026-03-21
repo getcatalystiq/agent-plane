@@ -192,7 +192,7 @@ export function McpServerListPage({ initialData }: McpServerListPageProps) {
 
       {/* Create Modal */}
       <Dialog open={showCreate} onOpenChange={setShowCreate}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Register Connector</DialogTitle>
           </DialogHeader>
@@ -225,7 +225,7 @@ export function McpServerListPage({ initialData }: McpServerListPageProps) {
 
       {/* Edit Modal */}
       <Dialog open={!!editTarget} onOpenChange={(open) => { if (!open) setEditTarget(null); }}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Edit Connector</DialogTitle>
           </DialogHeader>
