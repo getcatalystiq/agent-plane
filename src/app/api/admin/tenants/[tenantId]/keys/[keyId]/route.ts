@@ -15,7 +15,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
   );
 
   if (rowCount === 0) {
-    return NextResponse.json({ error: "Key not found or already revoked" }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Key not found or already revoked" } }, { status: 404 });
   }
 
   return NextResponse.json({ ok: true });

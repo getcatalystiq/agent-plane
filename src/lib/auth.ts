@@ -2,6 +2,7 @@ import { z } from "zod";
 import { hashApiKey, timingSafeEqual } from "./crypto";
 import { queryOne } from "@/db";
 import { logger } from "./logger";
+import { AuthError, ValidationError } from "./errors";
 import type { TenantId } from "./types";
 
 const ApiKeyRow = z.object({
@@ -20,13 +21,13 @@ export async function authenticateApiKey(
   authHeader: string | null,
 ): Promise<AuthContext> {
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    throw new Error("Missing or invalid Authorization header");
+    throw new AuthError("Missing or invalid Authorization header");
   }
 
   const token = authHeader.slice(7);
 
   if (!token.startsWith("ap_live_") && !token.startsWith("ap_test_")) {
-    throw new Error("Invalid API key format");
+    throw new ValidationError("Invalid API key format");
   }
 
   const keyHash = await hashApiKey(token);
@@ -42,7 +43,7 @@ export async function authenticateApiKey(
   );
 
   if (!row) {
-    throw new Error("Invalid or revoked API key");
+    throw new AuthError("Invalid or revoked API key");
   }
 
   // Update last_used_at (fire and forget)
@@ -72,14 +73,14 @@ export async function authenticateA2aRequest(
   tenantSlug: string,
 ): Promise<AuthContext> {
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    throw new Error("Missing or invalid Authorization header");
+    throw new AuthError("Missing or invalid Authorization header");
   }
 
   const token = authHeader.slice(7);
 
   // MUST validate prefix before hashing — A2A routes may bypass middleware prefix check
   if (!token.startsWith("ap_live_") && !token.startsWith("ap_test_")) {
-    throw new Error("Invalid API key format");
+    throw new ValidationError("Invalid API key format");
   }
 
   const keyHash = await hashApiKey(token);
@@ -98,7 +99,7 @@ export async function authenticateA2aRequest(
   );
 
   if (!row) {
-    throw new Error("Invalid or revoked API key");
+    throw new AuthError("Invalid or revoked API key");
   }
 
   // Update last_used_at (fire and forget — match existing authenticateApiKey pattern)

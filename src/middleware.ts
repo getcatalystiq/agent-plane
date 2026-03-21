@@ -94,8 +94,7 @@ export async function middleware(request: NextRequest) {
   // O(1) prefix validation -- no DB call in middleware
   if (
     !token.startsWith("ap_live_") &&
-    !token.startsWith("ap_test_") &&
-    !token.startsWith("ap_admin_")
+    !token.startsWith("ap_test_")
   ) {
     return NextResponse.json(
       { error: { code: "unauthorized", message: "Invalid API key format" } },

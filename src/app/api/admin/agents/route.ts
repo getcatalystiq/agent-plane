@@ -69,7 +69,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 
   const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [input.tenant_id]);
   if (!tenant) {
-    return NextResponse.json({ error: { message: "Tenant not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Tenant not found" } }, { status: 404 });
   }
 
   const id = generateId();
@@ -77,7 +77,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
   // Derive slug from name if not provided; fallback to agent-{id} for edge cases
   const rawSlug = (input as { slug?: string }).slug ?? (slugifyName(input.name) || `agent-${id.slice(0, 8)}`);
   if (RESERVED_SLUGS.has(rawSlug)) {
-    return NextResponse.json({ error: { message: `Slug '${rawSlug}' is reserved` } }, { status: 422 });
+    return NextResponse.json({ error: { code: "validation_error", message: `Slug '${rawSlug}' is reserved` } }, { status: 422 });
   }
 
   let name = input.name;
@@ -117,7 +117,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
         continue;
       }
       if (msg.includes("23505") && msg.includes("tenant_slug")) {
-        return NextResponse.json({ error: { message: `Slug '${slug}' is already taken` } }, { status: 409 });
+        return NextResponse.json({ error: { code: "conflict", message: `Slug '${slug}' is already taken` } }, { status: 409 });
       }
       throw err;
     }

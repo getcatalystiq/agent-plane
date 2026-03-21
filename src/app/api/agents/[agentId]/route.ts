@@ -33,7 +33,7 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
   const effectivePermission = input.permission_mode ?? current.permission_mode;
   if (!isPermissionModeAllowed(effectiveRunner, effectivePermission)) {
     return jsonResponse(
-      { error: { message: "Vercel AI SDK runner does not support permission modes other than 'default' and 'bypassPermissions'" } },
+      { error: { code: "validation_error", message: "Vercel AI SDK runner does not support permission modes other than 'default' and 'bypassPermissions'" } },
       400,
     );
   }

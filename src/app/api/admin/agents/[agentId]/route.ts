@@ -15,7 +15,7 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
 
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   if (!agent) {
-    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
   const recentRuns = await query(
@@ -35,7 +35,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   // Fetch current agent to detect removed toolkits before applying the update.
   const current = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   if (!current) {
-    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
   // Validate marketplace_id references exist before writing
@@ -50,7 +50,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     const missing = marketplaceIds.filter(id => !existingIds.has(id));
     if (missing.length > 0) {
       return NextResponse.json(
-        { error: { message: `Unknown marketplace_id(s): ${missing.join(", ")}` } },
+        { error: { code: "validation_error", message: `Unknown marketplace_id(s): ${missing.join(", ")}` } },
         { status: 422 },
       );
     }
@@ -68,7 +68,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     const effectivePermission = input.permission_mode ?? current.permission_mode;
     if (!isPermissionModeAllowed(effectiveRunner, effectivePermission)) {
       return NextResponse.json(
-        { error: { message: "Vercel AI SDK runner does not support permission modes other than 'default' and 'bypassPermissions'" } },
+        { error: { code: "validation_error", message: "Vercel AI SDK runner does not support permission modes other than 'default' and 'bypassPermissions'" } },
         { status: 400 },
       );
     }
@@ -77,7 +77,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   // Block slug changes when a2a_enabled is true (slug is used in permanent A2A URLs)
   if (input.slug !== undefined && current.a2a_enabled) {
     return NextResponse.json(
-      { error: { message: "Cannot change slug while A2A is enabled. Disable A2A first." } },
+      { error: { code: "validation_error", message: "Cannot change slug while A2A is enabled. Disable A2A first." } },
       { status: 422 },
     );
   }
@@ -109,7 +109,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   if (sets.length === 0) {
-    return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+    return NextResponse.json({ error: { code: "validation_error", message: "No fields to update" } }, { status: 400 });
   }
 
   // Use SELECT FOR UPDATE to prevent race with cron dispatcher claiming this agent
@@ -127,7 +127,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   } catch (err) {
     await client.query("ROLLBACK");
     if (err instanceof Error && err.message.includes("23505") && err.message.includes("tenant_slug")) {
-      return NextResponse.json({ error: { message: `Slug '${input.slug}' is already taken` } }, { status: 409 });
+      return NextResponse.json({ error: { code: "conflict", message: `Slug '${input.slug}' is already taken` } }, { status: 409 });
     }
     throw err;
   } finally {
@@ -151,7 +151,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
 
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   if (!agent) {
-    return NextResponse.json({ error: { message: "Agent not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
   const runCount = await queryOne(
@@ -162,7 +162,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
 
   if (runCount && runCount.count > 0) {
     return NextResponse.json(
-      { error: { message: "Cannot delete agent with active runs" } },
+      { error: { code: "conflict", message: "Cannot delete agent with active runs" } },
       { status: 409 },
     );
   }

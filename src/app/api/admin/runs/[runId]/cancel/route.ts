@@ -16,12 +16,12 @@ export const POST = withErrorHandler(async (_request: NextRequest, context) => {
 
   const run = await queryOne(RunRow, "SELECT * FROM runs WHERE id = $1", [runId]);
   if (!run) {
-    return NextResponse.json({ error: "Run not found" }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Run not found" } }, { status: 404 });
   }
 
   if (run.status !== "running" && run.status !== "pending") {
     return NextResponse.json(
-      { error: `Run is ${run.status}, cannot cancel` },
+      { error: { code: "conflict", message: `Run is ${run.status}, cannot cancel` } },
       { status: 409 },
     );
   }
@@ -56,7 +56,7 @@ export const POST = withErrorHandler(async (_request: NextRequest, context) => {
 
   if (!transitioned) {
     return NextResponse.json(
-      { error: "Run status changed during cancellation" },
+      { error: { code: "conflict", message: "Run status changed during cancellation" } },
       { status: 409 },
     );
   }

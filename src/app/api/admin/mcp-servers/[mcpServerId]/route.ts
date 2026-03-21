@@ -75,7 +75,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   if (sets.length === 0) {
-    return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+    return NextResponse.json({ error: { code: "validation_error", message: "No fields to update" } }, { status: 400 });
   }
 
   params.push(mcpServerId);

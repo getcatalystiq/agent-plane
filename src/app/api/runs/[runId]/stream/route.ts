@@ -40,7 +40,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   if (!run.sandbox_id) {
-    return NextResponse.json({ error: "No sandbox for this run" }, { status: 409 });
+    return NextResponse.json({ error: { code: "conflict", message: "No sandbox for this run" } }, { status: 409 });
   }
 
   // Connect to sandbox and poll the transcript file for new events

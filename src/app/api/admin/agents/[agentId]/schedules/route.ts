@@ -19,7 +19,7 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
   // Verify agent exists (consistent with POST handler)
   const agent = await queryOne(z.object({ id: z.string() }), "SELECT id FROM agents WHERE id = $1", [agentId]);
   if (!agent) {
-    return NextResponse.json({ error: { message: "Agent not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
   const schedules = await query(
@@ -40,7 +40,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   // Verify agent exists and get tenant_id
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [agentId]);
   if (!agent) {
-    return NextResponse.json({ error: { message: "Agent not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
   // Compute next_run_at if enabled
@@ -53,7 +53,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
       nextRunAt = computeNextRunAt(config, timezone);
     } catch (err) {
       return NextResponse.json(
-        { error: { message: `Invalid schedule configuration: ${err instanceof Error ? err.message : String(err)}` } },
+        { error: { code: "validation_error", message: `Invalid schedule configuration: ${err instanceof Error ? err.message : String(err)}` } },
         { status: 422 },
       );
     }
@@ -72,7 +72,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
 
   if (!schedule) {
     return NextResponse.json(
-      { error: { message: `Maximum ${MAX_SCHEDULES_PER_AGENT} schedules per agent` } },
+      { error: { code: "validation_error", message: `Maximum ${MAX_SCHEDULES_PER_AGENT} schedules per agent` } },
       { status: 422 },
     );
   }

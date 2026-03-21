@@ -32,13 +32,13 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   // Verify run token
   const authHeader = request.headers.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return jsonResponse({ error: "Missing authorization" }, 401);
+    return jsonResponse({ error: { code: "unauthorized", message: "Missing authorization" } }, 401);
   }
   const token = authHeader.slice(7);
   const env = getEnv();
   const valid = await verifyRunToken(token, runId, env.ENCRYPTION_KEY);
   if (!valid) {
-    return jsonResponse({ error: "Invalid run token" }, 401);
+    return jsonResponse({ error: { code: "unauthorized", message: "Invalid run token" } }, 401);
   }
 
   // Look up the run
@@ -50,10 +50,10 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     [runId],
   );
   if (!run) {
-    return jsonResponse({ error: "Run not found" }, 404);
+    return jsonResponse({ error: { code: "not_found", message: "Run not found" } }, 404);
   }
   if (run.status !== "running") {
-    return jsonResponse({ error: `Run is ${run.status}, not running` }, 409);
+    return jsonResponse({ error: { code: "conflict", message: `Run is ${run.status}, not running` } }, 409);
   }
 
   const tenantId = run.tenant_id as TenantId;
@@ -64,7 +64,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   const lines = body.split("\n").filter((l) => l.trim());
 
   if (lines.length === 0) {
-    return jsonResponse({ error: "Empty transcript" }, 400);
+    return jsonResponse({ error: { code: "validation_error", message: "Empty transcript" } }, 400);
   }
 
   try {
@@ -101,6 +101,6 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
       error_type: "transcript_persist_error",
       error_messages: [err instanceof Error ? err.message : String(err)],
     });
-    return jsonResponse({ error: "Failed to persist transcript" }, 500);
+    return jsonResponse({ error: { code: "internal_error", message: "Failed to persist transcript" } }, 500);
   }
 });

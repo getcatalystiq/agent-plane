@@ -9,6 +9,7 @@ export type {
   AgentSkillFile,
   AgentPlugin,
   PermissionMode,
+  RunnerType,
   CreateAgentParams,
   UpdateAgentParams,
   Run,

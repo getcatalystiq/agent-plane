@@ -68,6 +68,7 @@ const agentCardInFlight = new Map<string, Promise<AgentCard | null>>();
 const AGENT_CARD_TTL_MS = 60_000;
 const AGENT_CARD_CACHE_MAX = 1000;
 
+/** @internal Exported for testing only. */
 export function getCachedAgentCard(cacheKey: string): AgentCard | null {
   const cached = agentCardCache.get(cacheKey);
   if (!cached) return null;
@@ -81,6 +82,7 @@ export function getCachedAgentCard(cacheKey: string): AgentCard | null {
   return cached.card;
 }
 
+/** @internal Exported for testing only. */
 export function setCachedAgentCard(cacheKey: string, card: AgentCard): void {
   if (agentCardCache.size >= AGENT_CARD_CACHE_MAX) {
     // Evict LRU entry (first in insertion order)

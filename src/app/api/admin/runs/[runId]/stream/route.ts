@@ -30,7 +30,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
 
   const run = await queryOne(RunStreamRow, "SELECT id, status, sandbox_id, transcript_blob_url FROM runs WHERE id = $1", [runId]);
   if (!run) {
-    return NextResponse.json({ error: "Run not found" }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Run not found" } }, { status: 404 });
   }
 
   // If the run already completed, return the transcript from blob
@@ -49,7 +49,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   if (!run.sandbox_id) {
-    return NextResponse.json({ error: "No sandbox for this run" }, { status: 409 });
+    return NextResponse.json({ error: { code: "conflict", message: "No sandbox for this run" } }, { status: 409 });
   }
 
   // Connect to sandbox and poll the transcript file for new events

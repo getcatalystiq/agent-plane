@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export const GET = withErrorHandler(async (request: NextRequest) => {
   const toolkit = request.nextUrl.searchParams.get("toolkit");
   if (!toolkit) {
-    return NextResponse.json({ error: "toolkit query parameter is required" }, { status: 400 });
+    return NextResponse.json({ error: { code: "validation_error", message: "toolkit query parameter is required" } }, { status: 400 });
   }
 
   const tools = await listComposioTools(toolkit);

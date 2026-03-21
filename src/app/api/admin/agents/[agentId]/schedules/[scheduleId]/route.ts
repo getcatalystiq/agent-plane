@@ -19,7 +19,7 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
   );
 
   if (!schedule) {
-    return NextResponse.json({ error: { message: "Schedule not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Schedule not found" } }, { status: 404 });
   }
 
   return NextResponse.json(schedule);
@@ -38,7 +38,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     [scheduleId, agentId],
   );
   if (!existing) {
-    return NextResponse.json({ error: { message: "Schedule not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Schedule not found" } }, { status: 404 });
   }
 
   // Recompute next_run_at
@@ -51,7 +51,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
       nextRunAt = computeNextRunAt(config, timezone);
     } catch (err) {
       return NextResponse.json(
-        { error: { message: `Invalid schedule configuration: ${err instanceof Error ? err.message : String(err)}` } },
+        { error: { code: "validation_error", message: `Invalid schedule configuration: ${err instanceof Error ? err.message : String(err)}` } },
         { status: 422 },
       );
     }
@@ -70,7 +70,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   );
 
   if (!updatedSchedule) {
-    return NextResponse.json({ error: { message: "Schedule not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Schedule not found" } }, { status: 404 });
   }
 
   return NextResponse.json(updatedSchedule);
@@ -86,7 +86,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
   );
 
   if (result.rowCount === 0) {
-    return NextResponse.json({ error: { message: "Schedule not found" } }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Schedule not found" } }, { status: 404 });
   }
 
   return NextResponse.json({ deleted: true });

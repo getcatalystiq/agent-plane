@@ -12,7 +12,7 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
 
   const run = await queryOne(RunRow, "SELECT * FROM runs WHERE id = $1", [runId]);
   if (!run) {
-    return NextResponse.json({ error: "Run not found" }, { status: 404 });
+    return NextResponse.json({ error: { code: "not_found", message: "Run not found" } }, { status: 404 });
   }
 
   // Fetch transcript if available

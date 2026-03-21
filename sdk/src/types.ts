@@ -38,11 +38,14 @@ export interface AgentPlugin {
 
 export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
 
+export type RunnerType = "claude-agent-sdk" | "vercel-ai-sdk";
+
 export interface Agent {
   id: string;
   tenant_id: string;
   name: string;
   description: string | null;
+  slug: string;
   git_repo_url: string | null;
   git_branch: string;
   composio_toolkits: string[];
@@ -52,12 +55,14 @@ export interface Agent {
   skills: AgentSkill[];
   plugins: AgentPlugin[];
   model: string;
+  runner: RunnerType | null;
   allowed_tools: string[];
   permission_mode: PermissionMode;
   max_turns: number;
   max_budget_usd: number;
   max_runtime_seconds: number;
   a2a_enabled: boolean;
+  a2a_tags: string[];
   created_at: string;
   updated_at: string;
 }
@@ -104,12 +109,17 @@ export interface Run {
   duration_ms: number;
   duration_api_ms: number;
   model_usage: unknown | null;
+  runner: RunnerType | null;
   transcript_blob_url: string | null;
   error_type: string | null;
   error_messages: string[];
   triggered_by: RunTriggeredBy;
+  created_by_key_id: string | null;
+  schedule_id: string | null;
   session_id: string | null;
   sandbox_id: string | null;
+  agent_name?: string | null;
+  agent_model?: string | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
