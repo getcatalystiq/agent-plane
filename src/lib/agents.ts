@@ -18,8 +18,7 @@ export function slugifyName(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-/** Check if a slug is reserved. */
-export function isReservedSlug(slug: string): boolean {
+function isReservedSlug(slug: string): boolean {
   return RESERVED_SLUGS.has(slug);
 }
 
@@ -92,7 +91,7 @@ export async function createAgentRecord(
       throw err;
     }
   }
-  return { id, name, slug };
+  throw new ConflictError(`Failed to create agent after retries`);
 }
 
 /**

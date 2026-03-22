@@ -10,7 +10,7 @@ import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 import { ModelSelector } from "@/components/model-selector";
 import { supportsClaudeRunner } from "@/lib/models";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface Props {
   tenantId: string;
@@ -71,7 +71,7 @@ export function AddAgentForm({ tenantId }: Props) {
       resetForm();
       router.refresh();
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setSaving(false);
     }

@@ -12,7 +12,7 @@ import { FormError } from "@/components/ui/form-error";
 import { ToolsModal } from "./tools-modal";
 import { McpToolsModal } from "./mcp-tools-modal";
 import type { AuthScheme, ConnectorStatus } from "@/lib/composio";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface McpServer {
   id: string;
@@ -201,7 +201,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
       await loadComposio();
       router.refresh();
     } catch (err) {
-      setErrors((e) => ({ ...e, [slug]: err instanceof AdminApiError ? err.message : "Unknown error" }));
+      setErrors((e) => ({ ...e, [slug]: err instanceof Error ? err.message : "Unknown error" }));
     } finally {
       setSaving((s) => ({ ...s, [slug]: false }));
     }

@@ -11,7 +11,7 @@ import { FormError } from "@/components/ui/form-error";
 import { LocalDate } from "@/components/local-date";
 import type { Schedule } from "@/lib/validation";
 import type { ScheduleFrequency } from "@/lib/types";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface ScheduleListProps {
   agentId: string;
@@ -57,7 +57,7 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
       setSchedules(data);
       setGeneration((g) => g + 1);
     } catch (err) {
-      setErrors((prev) => ({ ...prev, _refetch: err instanceof AdminApiError ? err.message : "Failed to refresh schedules" }));
+      setErrors((prev) => ({ ...prev, _refetch: err instanceof Error ? err.message : "Failed to refresh schedules" }));
     }
   }, [agentId]);
 
@@ -83,7 +83,7 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
       setErr("_add", null);
       await refetch();
     } catch (err) {
-      setErr("_add", err instanceof AdminApiError ? err.message : "Network error");
+      setErr("_add", err instanceof Error ? err.message : "Network error");
     } finally {
       setAdding(false);
     }
@@ -96,7 +96,7 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
       await adminFetch(`/agents/${agentId}/schedules/${id}`, { method: "DELETE" });
       await refetch();
     } catch (err) {
-      setErr(id, err instanceof AdminApiError ? err.message : "Network error");
+      setErr(id, err instanceof Error ? err.message : "Network error");
     } finally {
       setOp(id, "idle");
     }
@@ -188,7 +188,7 @@ function ScheduleCard({
       });
       await onSaved();
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "Network error");
+      setError(err instanceof Error ? err.message : "Network error");
     } finally {
       setOp("idle");
     }

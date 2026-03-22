@@ -9,7 +9,7 @@ import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface Company {
   id: string;
@@ -85,7 +85,7 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
       setSubscriptionToken("");
       router.refresh();
     } catch (err) {
-      setTokenError(err instanceof AdminApiError ? err.message : "Failed to save");
+      setTokenError(err instanceof Error ? err.message : "Failed to save");
     } finally {
       setSaving(false);
     }
@@ -105,7 +105,7 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
       setHasToken(false);
       router.refresh();
     } catch (err) {
-      setTokenError(err instanceof AdminApiError ? err.message : "Failed to clear token");
+      setTokenError(err instanceof Error ? err.message : "Failed to clear token");
     } finally {
       setSaving(false);
     }

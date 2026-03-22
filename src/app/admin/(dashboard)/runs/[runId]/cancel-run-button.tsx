@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -26,7 +26,7 @@ export function CancelRunButton({ runId }: { runId: string }) {
       setOpen(false);
       router.refresh();
     } catch (err) {
-      alert(err instanceof AdminApiError ? err.message : "Failed to cancel run");
+      alert(err instanceof Error ? err.message : "Failed to cancel run");
     } finally {
       setCancelling(false);
     }

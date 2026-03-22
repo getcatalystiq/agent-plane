@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 export function TokenConfig({ marketplaceId, hasToken }: { marketplaceId: string; hasToken: boolean }) {
   const router = useRouter();
@@ -30,7 +30,7 @@ export function TokenConfig({ marketplaceId, hasToken }: { marketplaceId: string
       setToken("");
       router.refresh();
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setSaving(false);
     }
@@ -47,7 +47,7 @@ export function TokenConfig({ marketplaceId, hasToken }: { marketplaceId: string
       setConfirmRemove(false);
       router.refresh();
     } catch (err) {
-      setRemoveError(err instanceof AdminApiError ? err.message : "Unknown error");
+      setRemoveError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setRemoving(false);
     }

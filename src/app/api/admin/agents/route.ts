@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { query, queryOne } from "@/db";
 import { PaginationSchema, CreateAgentSchema, AgentRow, TenantRow } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
-import { slugifyName, createAgentRecord } from "@/lib/agents";
+import { createAgentRecord } from "@/lib/agents";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -60,15 +60,8 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     return NextResponse.json({ error: { code: "not_found", message: "Tenant not found" } }, { status: 404 });
   }
 
-  // Derive slug from name if not provided; fallback to agent-{id} for edge cases
-  const explicitSlug = (input as { slug?: string }).slug;
-  const slugOverride = explicitSlug ?? undefined;
-  if (!slugOverride) {
-    // Auto-derived slug — createAgentRecord handles slugify internally
-  }
-
   const result = await createAgentRecord(input.tenant_id, input, {
-    slug: slugOverride || (slugifyName(input.name) || undefined),
+    slug: (input as { slug?: string }).slug,
   });
 
   const agent = await queryOne(AgentRow, "SELECT * FROM agents WHERE id = $1", [result.id]);

@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { SectionHeader } from "@/components/ui/section-header";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface ApiKey {
   id: string;
@@ -55,7 +55,7 @@ export function ApiKeysSection({ tenantId, initialKeys }: { tenantId: string; in
       setRevokeTarget(null);
       router.refresh();
     } catch (err) {
-      setRevokeError(err instanceof AdminApiError ? err.message : "Unknown error");
+      setRevokeError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setRevoking(false);
     }

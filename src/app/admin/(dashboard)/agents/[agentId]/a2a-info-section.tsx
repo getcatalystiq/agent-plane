@@ -44,6 +44,8 @@ export function A2aInfoSection({
         body: JSON.stringify({ a2a_enabled: next }),
       });
       setEnabled(next);
+    } catch {
+      // Revert on failure — toggle stays at current state
     } finally {
       setToggling(false);
     }

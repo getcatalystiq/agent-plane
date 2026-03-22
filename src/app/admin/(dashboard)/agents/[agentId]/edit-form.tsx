@@ -9,7 +9,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
 import { ModelSelector } from "@/components/model-selector";
 import { supportsClaudeRunner } from "@/lib/models";
-import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface Agent {
   id: string;
@@ -66,7 +66,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
       });
       router.refresh();
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "Failed to save");
+      setError(err instanceof Error ? err.message : "Failed to save");
     } finally {
       setSaving(false);
     }
