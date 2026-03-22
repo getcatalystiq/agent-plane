@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { adminFetch, adminStream } from "@/app/admin/lib/api";
 
 function MarkdownContent({ children }: { children: string }) {
   return (
@@ -240,11 +241,12 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     setPolling(true);
 
     try {
-      const res = await fetch(`/api/admin/runs/${runId}/stream?offset=${eventOffset}`, {
-        signal: abortRef.current?.signal,
-      });
-
-      if (!res.ok) {
+      let res: Response;
+      try {
+        res = await adminStream(`/runs/${runId}/stream?offset=${eventOffset}`, {
+          signal: abortRef.current?.signal,
+        });
+      } catch {
         await pollForFinalResult(runId);
         return;
       }
@@ -308,18 +310,18 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         await new Promise((r) => setTimeout(r, delay));
         if (abortRef.current?.signal.aborted) break;
 
-        const res = await fetch(`/api/admin/runs/${runId}`, {
-          signal: abortRef.current?.signal,
-        });
-        if (!res.ok) {
+        let data: Record<string, unknown>;
+        try {
+          data = await adminFetch<Record<string, unknown>>(`/runs/${runId}`, {
+            signal: abortRef.current?.signal,
+          });
+        } catch {
           delay = Math.min(delay * 2, maxDelay);
           continue;
         }
+        const run = data.run as Record<string, unknown> | undefined;
 
-        const data = await res.json();
-        const run = data.run;
-
-        if (TERMINAL_STATUSES.has(run.status)) {
+        if (run && TERMINAL_STATUSES.has(run.status as string)) {
           const transcript = data.transcript as PlaygroundEvent[] | undefined;
           if (transcript && transcript.length > 0) {
             const detachIdx = transcript.findIndex((ev) => ev.type === "stream_detached");
@@ -455,7 +457,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       const currentSessionId = sessionIdRef.current;
       if (currentSessionId) {
         // Follow-up message to existing session
-        res = await fetch(`/api/admin/sessions/${currentSessionId}/messages`, {
+        res = await adminStream(`/sessions/${currentSessionId}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: messageText }),
@@ -463,20 +465,12 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         });
       } else {
         // First message — create session with prompt
-        res = await fetch("/api/admin/sessions", {
+        res = await adminStream("/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agent_id: agentId, prompt: messageText }),
           signal: abort.signal,
         });
-      }
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        const msg = data?.error?.message ?? data?.error ?? `HTTP ${res.status}`;
-        setError(typeof msg === "string" ? msg : JSON.stringify(msg));
-        setRunning(false);
-        return;
       }
 
       await consumeStream(res);
@@ -495,7 +489,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     abortRef.current?.abort();
     // Stop the current session in the background
     if (sessionId) {
-      fetch(`/api/admin/sessions/${sessionId}`, { method: "DELETE" }).catch((err) => {
+      adminFetch(`/sessions/${sessionId}`, { method: "DELETE" }).catch((err) => {
         console.error("Failed to stop session:", err);
       });
     }
@@ -517,7 +511,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     const id = runIdRef.current;
     if (id) {
       runIdRef.current = null;
-      fetch(`/api/admin/runs/${id}/cancel`, { method: "POST" }).catch((err) => {
+      adminFetch(`/runs/${id}/cancel`, { method: "POST" }).catch((err) => {
         console.error("Failed to cancel run:", err);
       });
     }

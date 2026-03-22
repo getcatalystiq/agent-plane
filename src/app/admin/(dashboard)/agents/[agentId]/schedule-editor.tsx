@@ -11,6 +11,7 @@ import { FormError } from "@/components/ui/form-error";
 import { LocalDate } from "@/components/local-date";
 import type { Schedule } from "@/lib/validation";
 import type { ScheduleFrequency } from "@/lib/types";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface ScheduleListProps {
   agentId: string;
@@ -52,16 +53,11 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
 
   const refetch = useCallback(async () => {
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/schedules`);
-      if (res.ok) {
-        const data = await res.json();
-        setSchedules(data);
-        setGeneration((g) => g + 1);
-      } else {
-        setErrors((prev) => ({ ...prev, _refetch: `Failed to refresh schedules (${res.status})` }));
-      }
-    } catch {
-      setErrors((prev) => ({ ...prev, _refetch: "Failed to refresh schedules" }));
+      const data = await adminFetch<Schedule[]>(`/agents/${agentId}/schedules`);
+      setSchedules(data);
+      setGeneration((g) => g + 1);
+    } catch (err) {
+      setErrors((prev) => ({ ...prev, _refetch: err instanceof AdminApiError ? err.message : "Failed to refresh schedules" }));
     }
   }, [agentId]);
 
@@ -74,9 +70,8 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
   async function handleAdd() {
     setAdding(true);
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/schedules`, {
+      await adminFetch(`/agents/${agentId}/schedules`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           frequency: "manual",
           time: null,
@@ -85,15 +80,10 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
           enabled: false,
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        setErr("_add", data?.error?.message ?? `Failed (${res.status})`);
-        return;
-      }
       setErr("_add", null);
       await refetch();
     } catch (err) {
-      setErr("_add", err instanceof Error ? err.message : "Network error");
+      setErr("_add", err instanceof AdminApiError ? err.message : "Network error");
     } finally {
       setAdding(false);
     }
@@ -103,15 +93,10 @@ export function ScheduleEditor({ agentId, initialSchedules, timezone }: Schedule
     setOp(id, "deleting");
     setErr(id, null);
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/schedules/${id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        setErr(id, data?.error?.message ?? `Delete failed (${res.status})`);
-        return;
-      }
+      await adminFetch(`/agents/${agentId}/schedules/${id}`, { method: "DELETE" });
       await refetch();
     } catch (err) {
-      setErr(id, err instanceof Error ? err.message : "Network error");
+      setErr(id, err instanceof AdminApiError ? err.message : "Network error");
     } finally {
       setOp(id, "idle");
     }
@@ -190,9 +175,8 @@ function ScheduleCard({
     setOp("saving");
     setError(null);
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/schedules/${schedule.id}`, {
+      await adminFetch(`/agents/${agentId}/schedules/${schedule.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim() || null,
           frequency,
@@ -202,14 +186,9 @@ function ScheduleCard({
           enabled: canEnable ? enabled : false,
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        setError(data?.error?.message ?? data?.error ?? `Save failed (${res.status})`);
-        return;
-      }
       await onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Network error");
+      setError(err instanceof AdminApiError ? err.message : "Network error");
     } finally {
       setOp("idle");
     }

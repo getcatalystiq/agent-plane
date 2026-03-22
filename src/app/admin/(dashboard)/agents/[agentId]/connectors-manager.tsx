@@ -12,6 +12,7 @@ import { FormError } from "@/components/ui/form-error";
 import { ToolsModal } from "./tools-modal";
 import { McpToolsModal } from "./mcp-tools-modal";
 import type { AuthScheme, ConnectorStatus } from "@/lib/composio";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface McpServer {
   id: string;
@@ -94,8 +95,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   const loadComposio = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/connectors`);
-      const data = await res.json();
+      const data = await adminFetch<{ connectors: ConnectorStatus[] }>(`/agents/${agentId}/connectors`);
       setConnectors(data.connectors ?? []);
     } finally {
       setLoading(false);
@@ -106,8 +106,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   const loadMcp = useCallback(async () => {
     setMcpLoading(true);
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/mcp-connections`);
-      const data = await res.json();
+      const data = await adminFetch<{ data: McpConnection[] }>(`/agents/${agentId}/mcp-connections`);
       setMcpConnections(data.data ?? []);
     } finally {
       setMcpLoading(false);
@@ -121,8 +120,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   // Load plugin connector suggestions
   useEffect(() => {
     if (!hasPlugins) return;
-    fetch(`/api/admin/agents/${agentId}/plugin-suggestions`)
-      .then((r) => r.json())
+    adminFetch<{ data: PluginSuggestion[] }>(`/agents/${agentId}/plugin-suggestions`)
       .then((data) => setPluginSuggestions(data.data ?? []))
       .catch(() => {});
   }, [agentId, hasPlugins]);
@@ -132,8 +130,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     if (localToolkits.length === 0) return;
     for (const slug of localToolkits) {
       if (toolCounts[slug] !== undefined) continue;
-      fetch(`/api/admin/composio/tools?toolkit=${encodeURIComponent(slug)}`)
-        .then((res) => res.json())
+      adminFetch<{ data: unknown[] }>(`/composio/tools?toolkit=${encodeURIComponent(slug)}`)
         .then((data) => setToolCounts((prev) => ({ ...prev, [slug]: (data.data ?? []).length })))
         .catch(() => {});
     }
@@ -141,8 +138,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
 
   // Load available MCP servers (for Add panel)
   async function loadMcpServers() {
-    const res = await fetch("/api/admin/mcp-servers");
-    const data = await res.json();
+    const data = await adminFetch<{ data: McpServer[] }>("/mcp-servers");
     setMcpServers(data.data ?? []);
   }
 
@@ -152,9 +148,8 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     const prefix = toolkit.toUpperCase() + "_";
     const otherTools = allowedTools.filter((t) => !t.startsWith(prefix));
     const updated = [...otherTools, ...selectedSlugs];
-    await fetch(`/api/admin/agents/${agentId}`, {
+    await adminFetch(`/agents/${agentId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ composio_allowed_tools: updated }),
     });
     setAllowedTools(updated);
@@ -163,9 +158,8 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   }
 
   async function patchToolkits(newToolkits: string[]) {
-    await fetch(`/api/admin/agents/${agentId}`, {
+    await adminFetch(`/agents/${agentId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ composio_toolkits: newToolkits }),
     });
     setLocalToolkits(newToolkits);
@@ -199,21 +193,15 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     setSaving((s) => ({ ...s, [slug]: true }));
     setErrors((e) => ({ ...e, [slug]: "" }));
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/connectors`, {
+      await adminFetch(`/agents/${agentId}/connectors`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ toolkit: slug, api_key: key }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setErrors((e) => ({ ...e, [slug]: data?.error ?? `Error ${res.status}` }));
-        return;
-      }
       setApiKeys((k) => ({ ...k, [slug]: "" }));
       await loadComposio();
       router.refresh();
     } catch (err) {
-      setErrors((e) => ({ ...e, [slug]: err instanceof Error ? err.message : "Unknown error" }));
+      setErrors((e) => ({ ...e, [slug]: err instanceof AdminApiError ? err.message : "Unknown error" }));
     } finally {
       setSaving((s) => ({ ...s, [slug]: false }));
     }
@@ -224,10 +212,9 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   async function handleMcpConnect(serverId: string) {
     setMcpConnecting(serverId);
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/mcp-connections/${serverId}/initiate-oauth`, {
+      const data = await adminFetch<{ redirectUrl?: string }>(`/agents/${agentId}/mcp-connections/${serverId}/initiate-oauth`, {
         method: "POST",
       });
-      const data = await res.json();
       if (data.redirectUrl) {
         const popup = window.open(data.redirectUrl, "mcp-oauth", "width=600,height=700");
         const handler = (event: MessageEvent) => {
@@ -250,7 +237,7 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     if (!confirmMcpDisconnect) return;
     setMcpDisconnecting(true);
     try {
-      await fetch(`/api/admin/agents/${agentId}/mcp-connections/${confirmMcpDisconnect.mcp_server_id}`, {
+      await adminFetch(`/agents/${agentId}/mcp-connections/${confirmMcpDisconnect.mcp_server_id}`, {
         method: "DELETE",
       });
       setConfirmMcpDisconnect(null);
@@ -547,9 +534,8 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
         open={!!mcpToolsModal}
         onOpenChange={(open) => { if (!open) setMcpToolsModal(null); }}
         onSave={async (selectedTools) => {
-          await fetch(`/api/admin/agents/${agentId}/mcp-connections/${mcpToolsModal.mcp_server_id}`, {
+          await adminFetch(`/agents/${agentId}/mcp-connections/${mcpToolsModal.mcp_server_id}`, {
             method: "PATCH",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ allowed_tools: selectedTools }),
           });
           setMcpToolsModal(null);

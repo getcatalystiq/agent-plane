@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 export function AddMarketplaceForm({ tenantId }: { tenantId: string }) {
   const router = useRouter();
@@ -21,9 +22,8 @@ export function AddMarketplaceForm({ tenantId }: { tenantId: string }) {
     setSaving(true);
     setError("");
     try {
-      const res = await fetch("/api/admin/plugin-marketplaces", {
+      await adminFetch("/plugin-marketplaces", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           tenant_id: tenantId,
           name: form.name,
@@ -31,17 +31,11 @@ export function AddMarketplaceForm({ tenantId }: { tenantId: string }) {
           ...(form.github_token && { github_token: form.github_token }),
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
-      await res.json();
       setOpen(false);
       setForm({ name: "", github_repo: "", github_token: "" });
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof AdminApiError ? err.message : "Unknown error");
     } finally {
       setSaving(false);
     }

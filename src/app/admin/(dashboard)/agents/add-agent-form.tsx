@@ -10,6 +10,7 @@ import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
 import { ModelSelector } from "@/components/model-selector";
 import { supportsClaudeRunner } from "@/lib/models";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface Props {
   tenantId: string;
@@ -52,9 +53,8 @@ export function AddAgentForm({ tenantId }: Props) {
     setSaving(true);
     setError("");
     try {
-      const res = await fetch("/api/admin/agents", {
+      await adminFetch("/agents", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           tenant_id: form.tenant_id,
           name: form.name,
@@ -67,16 +67,11 @@ export function AddAgentForm({ tenantId }: Props) {
           max_runtime_seconds: parseInt(form.max_runtime_minutes) * 60,
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
       setOpen(false);
       resetForm();
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof AdminApiError ? err.message : "Unknown error");
     } finally {
       setSaving(false);
     }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface Tool {
   slug: string;
@@ -30,8 +31,7 @@ export function ToolsModal({ toolkit, toolkitLogo, allowedTools, open, onOpenCha
   const fetchTools = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/composio/tools?toolkit=${encodeURIComponent(toolkit)}`);
-      const data = await res.json();
+      const data = await adminFetch<{ data: Tool[] }>(`/composio/tools?toolkit=${encodeURIComponent(toolkit)}`);
       setTools(data.data ?? []);
     } finally {
       setLoading(false);

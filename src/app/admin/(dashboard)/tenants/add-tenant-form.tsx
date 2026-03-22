@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 export function AddTenantForm() {
   const router = useRouter();
@@ -26,25 +27,18 @@ export function AddTenantForm() {
     setSaving(true);
     setError("");
     try {
-      const res = await fetch("/api/admin/tenants", {
+      const data = await adminFetch<{ api_key: string }>("/tenants", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: form.name,
           slug: form.slug,
           monthly_budget_usd: parseFloat(form.monthly_budget_usd),
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
-      const data = await res.json();
       setApiKey(data.api_key);
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof AdminApiError ? err.message : "Unknown error");
     } finally {
       setSaving(false);
     }

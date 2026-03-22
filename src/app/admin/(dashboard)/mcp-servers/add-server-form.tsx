@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { FormField } from "@/components/ui/form-field";
 import { FormError } from "@/components/ui/form-error";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 export function AddMcpServerForm({ tenantId }: { tenantId: string }) {
   const router = useRouter();
@@ -35,9 +36,8 @@ export function AddMcpServerForm({ tenantId }: { tenantId: string }) {
     setSaving(true);
     setError("");
     try {
-      const res = await fetch("/api/admin/mcp-servers", {
+      await adminFetch("/mcp-servers", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           tenant_id: tenantId,
           name: form.name,
@@ -48,17 +48,11 @@ export function AddMcpServerForm({ tenantId }: { tenantId: string }) {
           logo_url: form.logo_url || undefined,
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
-      await res.json();
       setOpen(false);
       setForm({ name: "", slug: "", description: "", base_url: "", mcp_endpoint_path: "/mcp", logo_url: "" });
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof AdminApiError ? err.message : "Unknown error");
     } finally {
       setSaving(false);
     }

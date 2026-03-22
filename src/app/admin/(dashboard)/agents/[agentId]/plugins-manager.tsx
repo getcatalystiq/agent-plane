@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { SectionHeader } from "@/components/ui/section-header";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface AgentPlugin {
   marketplace_id: string;
@@ -60,10 +61,9 @@ export function PluginsManager({
 
   // Fetch marketplaces on mount for name display
   useEffect(() => {
-    fetch(`/api/admin/plugin-marketplaces?tenant_id=${tenantId}`)
-      .then((r) => r.json())
+    adminFetch<{ data: Marketplace[] }>(`/plugin-marketplaces?tenant_id=${tenantId}`)
       .then((data) => {
-        const list: Marketplace[] = data.data ?? [];
+        const list = data.data ?? [];
         setMarketplaces(list);
         const names: Record<string, string> = {};
         for (const m of list) names[m.id] = m.name;
@@ -77,11 +77,8 @@ export function PluginsManager({
     setLoadingPlugins(true);
     setAvailablePlugins([]);
     try {
-      const res = await fetch(`/api/admin/plugin-marketplaces/${marketplaceId}/plugins`);
-      if (res.ok) {
-        const data = await res.json();
-        setAvailablePlugins(data.data ?? []);
-      }
+      const data = await adminFetch<{ data: AvailablePlugin[] }>(`/plugin-marketplaces/${marketplaceId}/plugins`);
+      setAvailablePlugins(data.data ?? []);
     } catch { /* ignore */ } finally {
       setLoadingPlugins(false);
     }
@@ -115,9 +112,8 @@ export function PluginsManager({
   async function handleSave() {
     setSaving(true);
     try {
-      await fetch(`/api/admin/agents/${agentId}`, {
+      await adminFetch(`/agents/${agentId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ plugins }),
       });
       router.refresh();

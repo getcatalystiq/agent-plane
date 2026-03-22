@@ -9,6 +9,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
 import { ModelSelector } from "@/components/model-selector";
 import { supportsClaudeRunner } from "@/lib/models";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface Agent {
   id: string;
@@ -50,9 +51,8 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
     setSaving(true);
     setError("");
     try {
-      const res = await fetch(`/api/admin/agents/${agent.id}`, {
+      await adminFetch(`/agents/${agent.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
           description: description || null,
@@ -64,12 +64,9 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
           max_runtime_seconds: (parseInt(maxRuntime) || Math.floor(agent.max_runtime_seconds / 60)) * 60,
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? data?.error ?? `Error ${res.status}`);
-        return;
-      }
       router.refresh();
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "Failed to save");
     } finally {
       setSaving(false);
     }

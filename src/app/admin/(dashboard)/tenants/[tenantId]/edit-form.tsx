@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface Tenant {
   id: string;
@@ -92,9 +93,8 @@ export function TenantEditForm({ tenant }: { tenant: Tenant }) {
   async function handleSave() {
     setSaving(true);
     try {
-      await fetch(`/api/admin/tenants/${tenant.id}`, {
+      await adminFetch(`/tenants/${tenant.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
           status,

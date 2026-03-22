@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { adminFetch } from "@/app/admin/lib/api";
 
 export function StopSessionButton({ sessionId, status }: { sessionId: string; status: string }) {
   const [stopping, setStopping] = useState(false);
@@ -13,7 +14,7 @@ export function StopSessionButton({ sessionId, status }: { sessionId: string; st
   async function handleStop() {
     setStopping(true);
     try {
-      await fetch(`/api/admin/sessions/${sessionId}`, { method: "DELETE" });
+      await adminFetch(`/sessions/${sessionId}`, { method: "DELETE" });
       router.refresh();
     } finally {
       setStopping(false);

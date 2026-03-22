@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { FileTreeEditor } from "@/components/file-tree-editor";
 import type { FlatFile } from "@/components/file-tree-editor";
+import { adminFetch } from "@/app/admin/lib/api";
 
 interface AgentSkill {
   folder: string;
@@ -42,9 +43,8 @@ export function SkillsEditor({ agentId, initialSkills }: { agentId: string; init
     }
     const skills = Array.from(folderMap.entries()).map(([folder, files]) => ({ folder, files }));
 
-    await fetch(`/api/admin/agents/${agentId}`, {
+    await adminFetch(`/agents/${agentId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ skills }),
     });
     router.refresh();

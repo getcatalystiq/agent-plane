@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface Props {
   tenantId: string;
@@ -20,16 +21,11 @@ export function DeleteTenantButton({ tenantId, tenantName }: Props) {
     setDeleting(true);
     setError("");
     try {
-      const res = await fetch(`/api/admin/tenants/${tenantId}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
+      await adminFetch(`/tenants/${tenantId}`, { method: "DELETE" });
       setStep(0);
       router.push("/admin/tenants");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof AdminApiError ? err.message : "Unknown error");
     } finally {
       setDeleting(false);
     }

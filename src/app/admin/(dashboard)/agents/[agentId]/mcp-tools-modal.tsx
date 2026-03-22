@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface Tool {
   name: string;
@@ -42,15 +43,10 @@ export function McpToolsModal({
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/admin/agents/${agentId}/mcp-connections/${mcpServerId}/tools`);
-      if (!res.ok) {
-        setError("Failed to load tools");
-        return;
-      }
-      const data = await res.json();
+      const data = await adminFetch<{ data: Tool[] }>(`/agents/${agentId}/mcp-connections/${mcpServerId}/tools`);
       setTools(data.data ?? []);
-    } catch {
-      setError("Failed to load tools");
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "Failed to load tools");
     } finally {
       setLoading(false);
     }

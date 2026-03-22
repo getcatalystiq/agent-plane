@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface ApiKey {
   id: string;
@@ -31,12 +32,10 @@ export function ApiKeysSection({ tenantId, initialKeys }: { tenantId: string; in
   async function handleCreate() {
     setCreating(true);
     try {
-      const res = await fetch(`/api/admin/tenants/${tenantId}/keys`, {
+      const data = await adminFetch<{ key: string }>(`/tenants/${tenantId}/keys`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: newKeyName }),
       });
-      const data = await res.json();
       setRawKey(data.key);
       setShowCreate(false);
       setNewKeyName("default");
@@ -51,16 +50,11 @@ export function ApiKeysSection({ tenantId, initialKeys }: { tenantId: string; in
     setRevoking(true);
     setRevokeError("");
     try {
-      const res = await fetch(`/api/admin/tenants/${tenantId}/keys/${revokeTarget.id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setRevokeError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
+      await adminFetch(`/tenants/${tenantId}/keys/${revokeTarget.id}`, { method: "DELETE" });
       setRevokeTarget(null);
       router.refresh();
     } catch (err) {
-      setRevokeError(err instanceof Error ? err.message : "Unknown error");
+      setRevokeError(err instanceof AdminApiError ? err.message : "Unknown error");
     } finally {
       setRevoking(false);
     }

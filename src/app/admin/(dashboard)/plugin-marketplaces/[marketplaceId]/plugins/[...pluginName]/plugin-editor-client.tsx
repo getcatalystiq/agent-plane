@@ -9,6 +9,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { FileTreeEditor } from "@/components/file-tree-editor";
 import type { FlatFile } from "@/components/file-tree-editor";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface PluginEditorClientProps {
   marketplaceId: string;
@@ -53,23 +54,14 @@ export function PluginEditorClient({
     setSuccess("");
 
     try {
-      const res = await fetch(`/api/admin/plugin-marketplaces/${marketplaceId}/plugins/${pluginName}`, {
+      const data = await adminFetch<{ commitSha: string }>(`/plugin-marketplaces/${marketplaceId}/plugins/${pluginName}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           skills,
           agents,
           mcpJson: mcpJson || null,
         }),
       });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error?.message ?? `Error ${res.status}`);
-        return;
-      }
-
-      const data = await res.json();
       setSuccess(`Saved (commit ${data.commitSha.slice(0, 7)})`);
       setSavedVersion((v) => v + 1);
     } catch (err) {

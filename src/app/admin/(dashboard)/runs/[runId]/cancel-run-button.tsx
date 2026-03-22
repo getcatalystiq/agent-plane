@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -21,16 +22,11 @@ export function CancelRunButton({ runId }: { runId: string }) {
   async function handleConfirm() {
     setCancelling(true);
     try {
-      const res = await fetch(`/api/admin/runs/${runId}/cancel`, { method: "POST" });
-      if (res.ok) {
-        setOpen(false);
-        router.refresh();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        alert(data?.error ?? `Failed to cancel (HTTP ${res.status})`);
-      }
-    } catch {
-      alert("Failed to cancel run");
+      await adminFetch(`/runs/${runId}/cancel`, { method: "POST" });
+      setOpen(false);
+      router.refresh();
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.message : "Failed to cancel run");
     } finally {
       setCancelling(false);
     }

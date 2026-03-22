@@ -9,6 +9,7 @@ import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { SectionHeader } from "@/components/ui/section-header";
 import { FormField } from "@/components/ui/form-field";
+import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 
 interface Company {
   id: string;
@@ -76,20 +77,15 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
       if (subscriptionExpiresAt !== (tenant.subscription_token_expires_at ? tenant.subscription_token_expires_at.split("T")[0] : "")) {
         payload.subscription_token_expires_at = subscriptionExpiresAt ? new Date(subscriptionExpiresAt).toISOString() : null;
       }
-      const res = await fetch(`/api/admin/tenants/${tenant.id}`, {
+      const data = await adminFetch<Record<string, unknown>>(`/tenants/${tenant.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        setTokenError(err?.error?.message ?? "Failed to save");
-        return;
-      }
-      const data = await res.json();
-      setHasToken(data.has_subscription_token ?? hasToken);
+      setHasToken((data.has_subscription_token as boolean) ?? hasToken);
       setSubscriptionToken("");
       router.refresh();
+    } catch (err) {
+      setTokenError(err instanceof AdminApiError ? err.message : "Failed to save");
     } finally {
       setSaving(false);
     }
@@ -102,18 +98,14 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
     setSaving(true);
     setTokenError("");
     try {
-      const res = await fetch(`/api/admin/tenants/${tenant.id}`, {
+      await adminFetch(`/tenants/${tenant.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subscription_token: "" }),
       });
-      if (res.ok) {
-        setHasToken(false);
-        router.refresh();
-      } else {
-        const err = await res.json().catch(() => null);
-        setTokenError(err?.error?.message ?? "Failed to clear token");
-      }
+      setHasToken(false);
+      router.refresh();
+    } catch (err) {
+      setTokenError(err instanceof AdminApiError ? err.message : "Failed to clear token");
     } finally {
       setSaving(false);
     }
