@@ -117,10 +117,43 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
 
   return (
     <div className="space-y-6">
-      {/* Logo */}
+      {/* Company Details */}
       <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <SectionHeader title="Logo" />
-        <div className="flex items-center gap-5">
+        <div className="flex items-center gap-2 mb-1">
+          <SectionHeader title="Company Details" />
+          <Badge variant={tenant.status === "active" ? "default" : "destructive"}>
+            {tenant.status}
+          </Badge>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <FormField label="Name">
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          </FormField>
+          <FormField label="Slug">
+            <Input value={tenant.slug} readOnly disabled className="opacity-60" />
+          </FormField>
+          <FormField label="Timezone">
+            <Select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+              {TIMEZONES.map((tz) => (
+                <option key={tz} value={tz}>{tz.replace(/_/g, " ")}</option>
+              ))}
+            </Select>
+          </FormField>
+          <FormField label="Monthly Budget (USD)">
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
+              <Input
+                type="number"
+                step="0.01"
+                value={budget}
+                onChange={(e) => setBudget(e.target.value)}
+                className="pl-7"
+              />
+            </div>
+          </FormField>
+        </div>
+        {/* Logo */}
+        <div className="flex items-center gap-5 mt-5 pt-5 border-t border-muted-foreground/15">
           {logoUrl ? (
             <img src={logoUrl} alt={name} className="w-16 h-16 rounded-xl object-cover border border-border" />
           ) : (
@@ -156,45 +189,6 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
               />
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Company Details */}
-      <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <SectionHeader title="Company Details" />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <FormField label="Name">
-            <Input value={name} onChange={(e) => setName(e.target.value)} />
-          </FormField>
-          <FormField label="Slug">
-            <Input value={tenant.slug} readOnly disabled className="opacity-60" />
-          </FormField>
-          <FormField label="Status">
-            <div className="flex items-center h-9">
-              <Badge variant={tenant.status === "active" ? "default" : "destructive"}>
-                {tenant.status}
-              </Badge>
-            </div>
-          </FormField>
-          <FormField label="Timezone">
-            <Select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
-              {TIMEZONES.map((tz) => (
-                <option key={tz} value={tz}>{tz.replace(/_/g, " ")}</option>
-              ))}
-            </Select>
-          </FormField>
-          <FormField label="Monthly Budget (USD)">
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
-              <Input
-                type="number"
-                step="0.01"
-                value={budget}
-                onChange={(e) => setBudget(e.target.value)}
-                className="pl-7"
-              />
-            </div>
-          </FormField>
         </div>
       </div>
 
