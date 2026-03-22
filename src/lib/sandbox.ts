@@ -796,6 +796,7 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
       new URL(config.platformApiUrl).hostname,
       ...mcpHostnames,
       ...callbackHostnames,
+      ...(config.auth?.extraAllowedHostnames ?? []),
     ],
   };
 
