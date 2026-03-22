@@ -141,7 +141,7 @@ export function CompanySwitcher() {
   // Loading skeleton
   if (loading) {
     return (
-      <div className="px-4 py-3 border-b border-border">
+      <div className="px-4 border-b border-border h-12 flex items-center">
         <div className="flex items-center gap-3">
           <div className="w-5 h-5 rounded bg-muted animate-pulse" />
           <div className="h-4 w-24 rounded bg-muted animate-pulse" />
@@ -151,7 +151,7 @@ export function CompanySwitcher() {
   }
 
   return (
-    <div className="relative border-b border-border">
+    <div className="relative border-b border-border h-12">
       {/* Trigger */}
       <button
         ref={triggerRef}
