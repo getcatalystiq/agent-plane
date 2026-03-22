@@ -56,10 +56,7 @@ export async function prepareSessionSandbox(
   const env = getEnv();
   const effectiveRunner = resolveEffectiveRunner(params.agent.model, params.agent.runner);
 
-  // Hot path: try to reconnect to existing sandbox.
-  // Run buildMcpConfig + fetchPluginContent + resolveSandboxAuth in PARALLEL with the reconnect attempt.
-  // On reconnect success, we still need MCP config for the runner env vars.
-  // On reconnect failure (cold path), we already have the config ready.
+  // Start MCP + plugin + auth resolution eagerly so results are ready for both hot and cold paths.
   const mcpPromise = buildMcpConfig(params.agent, params.tenantId);
   const pluginPromise = fetchPluginContent(params.agent.plugins ?? []);
   const authPromise = resolveSandboxAuth(params.tenantId as TenantId, effectiveRunner);

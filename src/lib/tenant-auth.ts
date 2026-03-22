@@ -22,6 +22,15 @@ const SubscriptionRow = z.object({
   subscription_token_expires_at: z.coerce.string().nullable().default(null),
 });
 
+function gatewayAuth(): SandboxAuth {
+  return {
+    anthropicAuthToken: getEnv().AI_GATEWAY_API_KEY,
+    anthropicBaseUrl: "https://ai-gateway.vercel.sh",
+    isSubscription: false,
+    extraAllowedHostnames: [],
+  };
+}
+
 // Allowed hostnames for subscription base URL (SSRF mitigation)
 const ALLOWED_BASE_HOSTNAMES = new Set([
   "api.claude.ai",
@@ -42,12 +51,7 @@ export async function resolveSandboxAuth(
 
   // Non-Claude models always use AI Gateway — subscription token is Claude-only
   if (runnerType !== "claude-agent-sdk") {
-    return {
-      anthropicAuthToken: env.AI_GATEWAY_API_KEY,
-      anthropicBaseUrl: "https://ai-gateway.vercel.sh",
-      isSubscription: false,
-      extraAllowedHostnames: [],
-    };
+    return gatewayAuth();
   }
 
   // Check cache (keyed by tenantId, only for Claude runner)
@@ -69,12 +73,7 @@ export async function resolveSandboxAuth(
     if (row.subscription_token_expires_at) {
       const expiresAt = new Date(row.subscription_token_expires_at);
       if (expiresAt.getTime() < Date.now()) {
-        auth = {
-          anthropicAuthToken: env.AI_GATEWAY_API_KEY,
-          anthropicBaseUrl: "https://ai-gateway.vercel.sh",
-          isSubscription: false,
-          extraAllowedHostnames: [],
-        };
+        auth = gatewayAuth();
         authCache.set(tenantId, { auth, expiresAt: Date.now() + AUTH_CACHE_TTL });
         return auth;
       }
@@ -112,12 +111,7 @@ export async function resolveSandboxAuth(
       extraAllowedHostnames: hostname === "ai-gateway.vercel.sh" ? [] : [hostname],
     };
   } else {
-    auth = {
-      anthropicAuthToken: env.AI_GATEWAY_API_KEY,
-      anthropicBaseUrl: "https://ai-gateway.vercel.sh",
-      isSubscription: false,
-      extraAllowedHostnames: [],
-    };
+    auth = gatewayAuth();
   }
 
   authCache.set(tenantId, { auth, expiresAt: Date.now() + AUTH_CACHE_TTL });
