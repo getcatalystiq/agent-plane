@@ -36,9 +36,13 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
   const [logoUrl, setLogoUrl] = useState(tenant.logo_url ?? "");
   const [subscriptionToken, setSubscriptionToken] = useState("");
   const [subscriptionBaseUrl, setSubscriptionBaseUrl] = useState(tenant.subscription_base_url ?? "");
-  const [subscriptionExpiresAt, setSubscriptionExpiresAt] = useState(
-    tenant.subscription_token_expires_at ? tenant.subscription_token_expires_at.split("T")[0] : "",
-  );
+  const [subscriptionExpiresAt, setSubscriptionExpiresAt] = useState(() => {
+    if (tenant.subscription_token_expires_at) return tenant.subscription_token_expires_at.split("T")[0];
+    const d = new Date();
+    d.setFullYear(d.getFullYear() + 1);
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().split("T")[0];
+  });
   const [hasToken, setHasToken] = useState(tenant.has_subscription_token);
   const [tokenError, setTokenError] = useState("");
   const [showTokenHelp, setShowTokenHelp] = useState(false);
@@ -119,8 +123,8 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
     <div className="space-y-6">
       {/* Company Details */}
       <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <div className="flex items-center gap-2 mb-1">
-          <SectionHeader title="Company Details" />
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-lg font-semibold">Company Details</h2>
           <Badge variant={tenant.status === "active" ? "default" : "destructive"}>
             {tenant.status}
           </Badge>
@@ -194,8 +198,8 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
 
       {/* Claude Subscription */}
       <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <div className="flex items-center gap-2 mb-1">
-          <SectionHeader title="Claude Subscription" />
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-lg font-semibold">Claude Subscription</h2>
           <button
             type="button"
             onClick={() => setShowTokenHelp(!showTokenHelp)}
