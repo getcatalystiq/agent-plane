@@ -30,9 +30,11 @@ interface AvailablePlugin {
 
 export function PluginsManager({
   agentId,
+  tenantId,
   initialPlugins,
 }: {
   agentId: string;
+  tenantId: string;
   initialPlugins: AgentPlugin[];
 }) {
   const router = useRouter();
@@ -58,7 +60,7 @@ export function PluginsManager({
 
   // Fetch marketplaces on mount for name display
   useEffect(() => {
-    fetch("/api/admin/plugin-marketplaces")
+    fetch(`/api/admin/plugin-marketplaces?tenant_id=${tenantId}`)
       .then((r) => r.json())
       .then((data) => {
         const list: Marketplace[] = data.data ?? [];

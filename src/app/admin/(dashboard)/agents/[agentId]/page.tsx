@@ -79,7 +79,7 @@ export default async function AgentDetailPage({
           <SkillsEditor agentId={agent.id} initialSkills={agent.skills} />
         }
         plugins={
-          <PluginsManager agentId={agent.id} initialPlugins={agent.plugins} />
+          <PluginsManager agentId={agent.id} tenantId={agent.tenant_id} initialPlugins={agent.plugins} />
         }
         schedules={
           <ScheduleEditor
