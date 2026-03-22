@@ -138,6 +138,7 @@ export interface SandboxConfig {
   runToken?: string;
   maxRuntimeSeconds?: number;
   aiGatewayApiKey: string;
+  auth?: import("@/lib/tenant-auth").SandboxAuth;
   mcpServers?: Record<string, McpServerConfig>;
   mcpErrors?: string[];
   pluginFiles?: Array<{ path: string; content: string }>;
@@ -317,10 +318,15 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
     AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
   };
 
-  env.ANTHROPIC_BASE_URL = "https://ai-gateway.vercel.sh";
-  env.ANTHROPIC_AUTH_TOKEN = config.aiGatewayApiKey;
-  env.ANTHROPIC_API_KEY = "";
-  env.AI_GATEWAY_API_KEY = config.aiGatewayApiKey;
+  if (config.auth) {
+    const { buildSandboxAuthEnv } = await import("@/lib/tenant-auth");
+    Object.assign(env, buildSandboxAuthEnv(config.auth));
+  } else {
+    env.ANTHROPIC_BASE_URL = "https://ai-gateway.vercel.sh";
+    env.ANTHROPIC_AUTH_TOKEN = config.aiGatewayApiKey;
+    env.ANTHROPIC_API_KEY = "";
+    env.AI_GATEWAY_API_KEY = config.aiGatewayApiKey;
+  }
   env.ENABLE_TOOL_SEARCH = "true";
   if (config.runToken) {
     env.AGENT_PLANE_RUN_TOKEN = config.runToken;
@@ -722,6 +728,7 @@ export interface SessionSandboxConfig {
   sessionId: string;
   platformApiUrl: string;
   aiGatewayApiKey: string;
+  auth?: import("@/lib/tenant-auth").SandboxAuth;
   mcpServers?: Record<string, McpServerConfig>;
   mcpErrors?: string[];
   pluginFiles?: Array<{ path: string; content: string }>;
@@ -865,12 +872,17 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     AGENT_PLANE_AGENT_ID: config.agent.id,
     AGENT_PLANE_TENANT_ID: config.tenantId,
     AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
-    ANTHROPIC_BASE_URL: "https://ai-gateway.vercel.sh",
-    ANTHROPIC_AUTH_TOKEN: config.aiGatewayApiKey,
-    ANTHROPIC_API_KEY: "",
-    AI_GATEWAY_API_KEY: config.aiGatewayApiKey,
     ENABLE_TOOL_SEARCH: "true",
   };
+  if (config.auth) {
+    const { buildSandboxAuthEnv } = await import("@/lib/tenant-auth");
+    Object.assign(baseEnv, buildSandboxAuthEnv(config.auth));
+  } else {
+    baseEnv.ANTHROPIC_BASE_URL = "https://ai-gateway.vercel.sh";
+    baseEnv.ANTHROPIC_AUTH_TOKEN = config.aiGatewayApiKey;
+    baseEnv.ANTHROPIC_API_KEY = "";
+    baseEnv.AI_GATEWAY_API_KEY = config.aiGatewayApiKey;
+  }
 
   // Build MCP servers config — inject agentco bridge alongside other servers
   const mcpServersForSession: Record<string, unknown> = { ...config.mcpServers };
@@ -1088,12 +1100,17 @@ export async function reconnectSessionSandbox(
       AGENT_PLANE_AGENT_ID: config.agent.id,
       AGENT_PLANE_TENANT_ID: config.tenantId,
       AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
-      ANTHROPIC_BASE_URL: "https://ai-gateway.vercel.sh",
-      ANTHROPIC_AUTH_TOKEN: config.aiGatewayApiKey,
-      ANTHROPIC_API_KEY: "",
-      AI_GATEWAY_API_KEY: config.aiGatewayApiKey,
       ENABLE_TOOL_SEARCH: "true",
     };
+    if (config.auth) {
+      const { buildSandboxAuthEnv } = await import("@/lib/tenant-auth");
+      Object.assign(baseEnv, buildSandboxAuthEnv(config.auth));
+    } else {
+      baseEnv.ANTHROPIC_BASE_URL = "https://ai-gateway.vercel.sh";
+      baseEnv.ANTHROPIC_AUTH_TOKEN = config.aiGatewayApiKey;
+      baseEnv.ANTHROPIC_API_KEY = "";
+      baseEnv.AI_GATEWAY_API_KEY = config.aiGatewayApiKey;
+    }
     if (hasMcp) {
       baseEnv.MCP_SERVERS_JSON = JSON.stringify(config.mcpServers);
     }

@@ -5,6 +5,12 @@ import type { RunId, RunStatus, TenantId } from "./types";
 
 const MAX_TRANSCRIPT_EVENTS = 10_000;
 
+// --- Secret Scrubbing ---
+export function scrubSecrets(text: string): string {
+  // Broad pattern covers all Anthropic token prefixes (oat01, api03, sid01, future versions)
+  return text.replace(/sk-ant-[a-z0-9]+-[A-Za-z0-9_-]+/g, "[REDACTED]");
+}
+
 /**
  * Parse the last NDJSON line of a transcript to extract run result metadata.
  * Shared between run-executor and session-executor.
@@ -102,7 +108,7 @@ export async function* captureTranscript(
       try {
         const parsed = JSON.parse(trimmed);
         if (parsed.type === "result" || parsed.type === "error") {
-          const processed = await processLineAssets(trimmed, tenantId, runId);
+          const processed = scrubSecrets(await processLineAssets(trimmed, tenantId, runId));
           chunks.push(processed);
           yield processed;
           continue;
@@ -110,9 +116,9 @@ export async function* captureTranscript(
       } catch {
         // Not JSON
       }
-      yield trimmed;
+      yield scrubSecrets(trimmed);
     } else {
-      const processed = await processLineAssets(trimmed, tenantId, runId);
+      const processed = scrubSecrets(await processLineAssets(trimmed, tenantId, runId));
       const isTextDelta = (() => {
         try { return JSON.parse(processed).type === "text_delta"; } catch { return false; }
       })();

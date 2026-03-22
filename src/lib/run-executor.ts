@@ -1,6 +1,8 @@
 import { createSandbox, type SandboxInstance } from "@/lib/sandbox";
 import { buildMcpConfig, type CallbackData } from "@/lib/mcp";
 import { fetchPluginContent } from "@/lib/plugins";
+import { resolveSandboxAuth } from "@/lib/tenant-auth";
+import { resolveEffectiveRunner } from "@/lib/models";
 import { transitionRunStatus } from "@/lib/runs";
 import { uploadTranscript } from "@/lib/transcripts";
 import { generateRunToken } from "@/lib/crypto";
@@ -41,9 +43,11 @@ export async function prepareRunExecution(
 ): Promise<RunExecutionResult> {
   const { agent, tenantId, runId, prompt, platformApiUrl, effectiveBudget, effectiveMaxTurns, maxRuntimeSeconds, extraAllowedHostnames, callbackData } = params;
 
-  const [mcpResult, pluginResult] = await Promise.all([
+  const effectiveRunner = resolveEffectiveRunner(agent.model, agent.runner);
+  const [mcpResult, pluginResult, auth] = await Promise.all([
     buildMcpConfig(agent, tenantId),
     fetchPluginContent(agent.plugins ?? []),
+    resolveSandboxAuth(tenantId as TenantId, effectiveRunner),
   ]);
   if (mcpResult.errors.length > 0) {
     logger.warn("MCP config errors", { run_id: runId, errors: mcpResult.errors });
@@ -64,10 +68,11 @@ export async function prepareRunExecution(
     runToken,
     maxRuntimeSeconds,
     aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+    auth,
     mcpServers: mcpResult.servers,
     mcpErrors: mcpResult.errors,
     pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],
-    extraAllowedHostnames,
+    extraAllowedHostnames: [...(extraAllowedHostnames ?? []), ...auth.extraAllowedHostnames],
     callbackData,
   });
 

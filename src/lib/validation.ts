@@ -335,6 +335,8 @@ export const TenantRow = z.object({
   current_month_spend: z.coerce.number(),
   timezone: z.string().default("UTC"),
   logo_url: z.string().nullable().default(null),
+  subscription_base_url: z.string().nullable().default(null),
+  subscription_token_expires_at: z.coerce.string().nullable().default(null),
   spend_period_start: z.coerce.string(),
   created_at: z.coerce.string(),
 });
