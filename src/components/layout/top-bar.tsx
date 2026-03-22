@@ -11,6 +11,7 @@ const ROUTE_LABELS: Record<string, string> = {
   "/admin/mcp-servers": "Custom Connectors",
   "/admin/plugin-marketplaces": "Plugins",
   "/admin/runs": "Runs",
+  "/admin/sessions": "Sessions",
   "/admin/tenants": "Tenants",
   "/admin/settings": "Settings",
 };
