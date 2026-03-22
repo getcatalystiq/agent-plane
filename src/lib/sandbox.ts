@@ -225,6 +225,8 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   const networkPolicy = {
     allow: [
       "ai-gateway.vercel.sh",
+      "*.claude.ai",
+      "api.anthropic.com",
       "*.composio.dev",
       "*.firecrawl.dev",
       "*.githubusercontent.com",
@@ -797,7 +799,7 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
   const networkPolicy = {
     allow: [
       "ai-gateway.vercel.sh",
-      "api.claude.ai",
+      "*.claude.ai",
       "api.anthropic.com",
       "*.composio.dev",
       "*.firecrawl.dev",

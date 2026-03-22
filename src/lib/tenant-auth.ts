@@ -126,17 +126,18 @@ export function invalidateAuthCache(tenantId: string): void {
 /** Build the auth-related env vars for sandbox injection. */
 export function buildSandboxAuthEnv(auth: SandboxAuth): Record<string, string> {
   const env: Record<string, string> = {
-    ANTHROPIC_BASE_URL: auth.anthropicBaseUrl,
     ANTHROPIC_API_KEY: "",
     // Always set AI_GATEWAY_API_KEY — needed for Vercel AI SDK (non-Anthropic models on same tenant)
     AI_GATEWAY_API_KEY: getEnv().AI_GATEWAY_API_KEY,
   };
   if (auth.isSubscription) {
-    // Claude Code CLI reads CLAUDE_CODE_OAUTH_TOKEN for subscription/OAuth token auth
+    // Claude Code CLI reads CLAUDE_CODE_OAUTH_TOKEN for subscription/OAuth token auth.
+    // Do NOT set ANTHROPIC_BASE_URL — Claude Code auto-detects api.claude.ai from the token.
     env.CLAUDE_CODE_OAUTH_TOKEN = auth.anthropicAuthToken;
     env.AGENT_PLANE_BILLING_SOURCE = "subscription";
   } else {
-    // AI Gateway uses ANTHROPIC_AUTH_TOKEN (Bearer token for gateway auth)
+    // AI Gateway: set base URL + auth token
+    env.ANTHROPIC_BASE_URL = auth.anthropicBaseUrl;
     env.ANTHROPIC_AUTH_TOKEN = auth.anthropicAuthToken;
   }
   return env;
