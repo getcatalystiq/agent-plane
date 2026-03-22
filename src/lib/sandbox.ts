@@ -617,6 +617,13 @@ function emit(event) {
   console.log(line);
   appendFileSync(transcriptPath, line + '\\n');
 }
+
+// Debug: log auth env vars (censored) so we can verify what sandbox received
+emit({ type: 'debug', auth: {
+  ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '(unset)',
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? \`set(\${process.env.ANTHROPIC_API_KEY.length} chars)\` : '(empty)',
+  ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ? \`set(\${process.env.ANTHROPIC_AUTH_TOKEN.length} chars)\` : '(empty)',
+}});
 `;
 }
 
