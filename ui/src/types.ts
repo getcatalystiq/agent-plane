@@ -1,3 +1,63 @@
+/** Minimal stream event types used by the playground UI. */
+export interface PlaygroundTextDeltaEvent {
+  type: "text_delta";
+  text: string;
+}
+
+export interface PlaygroundRunStartedEvent {
+  type: "run_started";
+  run_id: string;
+  agent_id: string;
+  model: string;
+  timestamp: string;
+}
+
+export interface PlaygroundToolUseEvent {
+  type: "tool_use";
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface PlaygroundToolResultEvent {
+  type: "tool_result";
+  [key: string]: unknown;
+}
+
+export interface PlaygroundResultEvent {
+  type: "result";
+  subtype: string;
+  total_cost_usd?: number;
+  num_turns?: number;
+  duration_ms?: number;
+}
+
+export interface PlaygroundErrorEvent {
+  type: "error";
+  error: string;
+  code?: string;
+}
+
+export interface PlaygroundSessionCreatedEvent {
+  type: "session_created";
+  session_id: string;
+}
+
+export type PlaygroundStreamEvent =
+  | PlaygroundTextDeltaEvent
+  | PlaygroundRunStartedEvent
+  | PlaygroundToolUseEvent
+  | PlaygroundToolResultEvent
+  | PlaygroundResultEvent
+  | PlaygroundErrorEvent
+  | PlaygroundSessionCreatedEvent
+  | { type: string; [key: string]: unknown };
+
+/** Async iterable stream of events (compatible with SDK RunStream). */
+export interface PlaygroundStream extends AsyncIterable<PlaygroundStreamEvent> {
+  run_id: string | null;
+  abort(reason?: unknown): void;
+}
+
 /**
  * Structural interface for the AgentPlane SDK client.
  * Declares all methods the UI actually uses, avoiding a hard compile-time
@@ -35,6 +95,8 @@ export interface AgentPlaneClient {
     list(params?: Record<string, unknown>): Promise<unknown>;
     get(sessionId: string): Promise<unknown>;
     stop(sessionId: string): Promise<unknown>;
+    create(params: { agent_id: string; prompt?: string }, options?: { signal?: AbortSignal }): Promise<unknown | PlaygroundStream>;
+    sendMessage(sessionId: string, params: { prompt: string }, options?: { signal?: AbortSignal }): Promise<PlaygroundStream>;
   };
   connectors: {
     list(agentId: string): Promise<unknown[]>;

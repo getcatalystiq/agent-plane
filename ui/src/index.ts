@@ -4,6 +4,8 @@ export type {
   LinkComponentProps,
   NavigationProps,
   AgentPlaneProviderProps,
+  PlaygroundStream,
+  PlaygroundStreamEvent,
 } from "./types";
 
 // Provider
@@ -113,6 +115,9 @@ export { AgentScheduleForm } from "./components/pages/agent-schedule-form";
 export { AgentRuns } from "./components/pages/agent-runs";
 
 export { AgentA2aInfo } from "./components/pages/agent-a2a-info";
+
+export { PlaygroundPage } from "./components/pages/playground-page";
+export type { PlaygroundPageProps } from "./components/pages/playground-page";
 
 // UI Components (extracted for agent pages)
 export { ModelSelector } from "./components/ui/model-selector";
