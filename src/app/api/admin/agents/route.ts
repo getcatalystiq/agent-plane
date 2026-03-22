@@ -3,19 +3,8 @@ import { query, queryOne, execute } from "@/db";
 import { PaginationSchema, CreateAgentSchema, AgentRow, TenantRow } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
 import { generateId } from "@/lib/crypto";
+import { slugifyName, isReservedSlug } from "@/lib/agents";
 import { z } from "zod";
-
-const RESERVED_SLUGS = new Set(["well-known", "api", "admin", "health", "jsonrpc"]);
-
-function slugifyName(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/[\s_]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
 
 export const dynamic = "force-dynamic";
 
@@ -76,7 +65,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 
   // Derive slug from name if not provided; fallback to agent-{id} for edge cases
   const rawSlug = (input as { slug?: string }).slug ?? (slugifyName(input.name) || `agent-${id.slice(0, 8)}`);
-  if (RESERVED_SLUGS.has(rawSlug)) {
+  if (isReservedSlug(rawSlug)) {
     return NextResponse.json({ error: { code: "validation_error", message: `Slug '${rawSlug}' is reserved` } }, { status: 422 });
   }
 
