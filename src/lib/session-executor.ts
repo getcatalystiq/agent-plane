@@ -6,6 +6,8 @@ import {
 } from "@/lib/sandbox";
 import { buildMcpConfig } from "@/lib/mcp";
 import { fetchPluginContent } from "@/lib/plugins";
+import { resolveSandboxAuth } from "@/lib/tenant-auth";
+import { resolveEffectiveRunner } from "@/lib/models";
 import { createRun, transitionRunStatus } from "@/lib/runs";
 import {
   transitionSessionStatus,
@@ -52,16 +54,19 @@ export async function prepareSessionSandbox(
   session: Session,
 ): Promise<SessionSandboxInstance> {
   const env = getEnv();
+  const effectiveRunner = resolveEffectiveRunner(params.agent.model, params.agent.runner);
 
   // Hot path: try to reconnect to existing sandbox.
-  // Run buildMcpConfig + fetchPluginContent in PARALLEL with the reconnect attempt.
+  // Run buildMcpConfig + fetchPluginContent + resolveSandboxAuth in PARALLEL with the reconnect attempt.
   // On reconnect success, we still need MCP config for the runner env vars.
   // On reconnect failure (cold path), we already have the config ready.
   const mcpPromise = buildMcpConfig(params.agent, params.tenantId);
   const pluginPromise = fetchPluginContent(params.agent.plugins ?? []);
+  const authPromise = resolveSandboxAuth(params.tenantId as TenantId, effectiveRunner);
 
   if (session.sandbox_id) {
-    // Race the reconnect against the MCP/plugin fetch — reconnect is fast if sandbox exists
+    // Resolve auth first (usually cached, sub-ms), then race reconnect against MCP/plugin fetch
+    const auth = await authPromise;
     const [reconnectResult, mcpResult, pluginResult] = await Promise.all([
       reconnectSessionSandbox(session.sandbox_id, {
         agent: {
@@ -73,6 +78,7 @@ export async function prepareSessionSandbox(
         sessionId: params.sessionId,
         platformApiUrl: params.platformApiUrl,
         aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+        auth,
         // MCP config will be applied after reconnect
         mcpServers: undefined,
         mcpErrors: [],
@@ -126,6 +132,7 @@ export async function prepareSessionSandbox(
       sessionId: params.sessionId,
       platformApiUrl: params.platformApiUrl,
       aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+      auth,
       mcpServers: mcpResult.servers,
       mcpErrors: mcpResult.errors,
       pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],
@@ -143,7 +150,7 @@ export async function prepareSessionSandbox(
   }
 
   // No existing sandbox — pure cold path
-  const [mcpResult, pluginResult] = await Promise.all([mcpPromise, pluginPromise]);
+  const [mcpResult, pluginResult, auth] = await Promise.all([mcpPromise, pluginPromise, authPromise]);
 
   if (mcpResult.errors.length > 0) {
     logger.warn("MCP config errors for session", {
@@ -162,6 +169,7 @@ export async function prepareSessionSandbox(
     sessionId: params.sessionId,
     platformApiUrl: params.platformApiUrl,
     aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+    auth,
     mcpServers: mcpResult.servers,
     mcpErrors: mcpResult.errors,
     pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],

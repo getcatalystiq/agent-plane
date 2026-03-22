@@ -1,11 +1,14 @@
 import { cookies } from "next/headers";
 import { query, queryOne } from "@/db";
 import { TenantRow, ApiKeyRow } from "@/lib/validation";
+import { z } from "zod";
 import { CompanyForm } from "./company-form";
 import { ApiKeysSection } from "./api-keys-section";
 import { DeleteCompanyButton } from "./delete-company-button";
 
 export const dynamic = "force-dynamic";
+
+const TenantWithTokenFlag = TenantRow.extend({ has_subscription_token: z.boolean() });
 
 export default async function SettingsPage() {
   const cookieStore = await cookies();
@@ -19,7 +22,15 @@ export default async function SettingsPage() {
     );
   }
 
-  const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [tenantId]);
+  const tenant = await queryOne(
+    TenantWithTokenFlag,
+    `SELECT id, name, slug, settings, monthly_budget_usd, status, current_month_spend,
+            timezone, logo_url, subscription_base_url, subscription_token_expires_at,
+            spend_period_start, created_at,
+            subscription_token_enc IS NOT NULL AS has_subscription_token
+     FROM tenants WHERE id = $1`,
+    [tenantId],
+  );
 
   if (!tenant) {
     return (
@@ -47,6 +58,9 @@ export default async function SettingsPage() {
         timezone: tenant.timezone,
         monthly_budget_usd: tenant.monthly_budget_usd,
         logo_url: tenant.logo_url,
+        has_subscription_token: tenant.has_subscription_token,
+        subscription_base_url: tenant.subscription_base_url,
+        subscription_token_expires_at: tenant.subscription_token_expires_at,
       }} />
 
       {/* API Keys */}
