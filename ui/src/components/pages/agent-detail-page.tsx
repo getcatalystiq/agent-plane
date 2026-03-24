@@ -30,6 +30,8 @@ interface AgentDetailData {
   plugins: any[];
   composio_toolkits: string[];
   composio_allowed_tools: string[];
+  soul_md: string | null;
+  identity_md: string | null;
   a2a_enabled: boolean;
   a2a_tags?: string[];
   [key: string]: unknown;

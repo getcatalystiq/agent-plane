@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useAgentPlaneClient } from "../../hooks/use-client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import { Select } from "../ui/select";
 import { SectionHeader } from "../ui/section-header";
 import { FormField } from "../ui/form-field";
@@ -20,6 +21,8 @@ interface Agent {
   max_turns: number;
   max_budget_usd: number;
   max_runtime_seconds: number;
+  soul_md?: string | null;
+  identity_md?: string | null;
 }
 
 interface AgentEditFormProps {
@@ -37,6 +40,8 @@ export function AgentEditForm({ agent, onSaved }: AgentEditFormProps) {
   const [maxTurns, setMaxTurns] = useState(agent.max_turns.toString());
   const [maxBudget, setMaxBudget] = useState(agent.max_budget_usd.toString());
   const [maxRuntime, setMaxRuntime] = useState(Math.floor(agent.max_runtime_seconds / 60).toString());
+  const [soulMd, setSoulMd] = useState(agent.soul_md ?? "");
+  const [identityMd, setIdentityMd] = useState(agent.identity_md ?? "");
   const [saving, setSaving] = useState(false);
 
   const isDirty =
@@ -47,7 +52,9 @@ export function AgentEditForm({ agent, onSaved }: AgentEditFormProps) {
     permissionMode !== agent.permission_mode ||
     maxTurns !== agent.max_turns.toString() ||
     maxBudget !== agent.max_budget_usd.toString() ||
-    maxRuntime !== Math.floor(agent.max_runtime_seconds / 60).toString();
+    maxRuntime !== Math.floor(agent.max_runtime_seconds / 60).toString() ||
+    soulMd !== (agent.soul_md ?? "") ||
+    identityMd !== (agent.identity_md ?? "");
 
   const [error, setError] = useState("");
 
@@ -64,6 +71,8 @@ export function AgentEditForm({ agent, onSaved }: AgentEditFormProps) {
         max_turns: parseInt(maxTurns) || agent.max_turns,
         max_budget_usd: parseFloat(maxBudget) || agent.max_budget_usd,
         max_runtime_seconds: (parseInt(maxRuntime) || Math.floor(agent.max_runtime_seconds / 60)) * 60,
+        soul_md: soulMd || null,
+        identity_md: identityMd || null,
       });
       onSaved?.();
     } catch (err: any) {
@@ -166,6 +175,43 @@ export function AgentEditForm({ agent, onSaved }: AgentEditFormProps) {
           </div>
         </div>
       </div>
+    <div className="rounded-lg border border-muted-foreground/25 p-5">
+      <SectionHeader title="Identity" />
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <FormField label="SOUL.md">
+              <Textarea
+                value={soulMd}
+                onChange={(e) => setSoulMd(e.target.value)}
+                placeholder={"## Voice & Tone\nDirect, concise, technical.\n\n## Values\nClarity over completeness.\n\n## Stance\nProactive problem-solver.\n\n## Boundaries\n- Never modify production data directly\n\n## Essence\nA focused engineering assistant."}
+                rows={10}
+                className="font-mono text-sm"
+                disabled={saving}
+              />
+              <span className="text-xs text-muted-foreground mt-1 block">
+                {soulMd.split(/\s+/).filter(Boolean).length} words
+              </span>
+            </FormField>
+          </div>
+          <div>
+            <FormField label="IDENTITY.md">
+              <Textarea
+                value={identityMd}
+                onChange={(e) => setIdentityMd(e.target.value)}
+                placeholder={"- **Communication Verbosity:** concise\n- **Communication Tone:** direct\n- **Decision Autonomy:** high\n- **Risk Tolerance:** moderate\n- **Collaboration Mode:** autonomous\n\n## Escalation Preferences\n- Budget over $50 -> escalate\n- Breaking changes -> escalate"}
+                rows={10}
+                className="font-mono text-sm"
+                disabled={saving}
+              />
+              <span className="text-xs text-muted-foreground mt-1 block">
+                {identityMd.split(/\s+/).filter(Boolean).length} words
+              </span>
+            </FormField>
+          </div>
+        </div>
+      </div>
+    </div>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 {
   "name": "@getcatalystiq/agent-plane-ui",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Embeddable React component library for AgentPlane",
   "type": "module",
   "exports": {
