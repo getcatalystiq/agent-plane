@@ -16,6 +16,13 @@ export function buildIdentityPrefix(agent: { soul_md?: string | null; identity_m
   return [agent.soul_md, agent.identity_md].filter(Boolean).join("\n\n");
 }
 
+export function prependIdentity(prompt: string, agent: { soul_md?: string | null; identity_md?: string | null }): string {
+  const prefix = buildIdentityPrefix(agent);
+  return prefix ? `${prefix}\n\n${prompt}` : prompt;
+}
+
+export const IDENTITY_METADATA_KEY = 'soulspec:identity';
+
 // ── Enum Constants ──
 
 export const COMMUNICATION_VERBOSITY = ["concise", "detailed"] as const;

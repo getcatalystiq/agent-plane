@@ -2,6 +2,10 @@ import { z } from "zod";
 import { isValidTimezone } from "@/lib/schedule";
 import { supportsClaudeRunner, resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
 
+// --- Identity JSONB Schema (reusable for nullable JSONB object columns) ---
+
+export const identityJsonbSchema = z.unknown().transform((v) => (v && typeof v === "object" ? v : null) as Record<string, unknown> | null);
+
 // --- Runner Validation ---
 
 export const RunnerTypeSchema = z.enum(["claude-agent-sdk", "vercel-ai-sdk"]);
@@ -383,7 +387,7 @@ export const AgentRow = z.object({
   slug: z.string().catch(""),
   soul_md: z.string().nullable().default(null),
   identity_md: z.string().nullable().default(null),
-  identity: z.unknown().transform((v) => (v && typeof v === "object" ? v : null) as Record<string, unknown> | null).default(null),
+  identity: identityJsonbSchema.default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });

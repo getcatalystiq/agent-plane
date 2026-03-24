@@ -22,10 +22,12 @@ import { createRun, getRun, transitionRunStatus } from "@/lib/runs";
 import { prepareRunExecution, finalizeRun } from "@/lib/run-executor";
 import type { CallbackData } from "@/lib/mcp";
 import { reconnectSandbox } from "@/lib/sandbox";
+import { IDENTITY_METADATA_KEY } from "@/lib/identity";
 import { logger } from "@/lib/logger";
 import type { RunStatus, TenantId, AgentId, RunId } from "@/lib/types";
 import type { AgentInternal } from "@/lib/validation";
 import { z } from "zod";
+import { identityJsonbSchema } from "@/lib/validation";
 
 // --- Status Mapping ---
 
@@ -128,7 +130,7 @@ const A2aAgentRow = z.object({
   a2a_tags: z.array(z.string()).default([]),
   skills: z.unknown().default([]),
   plugins: z.unknown().default([]),
-  identity: z.unknown().transform((v) => (v && typeof v === "object" ? v : null) as Record<string, unknown> | null).default(null),
+  identity: identityJsonbSchema.default(null),
 });
 
 type SkillFile = { path: string; content: string };
@@ -257,7 +259,7 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
         scheme: "bearer",
       },
     },
-    ...(agent.identity ? { metadata: { "soulspec:identity": agent.identity } } : {}),
+    ...(agent.identity ? { metadata: { [IDENTITY_METADATA_KEY]: agent.identity } } : {}),
   } as AgentCard & { metadata?: Record<string, unknown> };
 }
 

@@ -3,7 +3,7 @@ import { Sandbox, Snapshot, type Command } from "@vercel/sandbox";
 import { logger } from "./logger";
 import type { McpServerConfig, CallbackData } from "./mcp";
 import { resolveEffectiveRunner } from "./models";
-import { buildIdentityPrefix } from "./identity";
+import { prependIdentity } from "./identity";
 import type { RunnerType } from "./models";
 import { buildVercelAiRunnerScript } from "./runners/vercel-ai-runner";
 import { buildVercelAiSessionRunnerScript } from "./runners/vercel-ai-session-runner";
@@ -700,8 +700,7 @@ function buildRunnerScript(config: SandboxConfig): string {
     ...((hasSkills || hasPluginContent) ? { settingSources: ["project"] } : {}),
   };
 
-  const identityPrefix = buildIdentityPrefix(config.agent);
-  const effectivePrompt = identityPrefix ? `${identityPrefix}\n\n${config.prompt}` : config.prompt;
+  const effectivePrompt = prependIdentity(config.prompt, config.agent);
 
   return `
 ${claudeSdkPreamble()}
@@ -1059,8 +1058,7 @@ function buildSessionRunnerScript(config: SessionRunnerConfig): string {
     includePartialMessages: true,
   };
 
-  const sessionIdentityPrefix = buildIdentityPrefix(config.agent);
-  const sessionEffectivePrompt = sessionIdentityPrefix ? `${sessionIdentityPrefix}\n\n${config.prompt}` : config.prompt;
+  const sessionEffectivePrompt = prependIdentity(config.prompt, config.agent);
 
   return `
 ${claudeSdkPreamble()}
