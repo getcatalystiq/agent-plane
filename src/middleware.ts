@@ -7,6 +7,10 @@ import { timingSafeEqual } from "@/lib/crypto";
 // NOTE: Uses prefix matching via startsWith — any new routes under these
 // prefixes will also bypass auth. Cron routes use CRON_SECRET verification instead.
 const PUBLIC_PATHS = ["/api/health", "/api/cron/", "/api/internal/"];
+const A2A_AGENT_CARD_RE = /^\/api\/a2a\/[^/]+\/[^/]+\/\.well-known\/agent-card\.json$/;
+const A2A_AGENTS_RE = /^\/api\/a2a\/[^/]+\/\.well-known\/agents\.json$/;
+const COMPOSIO_CALLBACK_RE = /^\/api\/agents\/[^/]+\/connectors\/[^/]+\/callback$/;
+const MCP_CALLBACK_RE = /^\/api\/mcp-servers\/[^/]+\/callback$/;
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname.startsWith(p));
@@ -63,20 +67,12 @@ export async function middleware(request: NextRequest) {
   }
 
   // A2A public endpoints (unauthenticated): agent cards + tenant discovery index
-  if (
-    /^\/api\/a2a\/[^/]+\/[^/]+\/\.well-known\/agent-card\.json$/.test(pathname) ||
-    /^\/api\/a2a\/[^/]+\/\.well-known\/agents\.json$/.test(pathname)
-  ) {
+  if (A2A_AGENT_CARD_RE.test(pathname) || A2A_AGENTS_RE.test(pathname)) {
     return NextResponse.next();
   }
 
   // OAuth callbacks are unauthenticated (redirect from external provider)
-  if (/^\/api\/agents\/[^/]+\/connectors\/[^/]+\/callback$/.test(pathname)) {
-    return NextResponse.next();
-  }
-
-  // MCP OAuth callbacks are unauthenticated (redirect from external MCP server)
-  if (/^\/api\/mcp-servers\/[^/]+\/callback$/.test(pathname)) {
+  if (COMPOSIO_CALLBACK_RE.test(pathname) || MCP_CALLBACK_RE.test(pathname)) {
     return NextResponse.next();
   }
 

@@ -29,24 +29,27 @@ const TIMEZONES = typeof Intl !== "undefined" && Intl.supportedValuesOf
   ? Intl.supportedValuesOf("timeZone")
   : ["UTC"];
 
+function toDateStr(v: string | null | undefined): string {
+  if (!v) return "";
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? "" : d.toISOString().split("T")[0];
+}
+
 export function CompanyForm({ tenant }: { tenant: Company }) {
   const router = useRouter();
+  const initialExpiresAt = toDateStr(tenant.subscription_token_expires_at) || (() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() + 1);
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().split("T")[0];
+  })();
   const [name, setName] = useState(tenant.name);
   const [budget, setBudget] = useState(tenant.monthly_budget_usd.toString());
   const [timezone, setTimezone] = useState(tenant.timezone);
   const [logoUrl, setLogoUrl] = useState(tenant.logo_url ?? "");
   const [subscriptionToken, setSubscriptionToken] = useState("");
   const [subscriptionBaseUrl, setSubscriptionBaseUrl] = useState(tenant.subscription_base_url ?? "");
-  const [subscriptionExpiresAt, setSubscriptionExpiresAt] = useState(() => {
-    if (tenant.subscription_token_expires_at) {
-      const d = new Date(tenant.subscription_token_expires_at);
-      if (!isNaN(d.getTime())) return d.toISOString().split("T")[0];
-    }
-    const d = new Date();
-    d.setFullYear(d.getFullYear() + 1);
-    d.setDate(d.getDate() - 1);
-    return d.toISOString().split("T")[0];
-  });
+  const [subscriptionExpiresAt, setSubscriptionExpiresAt] = useState(initialExpiresAt);
   const [hasToken, setHasToken] = useState(tenant.has_subscription_token);
   const [tokenError, setTokenError] = useState("");
   const [showTokenHelp, setShowTokenHelp] = useState(false);
@@ -59,7 +62,7 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
     (logoUrl || "") !== (tenant.logo_url ?? "") ||
     subscriptionToken !== "" ||
     subscriptionBaseUrl !== (tenant.subscription_base_url ?? "") ||
-    subscriptionExpiresAt !== (tenant.subscription_token_expires_at ? new Date(tenant.subscription_token_expires_at).toISOString().split("T")[0] : "");
+    subscriptionExpiresAt !== initialExpiresAt;
 
   async function handleSave() {
     setSaving(true);
@@ -77,7 +80,7 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
       if (subscriptionBaseUrl !== (tenant.subscription_base_url ?? "")) {
         payload.subscription_base_url = subscriptionBaseUrl || null;
       }
-      if (subscriptionExpiresAt !== (tenant.subscription_token_expires_at ? new Date(tenant.subscription_token_expires_at).toISOString().split("T")[0] : "")) {
+      if (subscriptionExpiresAt !== initialExpiresAt) {
         payload.subscription_token_expires_at = subscriptionExpiresAt ? new Date(subscriptionExpiresAt).toISOString() : null;
       }
       const data = await adminFetch<Record<string, unknown>>(`/tenants/${tenant.id}`, {
@@ -220,7 +223,7 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
           {hasToken && <Badge variant="default">Configured</Badge>}
           {(() => {
             if (!subscriptionExpiresAt && !tenant.subscription_token_expires_at) return null;
-            const expiryStr = subscriptionExpiresAt || (tenant.subscription_token_expires_at ? new Date(tenant.subscription_token_expires_at).toISOString().split("T")[0] : "");
+            const expiryStr = subscriptionExpiresAt || toDateStr(tenant.subscription_token_expires_at);
             if (!expiryStr) return null;
             const daysUntilExpiry = Math.ceil((new Date(expiryStr).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
             if (daysUntilExpiry <= 0) return <Badge variant="destructive">Expired</Badge>;
