@@ -2,6 +2,10 @@ import { z } from "zod";
 import { isValidTimezone } from "@/lib/schedule";
 import { supportsClaudeRunner, resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
 
+// --- Identity JSONB Schema (reusable for nullable JSONB object columns) ---
+
+export const identityJsonbSchema = z.unknown().transform((v) => (v && typeof v === "object" ? v : null) as Record<string, unknown> | null);
+
 // --- Runner Validation ---
 
 export const RunnerTypeSchema = z.enum(["claude-agent-sdk", "vercel-ai-sdk"]);
@@ -250,6 +254,8 @@ export const CreateAgentSchema = z.object({
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
   max_runtime_seconds: z.number().int().min(60).max(3600).default(600),
   a2a_enabled: z.boolean().default(false),
+  soul_md: z.string().max(50_000).nullable().optional(),
+  identity_md: z.string().max(50_000).nullable().optional(),
 }).refine(
   (data) => {
     if (data.runner === "claude-agent-sdk" && !supportsClaudeRunner(data.model)) {
@@ -284,6 +290,8 @@ export const UpdateAgentSchema = z.object({
   a2a_enabled: z.boolean(),
   a2a_tags: z.array(z.string().min(1).max(100)),
   slug: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9-]*$/, "Slug must be lowercase alphanumeric with hyphens"),
+  soul_md: z.string().max(50_000).nullable(),
+  identity_md: z.string().max(50_000).nullable(),
 }).partial();
 
 export type CreateAgentInput = z.infer<typeof CreateAgentSchema>;
@@ -377,6 +385,9 @@ export const AgentRow = z.object({
   a2a_enabled: z.boolean().default(false),
   a2a_tags: z.array(z.string()).default([]),
   slug: z.string().catch(""),
+  soul_md: z.string().nullable().default(null),
+  identity_md: z.string().nullable().default(null),
+  identity: identityJsonbSchema.default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });

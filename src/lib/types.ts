@@ -90,3 +90,5 @@ export const SESSION_VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> =
   stopped: [],
 };
 
+export type { AgentIdentity } from "@/lib/identity";
+

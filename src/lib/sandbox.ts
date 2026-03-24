@@ -3,6 +3,7 @@ import { Sandbox, Snapshot, type Command } from "@vercel/sandbox";
 import { logger } from "./logger";
 import type { McpServerConfig, CallbackData } from "./mcp";
 import { resolveEffectiveRunner } from "./models";
+import { prependIdentity } from "./identity";
 import type { RunnerType } from "./models";
 import { buildVercelAiRunnerScript } from "./runners/vercel-ai-runner";
 import { buildVercelAiSessionRunnerScript } from "./runners/vercel-ai-session-runner";
@@ -121,6 +122,8 @@ export interface SandboxConfig {
     id: string;
     name: string;
     description?: string | null;
+    soul_md?: string | null;
+    identity_md?: string | null;
     git_repo_url: string | null;
     git_branch: string;
     model: string;
@@ -697,10 +700,12 @@ function buildRunnerScript(config: SandboxConfig): string {
     ...((hasSkills || hasPluginContent) ? { settingSources: ["project"] } : {}),
   };
 
+  const effectivePrompt = prependIdentity(config.prompt, config.agent);
+
   return `
 ${claudeSdkPreamble()}
 const config = ${JSON.stringify(agentConfig)};
-const prompt = ${JSON.stringify(config.prompt)};
+const prompt = ${JSON.stringify(effectivePrompt)};
 
 async function main() {
   emit({
@@ -1053,10 +1058,12 @@ function buildSessionRunnerScript(config: SessionRunnerConfig): string {
     includePartialMessages: true,
   };
 
+  const sessionEffectivePrompt = prependIdentity(config.prompt, config.agent);
+
   return `
 ${claudeSdkPreamble()}
 const config = ${JSON.stringify(agentConfig)};
-const prompt = ${JSON.stringify(config.prompt)};
+const prompt = ${JSON.stringify(sessionEffectivePrompt)};
 const sdkSessionId = ${JSON.stringify(config.sdkSessionId)};
 
 async function main() {
