@@ -15,10 +15,13 @@ A multi-tenant platform for running AI agents in isolated [Vercel Sandboxes](htt
 - **A2A protocol** — expose agents to external A2A-compliant clients (LangGraph, CrewAI, Semantic Kernel, etc.) via Agent Cards and JSON-RPC; streaming SSE, idempotency, budget clamping
 - **Full observability** — every run stores a transcript, token usage, cost, duration, and trigger source (API/schedule/playground/chat/A2A)
 - **Playground** — test agents interactively from the admin dashboard with real-time event streaming
+- **SoulSpec v0.5 identity** — full [SoulSpec](https://clawsouls.ai/spec) compliance: SOUL.md (Personality/Tone/Principles), IDENTITY.md (Name/Role/Creature/Emoji/Vibe), STYLE.md, AGENTS.md, HEARTBEAT.md, examples; progressive disclosure (Level 1/2/3); `.soul/` directory injected into sandboxes
+- **ClawSouls registry** — import, export, publish, and validate agent personas via the [ClawSouls](https://clawsouls.ai) registry API; tenant-scoped API tokens; SoulScan verification
+- **Generate Soul** — LLM-powered generation of all SoulSpec files from agent configuration (name, description, tools, skills) via AI Gateway
 - **Multi-turn sessions** — persistent conversations with context retention across messages; sandbox kept alive between turns; automatic backup/restore on cold start
 - **Configurable runtime** — set max runtime per agent (60–3600 seconds)
 - **TypeScript SDK** — `@getcatalystiq/agent-plane` npm package with streaming, auto-polling, and typed events
-- **Admin dashboard** — manage companies, agents, runs, connectors, plugins, and schedules; tabbed agent detail; AgentCo-inspired design system
+- **Admin dashboard** — manage companies, agents, runs, connectors, plugins, and schedules; tabbed agent detail (General, Identity, Connectors, Skills, Plugins, Schedules, Runs); AgentCo-inspired design system
 
 ## How It Works
 
@@ -309,6 +312,11 @@ API keys are hashed with SHA-256 and optionally encrypted at rest with AES-256-G
 |---|---|---|
 | `POST` | `/api/admin/login` | Admin login (returns JWT) |
 | | `/api/admin/agents/*` | Agent CRUD + connectors + MCP connections + plugin suggestions |
+| `POST` | `/api/admin/agents/:id/validate-soul` | Validate SoulSpec content via ClawSouls registry |
+| `POST` | `/api/admin/agents/:id/import-soul` | Import soul from ClawSouls registry or direct upload |
+| `GET` | `/api/admin/agents/:id/export-soul` | Export agent identity as SoulSpec package |
+| `POST` | `/api/admin/agents/:id/publish-soul` | Publish soul to ClawSouls registry |
+| `POST` | `/api/admin/agents/:id/generate-soul` | Generate all SoulSpec files via AI Gateway |
 | | `/api/admin/composio/toolkits` | List available Composio toolkits |
 | | `/api/admin/composio/tools` | List tools for a toolkit |
 | | `/api/admin/models` | List available models from AI Gateway catalog |

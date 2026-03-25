@@ -266,6 +266,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Git repo agents skip snapshots (need fresh clone)
 - `ENABLE_TOOL_SEARCH=true` is set in the sandbox env to enable dynamic tool discovery for agents with many MCP tools
 - When MCP servers are present, `allowedTools` is suppressed so `mcp__*` tool names aren't blocked
+- SoulSpec identity files → `.soul/SOUL.md`, `.soul/IDENTITY.md`, `.soul/STYLE.md`, `.soul/AGENTS.md`, `.soul/HEARTBEAT.md` (injected into sandbox alongside skills/plugins)
 - Plugin skill files → `.claude/skills/<plugin-name>-<subfolder>/<filename>`; plugin agent files → `.claude/agents/<plugin-name>-<agent>.md`
 - Network allowlist: `ai-gateway.vercel.sh`, `*.composio.dev`, `*.firecrawl.dev`, `*.githubusercontent.com`, `html.duckduckgo.com`, `registry.npmjs.org`, platform API host, custom MCP server hosts, AgentCo callback hosts
 - Runner ALWAYS uploads transcript to platform via `/api/internal/runs/:id/transcript` with a run-scoped bearer token (not just detached runs)
