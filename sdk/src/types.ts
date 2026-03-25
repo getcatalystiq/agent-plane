@@ -63,6 +63,16 @@ export interface Agent {
   max_runtime_seconds: number;
   a2a_enabled: boolean;
   a2a_tags: string[];
+  soul_md: string | null;
+  identity_md: string | null;
+  style_md: string | null;
+  agents_md: string | null;
+  heartbeat_md: string | null;
+  user_template_md: string | null;
+  examples_good_md: string | null;
+  examples_bad_md: string | null;
+  soul_spec_version: string | null;
+  identity: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -83,6 +93,15 @@ export interface CreateAgentParams {
   max_budget_usd?: number | undefined;
   max_runtime_seconds?: number | undefined;
   a2a_enabled?: boolean | undefined;
+  soul_md?: string | null | undefined;
+  identity_md?: string | null | undefined;
+  style_md?: string | null | undefined;
+  agents_md?: string | null | undefined;
+  heartbeat_md?: string | null | undefined;
+  user_template_md?: string | null | undefined;
+  examples_good_md?: string | null | undefined;
+  examples_bad_md?: string | null | undefined;
+  soul_spec_version?: string | null | undefined;
 }
 
 export type UpdateAgentParams = Partial<CreateAgentParams>;
