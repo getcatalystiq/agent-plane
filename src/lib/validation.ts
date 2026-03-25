@@ -256,6 +256,13 @@ export const CreateAgentSchema = z.object({
   a2a_enabled: z.boolean().default(false),
   soul_md: z.string().max(50_000).nullable().optional(),
   identity_md: z.string().max(50_000).nullable().optional(),
+  style_md: z.string().max(50_000).nullable().optional(),
+  agents_md: z.string().max(50_000).nullable().optional(),
+  heartbeat_md: z.string().max(50_000).nullable().optional(),
+  user_template_md: z.string().max(50_000).nullable().optional(),
+  examples_good_md: z.string().max(50_000).nullable().optional(),
+  examples_bad_md: z.string().max(50_000).nullable().optional(),
+  soul_spec_version: z.string().max(10).nullable().optional(),
 }).refine(
   (data) => {
     if (data.runner === "claude-agent-sdk" && !supportsClaudeRunner(data.model)) {
@@ -292,6 +299,13 @@ export const UpdateAgentSchema = z.object({
   slug: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9-]*$/, "Slug must be lowercase alphanumeric with hyphens"),
   soul_md: z.string().max(50_000).nullable(),
   identity_md: z.string().max(50_000).nullable(),
+  style_md: z.string().max(50_000).nullable(),
+  agents_md: z.string().max(50_000).nullable(),
+  heartbeat_md: z.string().max(50_000).nullable(),
+  user_template_md: z.string().max(50_000).nullable(),
+  examples_good_md: z.string().max(50_000).nullable(),
+  examples_bad_md: z.string().max(50_000).nullable(),
+  soul_spec_version: z.string().max(10).nullable(),
 }).partial();
 
 export type CreateAgentInput = z.infer<typeof CreateAgentSchema>;
@@ -343,6 +357,7 @@ export const TenantRow = z.object({
   current_month_spend: z.coerce.number(),
   timezone: z.string().default("UTC"),
   logo_url: z.string().nullable().default(null),
+  clawsouls_api_token_enc: z.string().nullable().default(null),
   subscription_base_url: z.string().nullable().default(null),
   subscription_token_expires_at: z.coerce.string().nullable().default(null),
   spend_period_start: z.coerce.string(),
@@ -387,6 +402,13 @@ export const AgentRow = z.object({
   slug: z.string().catch(""),
   soul_md: z.string().nullable().default(null),
   identity_md: z.string().nullable().default(null),
+  style_md: z.string().nullable().default(null),
+  agents_md: z.string().nullable().default(null),
+  heartbeat_md: z.string().nullable().default(null),
+  user_template_md: z.string().nullable().default(null),
+  examples_good_md: z.string().nullable().default(null),
+  examples_bad_md: z.string().nullable().default(null),
+  soul_spec_version: z.string().nullable().default('0.5'),
   identity: identityJsonbSchema.default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),

@@ -22,7 +22,7 @@ import { createRun, getRun, transitionRunStatus } from "@/lib/runs";
 import { prepareRunExecution, finalizeRun } from "@/lib/run-executor";
 import type { CallbackData } from "@/lib/mcp";
 import { reconnectSandbox } from "@/lib/sandbox";
-import { IDENTITY_METADATA_KEY } from "@/lib/identity";
+import { IDENTITY_METADATA_KEY, IDENTITY_METADATA_KEY_V2 } from "@/lib/identity";
 import { logger } from "@/lib/logger";
 import type { RunStatus, TenantId, AgentId, RunId } from "@/lib/types";
 import type { AgentInternal } from "@/lib/validation";
@@ -232,7 +232,7 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
 
   return {
     name: agent.name,
-    description: agent.description || `${agent.name} — powered by ${tenantName}`,
+    description: (agent.identity as Record<string, any>)?.disclosure_summary || agent.description || `${agent.name} — powered by ${tenantName}`,
     url: jsonrpcUrl,
     version: "1.0.0",
     protocolVersion: "0.3.0",
@@ -259,7 +259,21 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
         scheme: "bearer",
       },
     },
-    ...(agent.identity ? { metadata: { [IDENTITY_METADATA_KEY]: agent.identity } } : {}),
+    ...(() => {
+      const identityV2 = agent.identity;
+      if (!identityV2) return {};
+      const identityCompat = {
+        name: (identityV2 as Record<string, any>)?.identity?.name ?? null,
+        role: (identityV2 as Record<string, any>)?.identity?.role ?? null,
+        description: (identityV2 as Record<string, any>)?.disclosure_summary ?? null,
+      };
+      return {
+        metadata: {
+          [IDENTITY_METADATA_KEY_V2]: identityV2,
+          [IDENTITY_METADATA_KEY]: identityCompat,
+        },
+      };
+    })(),
   } as AgentCard & { metadata?: Record<string, unknown> };
 }
 
