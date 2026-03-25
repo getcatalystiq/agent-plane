@@ -3,6 +3,7 @@ import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { UpdateAgentSchema } from "@/lib/validation";
 import { resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
+import { deriveIdentity } from "@/lib/identity";
 import { execute } from "@/db";
 import { getAgentForTenant } from "@/lib/agents";
 import { logger } from "@/lib/logger";
@@ -58,6 +59,15 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
     max_budget_usd: input.max_budget_usd,
     max_runtime_seconds: input.max_runtime_seconds,
     a2a_enabled: input.a2a_enabled,
+    soul_md: input.soul_md,
+    identity_md: input.identity_md,
+    style_md: input.style_md,
+    agents_md: input.agents_md,
+    heartbeat_md: input.heartbeat_md,
+    user_template_md: input.user_template_md,
+    examples_good_md: input.examples_good_md,
+    examples_bad_md: input.examples_bad_md,
+    soul_spec_version: input.soul_spec_version,
   };
 
   for (const [key, value] of Object.entries(fields)) {
@@ -66,6 +76,17 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
       params.push(value);
       paramIdx++;
     }
+  }
+
+  // Derive identity JSONB when any identity-related markdown changes
+  const identityFields = ["soul_md", "identity_md", "style_md", "agents_md", "heartbeat_md", "user_template_md", "examples_good_md", "examples_bad_md"] as const;
+  if (identityFields.some(f => (input as Record<string, unknown>)[f] !== undefined)) {
+    const cur = current as Record<string, unknown>;
+    const eff = (f: string) => (input as Record<string, unknown>)[f] !== undefined ? (input as Record<string, unknown>)[f] as string | null : cur[f] as string | null;
+    const parseResult = deriveIdentity(eff("soul_md"), eff("identity_md"), eff("style_md"), eff("agents_md"), eff("heartbeat_md"), eff("user_template_md"), eff("examples_good_md"), eff("examples_bad_md"));
+    setClauses.push(`identity = $${paramIdx}::jsonb`);
+    params.push(parseResult.identity ? JSON.stringify(parseResult.identity) : null);
+    paramIdx++;
   }
 
   // Skills and plugins need a JSONB cast

@@ -15,6 +15,7 @@ import { ImportSoulDialog } from "./import-soul-dialog";
 
 interface Agent {
   id: string;
+  name: string;
   soul_md: string | null;
   identity_md: string | null;
   style_md: string | null;
