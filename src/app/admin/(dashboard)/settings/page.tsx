@@ -4,11 +4,12 @@ import { TenantRow, ApiKeyRow } from "@/lib/validation";
 import { z } from "zod";
 import { CompanyForm } from "./company-form";
 import { ApiKeysSection } from "./api-keys-section";
+import { ClawSoulsSection } from "./clawsouls-section";
 import { DeleteCompanyButton } from "./delete-company-button";
 
 export const dynamic = "force-dynamic";
 
-const TenantWithTokenFlag = TenantRow.extend({ has_subscription_token: z.boolean() });
+const TenantWithTokenFlag = TenantRow.extend({ has_subscription_token: z.boolean(), has_clawsouls_token: z.boolean() });
 
 export default async function SettingsPage() {
   const cookieStore = await cookies();
@@ -27,7 +28,8 @@ export default async function SettingsPage() {
     `SELECT id, name, slug, settings, monthly_budget_usd, status, current_month_spend,
             timezone, logo_url, subscription_base_url, subscription_token_expires_at,
             spend_period_start, created_at,
-            subscription_token_enc IS NOT NULL AS has_subscription_token
+            subscription_token_enc IS NOT NULL AS has_subscription_token,
+            clawsouls_api_token_enc IS NOT NULL AS has_clawsouls_token
      FROM tenants WHERE id = $1`,
     [tenantId],
   );
@@ -65,6 +67,9 @@ export default async function SettingsPage() {
 
       {/* API Keys */}
       <ApiKeysSection tenantId={tenantId} initialKeys={apiKeys} />
+
+      {/* ClawSouls Registry */}
+      <ClawSoulsSection tenantId={tenant.id} hasToken={tenant.has_clawsouls_token} />
 
       {/* Danger Zone */}
       <div className="rounded-lg border border-destructive/30 p-5">

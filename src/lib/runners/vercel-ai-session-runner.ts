@@ -10,6 +10,7 @@
  * provides security, not the exec method.
  */
 import type { SandboxConfig } from "../sandbox";
+import { buildIdentityPrefix } from "../identity";
 import { buildSkillsPrompt, buildSkillRegistry } from "./vercel-ai-runner";
 import {
   buildPreamble,
@@ -31,6 +32,11 @@ interface SessionRunnerConfig {
 
 export function buildVercelAiSessionRunnerScript(config: SessionRunnerConfig): string {
   const systemPromptParts: string[] = [];
+
+  const identityPrefix = buildIdentityPrefix(config.agent);
+  if (identityPrefix) {
+    systemPromptParts.push(identityPrefix);
+  }
 
   if (config.agent.description) {
     systemPromptParts.push(config.agent.description);

@@ -12,6 +12,7 @@ import { ScheduleEditor } from "./schedule-editor";
 import { AgentHeaderActions } from "./header-actions";
 import { AgentTabs } from "./agent-tabs";
 import { AgentRuns } from "./agent-runs";
+import { IdentityTab } from "./identity-tab";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 
 export const dynamic = "force-dynamic";
@@ -68,6 +69,9 @@ export default async function AgentDetailPage({
               />
             )}
           </div>
+        }
+        identity={
+          <IdentityTab agent={agent} />
         }
         runs={
           <AgentRuns agentId={agent.id} />

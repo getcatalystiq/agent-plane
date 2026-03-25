@@ -102,6 +102,13 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     ["a2a_tags", "a2a_tags"],
     ["soul_md", "soul_md"],
     ["identity_md", "identity_md"],
+    ["style_md", "style_md"],
+    ["agents_md", "agents_md"],
+    ["heartbeat_md", "heartbeat_md"],
+    ["user_template_md", "user_template_md"],
+    ["examples_good_md", "examples_good_md"],
+    ["examples_bad_md", "examples_bad_md"],
+    ["soul_spec_version", "soul_spec_version"],
   ];
 
   for (const [field, col, transform] of fieldMap) {
@@ -112,11 +119,12 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     }
   }
 
-  // Derive identity JSONB when soul_md or identity_md changes
-  if (input.soul_md !== undefined || input.identity_md !== undefined) {
-    const effectiveSoulMd = input.soul_md !== undefined ? input.soul_md : (current as Record<string, unknown>).soul_md as string | null;
-    const effectiveIdentityMd = input.identity_md !== undefined ? input.identity_md : (current as Record<string, unknown>).identity_md as string | null;
-    const parseResult = deriveIdentity(effectiveSoulMd, effectiveIdentityMd);
+  // Derive identity JSONB when any identity-related markdown changes
+  const identityFields = ["soul_md", "identity_md", "style_md", "agents_md", "heartbeat_md", "user_template_md", "examples_good_md", "examples_bad_md"] as const;
+  if (identityFields.some(f => (input as Record<string, unknown>)[f] !== undefined)) {
+    const cur = current as Record<string, unknown>;
+    const eff = (f: string) => (input as Record<string, unknown>)[f] !== undefined ? (input as Record<string, unknown>)[f] as string | null : cur[f] as string | null;
+    const parseResult = deriveIdentity(eff("soul_md"), eff("identity_md"), eff("style_md"), eff("agents_md"), eff("heartbeat_md"), eff("user_template_md"), eff("examples_good_md"), eff("examples_bad_md"));
     identityWarnings = parseResult.warnings;
     sets.push(`identity = $${idx++}`);
     params.push(parseResult.identity ? JSON.stringify(parseResult.identity) : null);

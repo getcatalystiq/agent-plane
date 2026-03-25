@@ -78,7 +78,7 @@ src/
       runs/               # run list, status (NDJSON stream), cancel, transcript
       sessions/           # tenant-scoped session CRUD + message sending (NDJSON stream)
       admin/
-        agents/           # admin agent CRUD + connectors + MCP connections + plugin suggestions
+        agents/           # admin agent CRUD + connectors + MCP connections + plugin suggestions + SoulSpec identity (validate-soul, import-soul, export-soul, publish-soul, generate-soul)
         composio/         # available Composio toolkits + tools listing
         login/            # admin JWT authentication
         mcp-servers/      # custom MCP server CRUD
@@ -104,7 +104,7 @@ src/
       (dashboard)/
         page.tsx          # dashboard overview (stat cards + run/cost charts)
         run-charts.tsx    # Recharts line charts (runs/day, cost/day per agent)
-        agents/           # agent list + tabbed detail (General, Connectors, Skills, Plugins, Schedules, Runs)
+        agents/           # agent list + tabbed detail (General, Identity, Connectors, Skills, Plugins, Schedules, Runs)
         mcp-servers/      # custom MCP server management
         plugin-marketplaces/  # marketplace list + detail + plugin editor (tabbed: Agents, Skills, Connectors)
         runs/             # run list + detail (transcript viewer, cancel button, run source badge, source filter)
@@ -112,7 +112,7 @@ src/
   db/
     index.ts              # DB client (Pool, query helpers, RLS context, transactions)
     migrate.ts            # migration runner
-    migrations/           # sequential SQL migration files (001–022)
+    migrations/           # sequential SQL migration files (001–026)
   lib/
     a2a.ts                # A2A protocol: status mapping, Agent Card builder/cache, RunBackedTaskStore, SandboxAgentExecutor, input validation
     types.ts              # branded types, domain interfaces, StreamEvent union
@@ -142,6 +142,10 @@ src/
     composio.ts           # Composio MCP integration (toolkit auth, server lifecycle, shared discovery helpers)
     plugins.ts            # plugin discovery + file fetching (GitHub, caching)
     github.ts             # GitHub API client (tree, content, write access, atomic push)
+    identity.ts           # SoulSpec v0.5 identity parsing (SOUL.md, IDENTITY.md, STYLE.md), deriveIdentity, progressive disclosure (Level 1/2/3)
+    clawsouls.ts          # ClawSouls registry API client (list, search, get, download, publish, validate souls)
+    soul-manifest.ts      # shared soul.json manifest builder + file-to-column mapping
+    soul-generation.ts    # LLM-powered "Generate Soul" — AI Gateway prompt builder for all 8 SoulSpec files
     agents.ts             # agent loading helper
     assets.ts             # ephemeral asset persistence (Composio URLs → Vercel Blob)
     runs.ts               # run lifecycle (create, transition, budget/concurrency checks)
@@ -208,7 +212,8 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 - Tenant-scoped transactions via `withTenantTransaction()`
 - Migrations: numbered SQL files in `src/db/migrations/` (currently 001–022), run via `npm run migrate`
 - `tenants` table includes: `timezone` column for schedule evaluation, `logo_url` (base64 data URL or external URL)
-- `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600), `a2a_enabled` (boolean, default false; partial index on `tenant_id WHERE a2a_enabled = true`)
+- `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600), `a2a_enabled` (boolean, default false; partial index on `tenant_id WHERE a2a_enabled = true`), SoulSpec v0.5 identity columns (`soul_md`, `identity_md`, `style_md`, `agents_md`, `heartbeat_md`, `user_template_md`, `examples_good_md`, `examples_bad_md`, `soul_spec_version` TEXT default '0.5', `identity` JSONB auto-derived)
+- `tenants` table includes: `clawsouls_api_token` (encrypted, for ClawSouls registry publish)
 - `runs` table includes: `triggered_by` column (`api`, `schedule`, `playground`, `chat`, `a2a`) to track run source; `created_by_key_id` FK to api_keys (audit trail for A2A); `session_id` FK to sessions table for chat messages
 - `sessions` table includes: `sandbox_id` (NULL when stopped), `sdk_session_id` (Claude Agent SDK session), `session_blob_url` (Vercel Blob backup), `status` (creating/active/idle/stopped), `message_count`, `idle_since`, `last_backup_at`; state machine: creating→active/idle/stopped, active→idle/stopped, idle→active/stopped; max 5 concurrent sessions per tenant
 - `mcp_servers` — tenant-scoped registry (OAuth 2.1 client credentials, RLS enforced); unique slug per tenant
@@ -320,8 +325,12 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - `a2aHeaders()` helper shared between JSON-RPC and Agent Card routes for consistent `A2A-Version` + `A2A-Request-Id` headers
 - Admin UI terminology: "tenant" is renamed to "company" throughout the UI (API still uses "tenant")
 - Admin UI navigation: top bar with breadcrumb (serves as page title, no redundant h1), company switcher dropdown, all pages scoped to active company
-- Admin UI agent detail: tabbed interface (General, Connectors, Skills, Plugins, Schedules, Runs) with line-style tabs; metrics cards under General tab
-- Admin UI settings page (`/admin/settings`): company form (name, slug, timezone, budget, logo upload), API keys section, danger zone
+- Admin UI agent detail: tabbed interface (General, Identity, Connectors, Skills, Plugins, Schedules, Runs) with line-style tabs; metrics cards under General tab
+- Admin UI Identity tab: FileTreeEditor with all 8 SoulSpec files (SOUL.md, IDENTITY.md, STYLE.md, AGENTS.md, HEARTBEAT.md, USER_TEMPLATE.md, examples/); action buttons: Generate Soul, Import, Export, Publish; validation warnings inline
+- Admin UI settings page (`/admin/settings`): company form (name, slug, timezone, budget, logo upload), API keys section, ClawSouls Registry section (API token), danger zone
+- SoulSpec v0.5 identity: strict compliance — required SOUL.md sections (Personality, Tone, Principles), IDENTITY.md fields (Name, Role, Creature, Emoji, Vibe, Avatar); progressive disclosure (Level 1 = summary, Level 2 = 4 files, Level 3 = all); `identity` JSONB auto-derived on save; `.soul/` directory injected into sandbox
+- ClawSouls registry integration: import/export/publish/validate via REST API (`https://clawsouls.ai/api/v1`); tenant-scoped API token (encrypted); `soul-manifest.ts` shared helper; A2A metadata versioned (`soulspec:identity:v2` + backward-compat `soulspec:identity`)
+- "Generate Soul" uses AI Gateway to draft all 8 SoulSpec files from agent config (name, description, tools, skills); falls back to claude-sonnet if agent model fails
 - Admin UI: A2A badge on agent list, A2A info section on agent detail (endpoint URLs + Agent Card preview), source filter on runs page
 - Admin UI model selector: cmdk + Radix Popover combobox fetching live models from Vercel AI Gateway; shows context window, pricing, capability tags; supports search, provider filter, custom model entry
 - Admin UI edit form: two rows — Name/Desc/Model/Runner on top, Max Turns/Budget/Runtime/Permission Mode on bottom; form disabled during save; API errors displayed inline

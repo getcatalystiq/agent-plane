@@ -124,6 +124,9 @@ export interface SandboxConfig {
     description?: string | null;
     soul_md?: string | null;
     identity_md?: string | null;
+    style_md?: string | null;
+    agents_md?: string | null;
+    heartbeat_md?: string | null;
     git_repo_url: string | null;
     git_branch: string;
     model: string;
@@ -307,12 +310,28 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
     );
   }
 
-  // Write runner + skill + plugin + bridge files to sandbox
+  // Inject SoulSpec identity files into .soul/ directory
+  const soulFiles: Array<{ path: string; content: Buffer }> = [];
+  const soulFileMap: Array<[string, string | null | undefined]> = [
+    ['.soul/SOUL.md', config.agent.soul_md],
+    ['.soul/IDENTITY.md', config.agent.identity_md],
+    ['.soul/STYLE.md', config.agent.style_md],
+    ['.soul/AGENTS.md', config.agent.agents_md],
+    ['.soul/HEARTBEAT.md', config.agent.heartbeat_md],
+  ];
+  for (const [filePath, content] of soulFileMap) {
+    if (content) {
+      soulFiles.push({ path: `/vercel/sandbox/${filePath}`, content: Buffer.from(content) });
+    }
+  }
+
+  // Write runner + skill + plugin + bridge + soul files to sandbox
   await sandbox.writeFiles([
     { path: "/vercel/sandbox/runner.mjs", content: Buffer.from(runnerScript) },
     ...skillFiles,
     ...pluginFiles,
     ...bridgeFiles,
+    ...soulFiles,
   ]);
 
   // Build env vars for the runner command
@@ -873,8 +892,23 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     );
   }
 
-  // Write skill + plugin + bridge files (no runner yet)
-  const allFiles = [...skillFiles, ...pluginFiles, ...bridgeFiles];
+  // Inject SoulSpec identity files into .soul/ directory
+  const soulFiles: Array<{ path: string; content: Buffer }> = [];
+  const soulFileMap: Array<[string, string | null | undefined]> = [
+    ['.soul/SOUL.md', config.agent.soul_md],
+    ['.soul/IDENTITY.md', config.agent.identity_md],
+    ['.soul/STYLE.md', config.agent.style_md],
+    ['.soul/AGENTS.md', config.agent.agents_md],
+    ['.soul/HEARTBEAT.md', config.agent.heartbeat_md],
+  ];
+  for (const [filePath, content] of soulFileMap) {
+    if (content) {
+      soulFiles.push({ path: `/vercel/sandbox/${filePath}`, content: Buffer.from(content) });
+    }
+  }
+
+  // Write skill + plugin + bridge + soul files (no runner yet)
+  const allFiles = [...skillFiles, ...pluginFiles, ...bridgeFiles, ...soulFiles];
   if (allFiles.length > 0) {
     await sandbox.writeFiles(allFiles);
   }
