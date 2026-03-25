@@ -101,23 +101,23 @@ export function AgentDetailPage({ agentId, a2aBaseUrl, tenantSlug, adminApiBaseU
     if (!adminApiBaseUrl) return {};
     return {
       onGenerateSoul: async () => {
-        const result = await adminFetch(`/api/admin/agents/${agentId}/generate-soul`, { method: "POST" });
+        const result = await adminFetch(`/api/agents/${agentId}/generate-soul`, { method: "POST" });
         return { files: result.files as Record<string, string> };
       },
       onImportSoul: async (ref: string) => {
         const [owner, name] = ref.split("/");
-        const result = await adminFetch(`/api/admin/agents/${agentId}/import-soul`, {
+        const result = await adminFetch(`/api/agents/${agentId}/import-soul`, {
           method: "POST",
           body: JSON.stringify({ owner, name }),
         });
         return { files: result.imported_files as Record<string, string> };
       },
       onExportSoul: async () => {
-        const result = await adminFetch(`/api/admin/agents/${agentId}/export-soul`);
+        const result = await adminFetch(`/api/agents/${agentId}/export-soul`);
         return { files: result.files as Record<string, string>, name: agent?.name ?? "agent" };
       },
       onPublishSoul: async (owner: string) => {
-        await adminFetch(`/api/admin/agents/${agentId}/publish-soul`, {
+        await adminFetch(`/api/agents/${agentId}/publish-soul`, {
           method: "POST",
           body: JSON.stringify({ owner }),
         });
