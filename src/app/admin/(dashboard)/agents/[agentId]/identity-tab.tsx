@@ -217,8 +217,7 @@ export function IdentityTab({ agent }: { agent: Agent }) {
           onSave={handleSave}
           title="SoulSpec"
           saveLabel={saving ? "Saving..." : "Save Identity"}
-          addFolderLabel="Folder"
-          newFileTemplate={{ filename: "CUSTOM.md", content: "# Custom\n\nAdd custom identity content...\n" }}
+          fixedStructure
           savedVersion={savedVersion}
         />
       </div>

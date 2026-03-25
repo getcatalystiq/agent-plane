@@ -71,9 +71,8 @@ export interface AgentIdentityTabProps {
     onSave: (files: FlatFile[]) => Promise<void>;
     title?: string;
     saveLabel?: string;
-    addFolderLabel?: string;
-    newFileTemplate?: { filename: string; content: string };
     savedVersion?: number;
+    fixedStructure?: boolean;
   }>;
   /** Called after a successful save so the host can refresh data. */
   onSaved?: () => void;
@@ -271,11 +270,7 @@ export function AgentIdentityTab({
           onSave={handleSave}
           title="SoulSpec"
           saveLabel={saving ? "Saving..." : "Save Identity"}
-          addFolderLabel="Folder"
-          newFileTemplate={{
-            filename: "CUSTOM.md",
-            content: "# Custom\n\nAdd custom identity content...\n",
-          }}
+          fixedStructure
           savedVersion={savedVersion}
         />
       </div>

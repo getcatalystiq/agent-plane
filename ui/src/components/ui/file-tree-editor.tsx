@@ -98,6 +98,7 @@ interface FileTreeEditorProps {
   addFolderLabel?: string;
   newFileTemplate?: { filename: string; content: string };
   savedVersion?: number;
+  fixedStructure?: boolean;
 }
 
 export function FileTreeEditor({
@@ -111,6 +112,7 @@ export function FileTreeEditor({
   addFolderLabel = "Folder",
   newFileTemplate = { filename: "SKILL.md", content: "---\nname: New Skill\ndescription: Describe when this skill should be triggered\n---\n\n# Instructions\n\nDescribe what this skill does...\n" },
   savedVersion,
+  fixedStructure = false,
 }: FileTreeEditorProps) {
   const [files, setFiles] = useState<FlatFile[]>(initialFiles);
   const [selectedPath, setSelectedPath] = useState<string | null>(
@@ -237,7 +239,7 @@ export function FileTreeEditor({
             <span className="text-muted-foreground">{isExpanded ? "▾" : "▸"}</span>
             {node.name}/
           </span>
-          {!readOnly && (
+          {!readOnly && !fixedStructure && (
             <button
               onClick={(e) => { e.stopPropagation(); removeDir(node.fullPath); }}
               className="text-muted-foreground hover:text-destructive text-xs ml-1 shrink-0"
@@ -261,7 +263,7 @@ export function FileTreeEditor({
                   onClick={() => setSelectedPath(file.path)}
                 >
                   <span className="text-xs truncate">{fileName}</span>
-                  {!readOnly && (
+                  {!readOnly && !fixedStructure && (
                     <button
                       onClick={(e) => { e.stopPropagation(); removeFile(file.path); }}
                       className="text-muted-foreground hover:text-destructive text-xs ml-1 shrink-0"
@@ -272,7 +274,7 @@ export function FileTreeEditor({
                 </div>
               );
             })}
-            {!readOnly && (
+            {!readOnly && !fixedStructure && (
               <div style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }} className="py-1 pr-2">
                 {addingFileInDir === node.fullPath ? (
                   <div className="flex gap-1">
@@ -321,7 +323,7 @@ export function FileTreeEditor({
         <div className="w-64 shrink-0 border border-border rounded-md overflow-hidden">
           <div className="p-2 bg-muted/50 border-b border-border flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">{title}</span>
-            {!readOnly && (
+            {!readOnly && !fixedStructure && (
               <button
                 onClick={() => setShowAddFolder(!showAddFolder)}
                 className="text-xs text-primary hover:underline"
@@ -330,7 +332,7 @@ export function FileTreeEditor({
               </button>
             )}
           </div>
-          {showAddFolder && !readOnly && (
+          {showAddFolder && !readOnly && !fixedStructure && (
             <div className="p-2 border-b border-border flex gap-1">
               <Input
                 value={newFolderName}
@@ -354,7 +356,7 @@ export function FileTreeEditor({
                 onClick={() => setSelectedPath(file.path)}
               >
                 <span className="text-xs truncate">{file.path}</span>
-                {!readOnly && (
+                {!readOnly && !fixedStructure && (
                   <button
                     onClick={(e) => { e.stopPropagation(); removeFile(file.path); }}
                     className="text-muted-foreground hover:text-destructive text-xs ml-1 shrink-0"
