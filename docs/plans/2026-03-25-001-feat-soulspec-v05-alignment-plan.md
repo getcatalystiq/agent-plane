@@ -1,7 +1,7 @@
 ---
 title: "feat: Full SoulSpec v0.5 Alignment with Registry Integration"
 type: feat
-status: active
+status: completed
 date: 2026-03-25
 origin: docs/brainstorms/2026-03-25-soulspec-alignment-requirements.md
 deepened: 2026-03-25
