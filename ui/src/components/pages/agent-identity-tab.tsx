@@ -102,6 +102,9 @@ export function AgentIdentityTab({
   const [generating, setGenerating] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishOwner, setPublishOwner] = useState("");
+  const [publishResult, setPublishResult] = useState<string | null>(null);
   const [savedVersion, setSavedVersion] = useState(0);
   const [overrideFiles, setOverrideFiles] = useState<FlatFile[] | null>(null);
 
@@ -181,15 +184,16 @@ export function AgentIdentityTab({
   }
 
   async function handlePublish() {
-    if (!onPublishSoul) return;
-    const owner = prompt("Enter owner name for publishing:");
-    if (!owner?.trim()) return;
+    if (!onPublishSoul || !publishOwner.trim()) return;
     setPublishing(true);
     setError("");
+    setPublishResult(null);
     try {
-      await onPublishSoul(owner.trim());
+      await onPublishSoul(publishOwner.trim());
+      setPublishResult("Published successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to publish");
+      setPublishOpen(false);
     } finally {
       setPublishing(false);
     }
@@ -242,11 +246,10 @@ export function AgentIdentityTab({
           <Button
             variant="outline"
             size="sm"
-            onClick={handlePublish}
-            disabled={publishing}
+            onClick={() => { setPublishOpen(true); setPublishResult(null); setPublishOwner(""); }}
           >
             <svg className="size-4 mr-1.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /><path d="M2 12h20" /></svg>
-            {publishing ? "Publishing..." : "Publish"}
+            Publish
           </Button>
         )}
         {overrideFiles && (
@@ -295,6 +298,55 @@ export function AgentIdentityTab({
           onImport={onImportSoul}
           onImported={handleImported}
         />
+      )}
+
+      {/* Publish dialog */}
+      {onPublishSoul && (
+        <Dialog open={publishOpen} onOpenChange={setPublishOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Publish to ClawSouls Registry</DialogTitle>
+              <DialogDescription>
+                Upload your agent&apos;s SoulSpec identity to the ClawSouls registry.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogBody>
+              <div className="space-y-4">
+                <div className="rounded-md border border-muted-foreground/25 bg-muted/50 p-3 text-xs text-muted-foreground space-y-2">
+                  <p>Publishing uploads your agent&apos;s identity to the <a href="https://clawsouls.ai/souls" target="_blank" rel="noopener noreferrer" className="underline text-foreground">ClawSouls registry</a> where others can discover and install it.</p>
+                  <p><strong>Requirements:</strong></p>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    <li>A ClawSouls API token (set in Settings)</li>
+                    <li>SOUL.md with required sections (Personality, Tone, Principles)</li>
+                    <li>IDENTITY.md with Name, Role, and Creature fields</li>
+                  </ul>
+                  <p>Your soul will be validated by SoulScan before publishing.</p>
+                </div>
+                <FormField label="Owner (your ClawSouls username)">
+                  <Input
+                    value={publishOwner}
+                    onChange={(e) => setPublishOwner(e.target.value)}
+                    placeholder="e.g. myusername"
+                    disabled={publishing}
+                  />
+                </FormField>
+                {publishResult && (
+                  <div className="rounded-md border border-green-600 bg-green-500/10 p-3 text-xs text-green-400">
+                    {publishResult}
+                  </div>
+                )}
+              </div>
+            </DialogBody>
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => setPublishOpen(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={handlePublish} disabled={publishing || !publishOwner.trim()}>
+                {publishing ? "Publishing..." : "Publish"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
