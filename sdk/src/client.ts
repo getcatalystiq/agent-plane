@@ -11,6 +11,7 @@ import { DashboardResource } from "./resources/dashboard";
 import { TenantsResource } from "./resources/tenants";
 import { ComposioResource } from "./resources/composio";
 import { KeysResource } from "./resources/keys";
+import { SkillsDirectoryResource } from "./resources/skills-directory";
 
 const VERSION = "0.2.1";
 const MAX_ERROR_BODY_BYTES = 64 * 1024; // 64KB
@@ -27,6 +28,7 @@ export class AgentPlane {
   readonly tenants: TenantsResource;
   readonly composio: ComposioResource;
   readonly keys: KeysResource;
+  readonly skillsDirectory: SkillsDirectoryResource;
 
   private readonly _getAuthHeader: () => string;
   private readonly _baseUrl: string;
@@ -97,6 +99,7 @@ export class AgentPlane {
     this.tenants = new TenantsResource(this);
     this.composio = new ComposioResource(this);
     this.keys = new KeysResource(this);
+    this.skillsDirectory = new SkillsDirectoryResource(this);
   }
 
   /** @internal Make a JSON API request. */

@@ -1,3 +1,18 @@
+/** Skills directory types. */
+export interface SkillDirectoryEntry {
+  name: string;
+  owner: string;
+  repo: string;
+  skill: string;
+  installs: string;
+}
+
+export interface ImportedSkillResult {
+  folder: string;
+  files: Array<{ path: string; content: string }>;
+  warnings: string[];
+}
+
 /** Minimal stream event types used by the playground UI. */
 export interface PlaygroundTextDeltaEvent {
   type: "text_delta";
@@ -136,6 +151,11 @@ export interface AgentPlaneClient {
   composio: {
     toolkits(): Promise<unknown[]>;
     tools(toolkit: string): Promise<unknown[]>;
+  };
+  skillsDirectory: {
+    list(tab?: "all" | "trending" | "hot"): Promise<SkillDirectoryEntry[]>;
+    preview(owner: string, repo: string, skill: string): Promise<string>;
+    import(params: { owner: string; repo: string; skill_name: string } | { url: string }): Promise<ImportedSkillResult>;
   };
   pluginMarketplaces: {
     list(): Promise<unknown[]>;

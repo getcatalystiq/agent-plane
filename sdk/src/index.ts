@@ -46,6 +46,10 @@ export type {
   PluginFile,
   PluginFiles,
   PluginSaveResult,
+  // Skills Directory
+  SkillDirectoryTab,
+  SkillDirectoryEntry,
+  ImportedSkill,
   // Models
   CatalogModel,
   // Dashboard

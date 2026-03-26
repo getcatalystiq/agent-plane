@@ -353,6 +353,24 @@ export interface PluginSaveResult {
   commitSha: string;
 }
 
+// --- Skills Directory ---
+
+export type SkillDirectoryTab = "all" | "trending" | "hot";
+
+export interface SkillDirectoryEntry {
+  name: string;
+  owner: string;
+  repo: string;
+  skill: string;
+  installs: string;
+}
+
+export interface ImportedSkill {
+  folder: string;
+  files: Array<{ path: string; content: string }>;
+  warnings: string[];
+}
+
 // --- Stream Events ---
 
 export interface RunStartedEvent {
