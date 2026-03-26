@@ -174,7 +174,38 @@ export async function fetchSkillsDirectory(
   }
 }
 
-// --- Preview (lightweight — single CDN call) ---
+// --- Repo Tree Helpers ---
+
+async function getRepoTree(owner: string, repo: string): Promise<GitHubResult<{ path: string; type: string }[]>> {
+  const treeCacheKey = `${owner}/${repo}`;
+  const cachedTree = treeCache.get(treeCacheKey);
+  if (cachedTree && Date.now() - cachedTree.cachedAt < TREE_CACHE_TTL_MS) {
+    return { ok: true, data: cachedTree.data };
+  }
+
+  const treeResult = await fetchRepoTree(owner, repo);
+  if (treeResult.ok === false) {
+    return { ok: false, error: treeResult.error, message: treeResult.message };
+  }
+  const entries = treeResult.data.map((e) => ({ path: e.path, type: e.type }));
+  treeCache.set(treeCacheKey, { data: entries, cachedAt: Date.now() });
+  return { ok: true, data: entries };
+}
+
+/**
+ * Find the directory prefix for a skill in the repo tree.
+ * Skills may live at various depths: `{skill}/`, `skills/{skill}/`, `.github/skills/{skill}/`, etc.
+ * We find the directory that contains `SKILL.md` and whose last segment matches the skill name.
+ */
+function findSkillPrefix(tree: { path: string; type: string }[], skill: string): string | null {
+  const suffix = `${skill}/SKILL.md`;
+  const match = tree.find((e) => e.type === "blob" && e.path.endsWith(suffix));
+  if (!match) return null;
+  // prefix is everything up to and including the skill dir: "skills/find-skills/"
+  return match.path.slice(0, match.path.length - "SKILL.md".length);
+}
+
+// --- Preview ---
 
 export async function previewSkill(
   owner: string,
@@ -187,7 +218,18 @@ export async function previewSkill(
     return { ok: true, data: cached.data };
   }
 
-  const result = await fetchRawContent(owner, repo, `${skill}/SKILL.md`);
+  // Use tree to find actual SKILL.md path (may be under skills/, .github/skills/, etc.)
+  const treeResult = await getRepoTree(owner, repo);
+  if (treeResult.ok === false) {
+    return { ok: false, error: treeResult.error, message: treeResult.message };
+  }
+
+  const prefix = findSkillPrefix(treeResult.data, skill);
+  if (!prefix) {
+    return { ok: false, error: "not_found", message: `SKILL.md not found for ${skill} in ${owner}/${repo}` };
+  }
+
+  const result = await fetchRawContent(owner, repo, `${prefix}SKILL.md`);
   if (result.ok === true) {
     previewCache.set(cacheKey, { data: result.data, cachedAt: Date.now() });
   }
@@ -209,31 +251,20 @@ export async function importSkillContent(
   repo: string,
   skill: string,
 ): Promise<GitHubResult<ImportedSkill>> {
-  // Check tree cache
-  const treeCacheKey = `${owner}/${repo}`;
-  let treeEntries: { path: string; type: string }[];
-
-  const cachedTree = treeCache.get(treeCacheKey);
-  if (cachedTree && Date.now() - cachedTree.cachedAt < TREE_CACHE_TTL_MS) {
-    treeEntries = cachedTree.data;
-  } else {
-    const treeResult = await fetchRepoTree(owner, repo);
-    if (treeResult.ok === false) {
-      return { ok: false, error: treeResult.error, message: treeResult.message };
-    }
-    treeEntries = treeResult.data.map((e) => ({ path: e.path, type: e.type }));
-    treeCache.set(treeCacheKey, { data: treeEntries, cachedAt: Date.now() });
+  const treeResult = await getRepoTree(owner, repo);
+  if (treeResult.ok === false) {
+    return { ok: false, error: treeResult.error, message: treeResult.message };
   }
 
-  // Filter to skill subdirectory
-  const prefix = `${skill}/`;
-  const skillFiles = treeEntries.filter(
+  // Find skill directory in tree (may be nested under skills/, .github/skills/, etc.)
+  const prefix = findSkillPrefix(treeResult.data, skill);
+  if (!prefix) {
+    return { ok: false, error: "not_found", message: `SKILL.md not found for ${skill} in ${owner}/${repo}` };
+  }
+
+  const skillFiles = treeResult.data.filter(
     (e) => e.type === "blob" && e.path.startsWith(prefix),
   );
-
-  if (skillFiles.length === 0) {
-    return { ok: false, error: "not_found", message: `No files found under ${prefix} in ${owner}/${repo}` };
-  }
 
   const warnings: string[] = [];
 
