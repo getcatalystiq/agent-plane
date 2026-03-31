@@ -34,6 +34,10 @@ export interface SessionExecutionParams {
   platformApiUrl: string;
   effectiveBudget: number;
   effectiveMaxTurns: number;
+  /** AgentCo callback data for MCP bridge injection (A2A only). */
+  callbackData?: import("./mcp").CallbackData;
+  /** Additional hostnames to allow in sandbox network policy (e.g. AgentCo callback URLs). */
+  extraAllowedHostnames?: string[];
 }
 
 export interface SessionMessageResult {
@@ -109,6 +113,7 @@ export async function prepareSessionSandbox(
         mcpErrors: [],
         pluginFiles: [],
         maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
+        callbackData: params.callbackData,
       }),
       mcpPromise,
       pluginPromise,
@@ -167,6 +172,7 @@ export async function prepareSessionSandbox(
       mcpErrors: mcpResult.errors,
       pluginFiles: [...pluginResult.skillFiles, ...pluginResult.agentFiles],
       maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
+      callbackData: params.callbackData,
     };
 
     const sandbox = await createSessionSandbox(sandboxConfig);

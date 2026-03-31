@@ -711,6 +711,8 @@ export class SandboxAgentExecutor implements AgentExecutor {
           platformApiUrl: this.deps.platformApiUrl,
           effectiveBudget,
           effectiveMaxTurns: agent.max_turns,
+          callbackData,
+          extraAllowedHostnames: callbackHostname ? [callbackHostname] : undefined,
         },
         existingSession,
       );
@@ -876,6 +878,8 @@ export class SandboxAgentExecutor implements AgentExecutor {
           platformApiUrl: this.deps.platformApiUrl,
           effectiveBudget,
           effectiveMaxTurns: agent.max_turns,
+          callbackData,
+          extraAllowedHostnames: callbackHostname ? [callbackHostname] : undefined,
         },
         session,
       );

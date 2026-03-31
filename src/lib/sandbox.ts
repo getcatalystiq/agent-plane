@@ -1197,10 +1197,24 @@ export async function reconnectSessionSandbox(
       baseEnv.ANTHROPIC_API_KEY = "";
       baseEnv.AI_GATEWAY_API_KEY = config.aiGatewayApiKey;
     }
-    if (hasMcp) {
-      baseEnv.MCP_SERVERS_JSON = JSON.stringify(config.mcpServers);
+    // Build MCP servers — inject agentco bridge alongside other servers
+    const mcpServersForReconnect: Record<string, unknown> = { ...config.mcpServers };
+    if (config.callbackData && config.callbackData.tools.length > 0) {
+      mcpServersForReconnect['agentco'] = {
+        command: 'node',
+        args: ['/vercel/sandbox/agentco-bridge.mjs'],
+        env: {
+          AGENTCO_CALLBACK_URL: config.callbackData.url,
+          AGENTCO_CALLBACK_TOKEN: config.callbackData.token,
+        },
+      };
+      baseEnv.AGENTCO_CALLBACK_URL = config.callbackData.url;
+      baseEnv.AGENTCO_CALLBACK_TOKEN = config.callbackData.token;
     }
-    return buildSessionSandboxInstance(sandbox, config, baseEnv, hasMcp, hasSkills, hasPluginContent);
+    if (Object.keys(mcpServersForReconnect).length > 0) {
+      baseEnv.MCP_SERVERS_JSON = JSON.stringify(mcpServersForReconnect);
+    }
+    return buildSessionSandboxInstance(sandbox, config, baseEnv, hasMcp || !!config.callbackData, hasSkills, hasPluginContent);
   } catch (err) {
     logger.error("Failed to build session sandbox config after reconnect", {
       sandbox_id: sandboxId,
