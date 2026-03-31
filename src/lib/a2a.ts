@@ -583,13 +583,28 @@ export class SandboxAgentExecutor implements AgentExecutor {
       // --- Session reuse logic (Unit 3) ---
       const clientContextId = requestContext.contextId;
 
-      if (clientContextId) {
-        // Check for existing session
+      logger.info("A2A session reuse check", {
+        client_context_id: clientContextId,
+        task_id: taskId,
+        agent_id: agent.id,
+        tenant_id: this.deps.tenantId,
+        context_id_equals_task_id: clientContextId === taskId,
+      });
+
+      if (clientContextId && clientContextId !== taskId) {
+        // Check for existing session (skip if contextId is just the auto-generated taskId)
         const existingSession = await findSessionByContextId(
           this.deps.tenantId,
           agent.id as AgentId,
           clientContextId,
         );
+
+        logger.info("A2A session lookup result", {
+          client_context_id: clientContextId,
+          session_found: !!existingSession,
+          session_id: existingSession?.id,
+          session_status: existingSession?.status,
+        });
 
         if (existingSession) {
           // --- REUSE PATH: session found ---
