@@ -20,6 +20,7 @@ export type Session = z.infer<typeof SessionRow>;
 export async function createSession(
   tenantId: TenantId,
   agentId: AgentId,
+  options?: { contextId?: string },
 ): Promise<{ session: Session; agent: AgentInternal; remainingBudget: number }> {
   return withTenantTransaction(tenantId, async (tx) => {
     const agent = await tx.queryOne(
@@ -32,13 +33,14 @@ export async function createSession(
     const isSubscriptionRun = supportsClaudeRunner(agent.model);
     const remainingBudget = await checkTenantBudget(tx, tenantId, { isSubscriptionRun });
 
+    const contextId = options?.contextId ?? null;
     const result = await tx.queryOne(
       SessionRow,
-      `INSERT INTO sessions (tenant_id, agent_id, status)
-       SELECT $1, $2, 'creating'
+      `INSERT INTO sessions (tenant_id, agent_id, status, context_id)
+       SELECT $1, $2, 'creating', $4
        WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active', 'idle')) < $3
        RETURNING *`,
-      [tenantId, agentId, MAX_CONCURRENT_SESSIONS],
+      [tenantId, agentId, MAX_CONCURRENT_SESSIONS, contextId],
     );
 
     if (!result) {
@@ -47,9 +49,26 @@ export async function createSession(
       );
     }
 
-    logger.info("Session created", { session_id: result.id, agent_id: agentId, tenant_id: tenantId });
+    logger.info("Session created", { session_id: result.id, agent_id: agentId, tenant_id: tenantId, context_id: contextId });
     return { session: result, agent, remainingBudget };
   });
+}
+
+// Find an active or idle session by contextId for a given agent + tenant.
+// Used by A2A multi-turn to reuse an existing sandbox.
+export async function findSessionByContextId(
+  tenantId: TenantId,
+  agentId: AgentId,
+  contextId: string,
+): Promise<Session | null> {
+  return queryOne(
+    SessionRow,
+    `SELECT * FROM sessions
+     WHERE tenant_id = $1 AND agent_id = $2 AND context_id = $3
+       AND status IN ('active', 'idle')
+     LIMIT 1`,
+    [tenantId, agentId, contextId],
+  );
 }
 
 export async function getSession(sessionId: string, tenantId: TenantId): Promise<Session> {

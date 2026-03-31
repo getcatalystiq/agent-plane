@@ -22,6 +22,18 @@ import { createRun, getRun, transitionRunStatus } from "@/lib/runs";
 import { prepareRunExecution, finalizeRun } from "@/lib/run-executor";
 import type { CallbackData } from "@/lib/mcp";
 import { reconnectSandbox } from "@/lib/sandbox";
+import {
+  createSession,
+  findSessionByContextId,
+  transitionSessionStatus,
+  incrementMessageCount,
+  updateSessionSandbox,
+} from "@/lib/sessions";
+import {
+  prepareSessionSandbox,
+  executeSessionMessage,
+  finalizeSessionMessage,
+} from "@/lib/session-executor";
 import { IDENTITY_METADATA_KEY, IDENTITY_METADATA_KEY_V2 } from "@/lib/identity";
 import { logger } from "@/lib/logger";
 import type { RunStatus, TenantId, AgentId, RunId } from "@/lib/types";
@@ -310,7 +322,7 @@ export function runToA2aTask(run: z.infer<typeof RunForTaskRow>): Task {
   return {
     id: run.id,
     kind: "task",
-    contextId: run.id, // Phase 1: contextId = taskId (no multi-turn)
+    contextId: run.id, // Default: contextId = taskId; overridden by client-supplied contextId in A2A executor
     status: {
       state,
       timestamp: run.completed_at || run.created_at,
@@ -431,6 +443,8 @@ export class SandboxAgentExecutor implements AgentExecutor {
 
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     const taskId = requestContext.taskId;
+    // Preserve client-supplied contextId for multi-turn; fall back to taskId
+    const effectiveContextId = requestContext.contextId || taskId;
 
     try {
       // Validate taskId
@@ -442,7 +456,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
       eventBus.publish({
         kind: "task",
         id: taskId,
-        contextId: requestContext.contextId,
+        contextId: effectiveContextId,
         status: { state: "working", timestamp: new Date().toISOString() },
       } as unknown as Task);
 
@@ -450,7 +464,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
       eventBus.publish({
         kind: "status-update",
         taskId,
-        contextId: requestContext.contextId,
+        contextId: effectiveContextId,
         status: { state: "working", timestamp: new Date().toISOString() },
         final: false,
       } as TaskStatusUpdateEvent);
@@ -508,6 +522,48 @@ export class SandboxAgentExecutor implements AgentExecutor {
         ...(requestedBudget !== undefined ? [requestedBudget] : []),
       );
 
+      // --- Multi-turn session support via contextId ---
+      // If the request has a contextId, try to reuse an existing session's sandbox.
+      // This enables conversation continuity (e.g., Discord chat threads).
+      const clientContextId = requestContext.contextId;
+      if (clientContextId) {
+        const reused = await this.tryReuseSession(
+          clientContextId, prompt, effectiveBudget, callbackHostname, cb, callbackUrl, taskId, effectiveContextId, eventBus,
+        );
+        if (reused) return; // Session was reused successfully, all events published (including finished)
+      }
+
+      // --- Default path: create a fresh run + sandbox (no session reuse) ---
+
+      // If contextId provided but no existing session found, create a new session
+      // so future messages with the same contextId can reuse it.
+      let sessionId: string | undefined;
+      if (clientContextId) {
+        try {
+          const { session } = await createSession(
+            this.deps.tenantId,
+            agent.id as AgentId,
+            { contextId: clientContextId },
+          );
+          sessionId = session.id;
+          // Transition creating → idle (prepareRunExecution will create its own sandbox)
+          await transitionSessionStatus(sessionId, this.deps.tenantId, "creating", "idle", {
+            idle_since: new Date().toISOString(),
+          });
+          logger.info("Created new A2A session for contextId", {
+            session_id: sessionId,
+            context_id: clientContextId,
+            agent_id: agent.id,
+          });
+        } catch (err) {
+          // Non-fatal: session creation failure shouldn't block the run
+          logger.warn("Failed to create A2A session for contextId", {
+            context_id: clientContextId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       // Create run
       const { run } = await createRun(
         this.deps.tenantId,
@@ -516,6 +572,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
         {
           triggeredBy: "a2a",
           createdByKeyId: this.deps.createdByKeyId,
+          ...(sessionId ? { sessionId } : {}),
         },
       );
 
@@ -524,7 +581,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
       const a2aIncomingEvent = JSON.stringify({
         type: "a2a_incoming",
         run_id: run.id,
-        context_id: requestContext.contextId,
+        context_id: effectiveContextId,
         task_id: taskId,
         agent_name: agent.name,
         sender: this.deps.createdByKeyId ?? "unknown",
@@ -552,6 +609,19 @@ export class SandboxAgentExecutor implements AgentExecutor {
         } : undefined,
       });
 
+      // Update session with the sandbox_id so future contextId lookups can reconnect
+      if (sessionId) {
+        try {
+          await updateSessionSandbox(sessionId, this.deps.tenantId, sandbox.id);
+        } catch (err) {
+          logger.warn("Failed to update session sandbox_id", {
+            session_id: sessionId,
+            sandbox_id: sandbox.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       // Inject the A2A incoming event as the first transcript entry
       transcriptChunks.unshift(a2aIncomingEvent);
 
@@ -577,7 +647,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
                 eventBus.publish({
                   kind: "artifact-update",
                   taskId,
-                  contextId: requestContext.contextId,
+                  contextId: effectiveContextId,
                   artifact: {
                     artifactId: "result",
                     name: "Agent Result",
@@ -601,6 +671,13 @@ export class SandboxAgentExecutor implements AgentExecutor {
       // Finalize run: persist transcript, update billing, stop sandbox
       await finalizeRun(run.id as RunId, this.deps.tenantId, transcriptChunks, sandbox, effectiveBudget);
 
+      // Update session last_message_at if we created one
+      if (sessionId) {
+        try {
+          await incrementMessageCount(sessionId, this.deps.tenantId);
+        } catch { /* non-fatal */ }
+      }
+
       // Read finalized status and publish final A2A event
       const sql = getHttpClient();
       const finalRows = await sql`
@@ -613,7 +690,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
       eventBus.publish({
         kind: "status-update",
         taskId,
-        contextId: requestContext.contextId,
+        contextId: effectiveContextId,
         status: {
           state: finalState,
           timestamp: new Date().toISOString(),
@@ -635,7 +712,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
       eventBus.publish({
         kind: "status-update",
         taskId,
-        contextId: requestContext.contextId,
+        contextId: effectiveContextId,
         status: {
           state: "failed",
           timestamp: new Date().toISOString(),
@@ -650,6 +727,219 @@ export class SandboxAgentExecutor implements AgentExecutor {
       } as TaskStatusUpdateEvent);
     } finally {
       eventBus.finished();
+    }
+  }
+
+  /**
+   * Try to reuse an existing session by contextId.
+   * Returns true if the session was successfully reused and all events were published.
+   * Returns false if no session was found or reconnection failed (caller should use default path).
+   */
+  private async tryReuseSession(
+    contextId: string,
+    prompt: string,
+    effectiveBudget: number,
+    callbackHostname: string | undefined,
+    cb: Record<string, unknown> | undefined,
+    callbackUrl: string | undefined,
+    taskId: string,
+    effectiveContextId: string,
+    eventBus: ExecutionEventBus,
+  ): Promise<boolean> {
+    const agent = this.deps.agent;
+
+    try {
+      const existingSession = await findSessionByContextId(
+        this.deps.tenantId,
+        agent.id as AgentId,
+        contextId,
+      );
+
+      if (!existingSession || !existingSession.sandbox_id) {
+        return false;
+      }
+
+      logger.info("Found existing session for contextId", {
+        session_id: existingSession.id,
+        context_id: contextId,
+        sandbox_id: existingSession.sandbox_id,
+        session_status: existingSession.status,
+      });
+
+      // Transition session to active (locks it for this message)
+      const fromStatus = existingSession.status as "active" | "idle";
+      if (fromStatus !== "idle") {
+        logger.warn("Session not idle, cannot reuse", {
+          session_id: existingSession.id,
+          status: existingSession.status,
+        });
+        return false;
+      }
+
+      const transitioned = await transitionSessionStatus(
+        existingSession.id,
+        this.deps.tenantId,
+        "idle",
+        "active",
+      );
+      if (!transitioned) {
+        logger.warn("Failed to transition session to active (concurrent use)", {
+          session_id: existingSession.id,
+        });
+        return false;
+      }
+
+      // Prepare session sandbox (reconnect or create new)
+      let sandbox;
+      try {
+        sandbox = await prepareSessionSandbox(
+          {
+            sessionId: existingSession.id,
+            tenantId: this.deps.tenantId,
+            agent,
+            prompt,
+            platformApiUrl: this.deps.platformApiUrl,
+            effectiveBudget,
+            effectiveMaxTurns: agent.max_turns,
+          },
+          existingSession,
+        );
+      } catch (err) {
+        logger.error("Failed to prepare session sandbox for A2A reuse", {
+          session_id: existingSession.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Rollback session to idle
+        await transitionSessionStatus(
+          existingSession.id, this.deps.tenantId, "active", "idle",
+          { idle_since: new Date().toISOString() },
+        ).catch(() => {});
+        return false;
+      }
+
+      // Execute message within the session
+      let result;
+      try {
+        result = await executeSessionMessage(
+          {
+            sessionId: existingSession.id,
+            tenantId: this.deps.tenantId,
+            agent,
+            prompt,
+            platformApiUrl: this.deps.platformApiUrl,
+            effectiveBudget,
+            effectiveMaxTurns: agent.max_turns,
+          },
+          sandbox,
+          existingSession,
+        );
+      } catch (err) {
+        logger.error("Failed to execute session message for A2A reuse", {
+          session_id: existingSession.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return false; // Session already rolled back to idle by executeSessionMessage
+      }
+
+      // Log incoming A2A message
+      const promptPreview = prompt.split("\n").slice(0, 5).join("\n").slice(0, 500);
+      result.transcriptChunks.unshift(JSON.stringify({
+        type: "a2a_incoming",
+        run_id: result.runId,
+        context_id: effectiveContextId,
+        task_id: taskId,
+        session_id: existingSession.id,
+        agent_name: agent.name,
+        sender: this.deps.createdByKeyId ?? "unknown",
+        prompt_preview: promptPreview,
+        has_callback: !!cb,
+        callback_url: callbackUrl,
+        reused_session: true,
+        timestamp: new Date().toISOString(),
+      }));
+
+      // Consume log stream, publish A2A events
+      let lastAssistantText = "";
+      try {
+        for await (const line of result.logIterator) {
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "assistant" && event.message?.content) {
+              const textBlocks = Array.isArray(event.message.content)
+                ? event.message.content.filter((b: { type?: string }) => b.type === "text")
+                : [];
+              if (textBlocks.length > 0) {
+                lastAssistantText = textBlocks.map((b: { text: string }) => b.text).join("\n");
+              }
+            }
+            if (event.type === "result") {
+              const resultText = lastAssistantText || event.result || event.text || "";
+              if (resultText) {
+                eventBus.publish({
+                  kind: "artifact-update",
+                  taskId,
+                  contextId: effectiveContextId,
+                  artifact: {
+                    artifactId: "result",
+                    name: "Agent Result",
+                    parts: [{ kind: "text", text: resultText } as TextPart],
+                  },
+                  lastChunk: true,
+                } as TaskArtifactUpdateEvent);
+              }
+            }
+          } catch {
+            // Non-JSON line — skip
+          }
+        }
+      } catch (err) {
+        logger.error("Error consuming session log stream", {
+          task_id: taskId,
+          session_id: existingSession.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // Finalize session message (persists transcript, transitions session to idle)
+      await finalizeSessionMessage(
+        result.runId,
+        this.deps.tenantId,
+        existingSession.id,
+        result.transcriptChunks,
+        effectiveBudget,
+        sandbox,
+        result.sdkSessionIdRef.value,
+      );
+
+      // Read finalized status
+      const sql = getHttpClient();
+      const finalRows = await sql`
+        SELECT status FROM runs WHERE id = ${result.runId} AND tenant_id = ${this.deps.tenantId}
+      `;
+      const finalStatus = finalRows[0]?.status as RunStatus | undefined;
+      const finalState = finalStatus ? runStatusToA2a(finalStatus) : "completed";
+
+      eventBus.publish({
+        kind: "status-update",
+        taskId,
+        contextId: effectiveContextId,
+        status: {
+          state: finalState,
+          timestamp: new Date().toISOString(),
+          ...(finalState === "failed" ? { message: { role: "agent", kind: "message", messageId: taskId, parts: [{ kind: "text", text: "Agent execution failed" } as TextPart] } } : {}),
+        },
+        final: true,
+      } as TaskStatusUpdateEvent);
+
+      // Don't call eventBus.finished() here — the finally block in execute() handles it
+      return true;
+
+    } catch (err) {
+      logger.error("tryReuseSession unexpected error", {
+        context_id: contextId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }
 
