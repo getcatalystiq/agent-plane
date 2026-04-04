@@ -143,6 +143,8 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
   await execute("DELETE FROM mcp_connections WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)", [tenantId]);
   await execute("DELETE FROM runs WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM sessions WHERE tenant_id = $1", [tenantId]);
+  await execute("DELETE FROM plugin_marketplaces WHERE tenant_id = $1", [tenantId]);
+  await execute("DELETE FROM mcp_servers WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM agents WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM api_keys WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM tenants WHERE id = $1", [tenantId]);
