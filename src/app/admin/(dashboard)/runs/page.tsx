@@ -18,7 +18,7 @@ const RunWithContext = z.object({
   duration_ms: z.coerce.number(),
   total_input_tokens: z.coerce.number(),
   total_output_tokens: z.coerce.number(),
-  triggered_by: RunTriggeredBySchema.default("api"),
+  triggered_by: RunTriggeredBySchema.catch("api"),
   error_type: z.string().nullable(),
   started_at: z.coerce.string().nullable(),
   completed_at: z.coerce.string().nullable(),
