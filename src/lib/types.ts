@@ -36,13 +36,62 @@ export type RunStatus =
   | "cancelled"
   | "timed_out";
 
-export type AuthScheme = "OAUTH2" | "OAUTH1" | "API_KEY" | "NO_AUTH" | "OTHER";
+// Mirrors the SDK's published auth-scheme enum
+// (node_modules/@composio/client/resources/auth-configs.d.ts).
+export type AuthScheme =
+  | "OAUTH2"
+  | "OAUTH1"
+  | "API_KEY"
+  | "BEARER_TOKEN"
+  | "NO_AUTH"
+  | "BASIC"
+  | "BASIC_WITH_JWT"
+  | "BILLCOM_AUTH"
+  | "CALCOM_AUTH"
+  | "GOOGLE_SERVICE_ACCOUNT"
+  | "SERVICE_ACCOUNT"
+  | "SAML"
+  | "DCR_OAUTH"
+  | "OTHER";
+
+// User's chosen connect mode. Independent of AuthScheme: OAUTH2 covers both
+// Composio-managed and bring-your-own-app flows; the distinction lives here.
+export type AuthMethod = "composio_oauth" | "byoa_oauth" | "custom_token";
+
+// The set of methods we render in the picker. Other methods (BASIC, JWT
+// variants, vendor-specific) are detected but hidden from the UI.
+export const SUPPORTED_AUTH_METHODS: readonly AuthMethod[] = [
+  "composio_oauth",
+  "byoa_oauth",
+  "custom_token",
+] as const;
+
+// Per-toolkit connection metadata persisted in agents.composio_connection_metadata.
+export interface ConnectionMetadata {
+  auth_method: AuthMethod;
+  auth_scheme: AuthScheme;
+  bot_user_id: string | null;
+  display_name: string | null;
+  captured_at: string | null;
+  capture_deferred?: boolean;
+}
+
+export interface WhoamiResult {
+  bot_user_id: string;
+  display_name: string;
+}
 
 export interface TenantConnectorInfo {
   slug: string;
   name: string;
   logo: string;
+  /** @deprecated Use `available_schemes` + `selected_method`. Retained one release for SDK consumers. */
   auth_scheme: AuthScheme;
+  available_schemes: AuthScheme[];
+  selected_method: AuthMethod | null;
+  bot_user_id: string | null;
+  display_name: string | null;
+  capture_deferred: boolean;
   connected: boolean;
 }
 

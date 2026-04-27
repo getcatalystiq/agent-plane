@@ -18,7 +18,12 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   if (!agent) return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
 
   // Generate signed state for CSRF protection
-  const state = await signOAuthState({ agentId, tenantId: agent.tenant_id, toolkit });
+  const state = await signOAuthState({
+    agentId,
+    tenantId: agent.tenant_id,
+    toolkit,
+    authMethod: "composio_oauth",
+  });
 
   // Build callback URL with popup mode flag and signed state
   const callbackUrl = new URL(
