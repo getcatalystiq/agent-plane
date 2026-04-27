@@ -650,7 +650,7 @@ function ComposioConnectorCard(props: CardProps) {
         )}
         <span className="text-sm font-medium truncate flex-1">{c.name}</span>
         <Badge variant="outline" className="text-xs flex-shrink-0">
-          {activeMethod ? METHOD_LABELS[activeMethod] : c.primaryScheme}
+          {c.primaryScheme}
         </Badge>
         <button
           type="button"
@@ -664,7 +664,12 @@ function ComposioConnectorCard(props: CardProps) {
 
       {isNoAuth ? (
         <span className="text-xs text-muted-foreground">No auth required</span>
-      ) : isActive ? (
+      ) : isActive && c.selectedMethod ? (
+        // Only claim "Connected" when the user explicitly went through one of
+        // our flows (we have stored metadata). Composio sometimes reports
+        // ACTIVE on a leftover auth_config from earlier flows where the user
+        // didn't actually authorize — fall through to the neutral status text
+        // below in that case.
         <div className="text-xs">
           <span className="font-medium text-green-500">✓ Connected</span>
           {c.displayName && (
@@ -676,7 +681,9 @@ function ComposioConnectorCard(props: CardProps) {
         </div>
       ) : c.connectionStatus ? (
         <span className={`text-xs ${statusColor(c.connectionStatus)}`}>{c.connectionStatus.toLowerCase()}</span>
-      ) : null}
+      ) : (
+        <span className="text-xs text-muted-foreground">Not connected</span>
+      )}
 
       {isActive && (c.captureDeferred || (!c.botUserId && c.selectedMethod)) && (
         <button
@@ -722,16 +729,24 @@ function ComposioConnectorCard(props: CardProps) {
         </div>
       )}
 
-      {!isNoAuth && activeMethod === "composio_oauth" && !isActive && (
-        <a href={`/api/admin/agents/${props.agentId}/connectors/${c.slug}`} className="mt-auto">
-          <Button size="sm" variant="outline" className="h-7 text-xs w-full">Connect</Button>
-        </a>
-      )}
-      {!isNoAuth && activeMethod === "composio_oauth" && isActive && c.selectedMethod === "composio_oauth" && (
-        <a href={`/api/admin/agents/${props.agentId}/connectors/${c.slug}`} className="mt-auto">
-          <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground w-full">Reconnect</Button>
-        </a>
-      )}
+      {!isNoAuth && activeMethod === "composio_oauth" && (() => {
+        // Single button. "Reconnect" only when our own metadata says they're
+        // already connected via composio_oauth; otherwise "Connect" — covers
+        // first-time setup AND the case where Composio reports ACTIVE on a
+        // stale auth-config the user never authorized.
+        const isOurActive = isActive && c.selectedMethod === "composio_oauth";
+        return (
+          <a href={`/api/admin/agents/${props.agentId}/connectors/${c.slug}`} className="mt-auto">
+            <Button
+              size="sm"
+              variant={isOurActive ? "ghost" : "outline"}
+              className={`h-7 text-xs w-full ${isOurActive ? "text-muted-foreground" : ""}`}
+            >
+              {isOurActive ? "Reconnect" : "Connect"}
+            </Button>
+          </a>
+        );
+      })()}
 
       {!isNoAuth && activeMethod === "byoa_oauth" && (
         <div className="flex flex-col gap-1 mt-auto">
