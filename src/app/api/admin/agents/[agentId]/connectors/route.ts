@@ -15,6 +15,7 @@ import {
   upsertConnectionMetadata,
 } from "@/lib/connection-metadata";
 import { withErrorHandler } from "@/lib/api";
+import { logger } from "@/lib/logger";
 import { z } from "zod";
 import type { AuthMethod, AuthScheme, ConnectionMetadata } from "@/lib/types";
 
@@ -121,6 +122,15 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     await saveCustomAuthConnector(agent.id, slugLower, scheme, token);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Log the raw Composio error so we can diagnose 400s — sanitizeComposioError
+    // strips the detail before returning to the tenant. Token value never
+    // appears in `err`; it's not echoed by Composio.
+    logger.warn("saveCustomAuthConnector failed", {
+      agent_id: agent.id,
+      slug: slugLower,
+      scheme,
+      error: msg,
+    });
     return NextResponse.json(
       { error: { code: "bad_request", message: sanitizeComposioError(msg) } },
       { status: 400 },
