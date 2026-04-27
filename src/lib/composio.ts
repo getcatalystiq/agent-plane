@@ -236,6 +236,23 @@ async function resolveAllowedTools(
 ): Promise<string[]> {
   if (!allowedTools || allowedTools.length === 0) return [];
 
+  // Drop tools whose prefix doesn't match any current toolkit. Happens when an
+  // agent's composio_toolkits changed (e.g. `slack` → `slackbot`) but the
+  // saved allowed_tools list still has tools from the removed toolkit. Composio
+  // rejects mcp.create with MCP_InvalidToolsProvided in that case.
+  const validPrefixes = toolkits.map((t) => t.toUpperCase() + "_");
+  const filteredAllowed = allowedTools.filter((tool) =>
+    validPrefixes.some((p) => tool.startsWith(p)),
+  );
+  if (filteredAllowed.length === 0) return [];
+  if (filteredAllowed.length !== allowedTools.length) {
+    logger.info("Dropped orphaned allowed_tools entries (toolkit no longer configured)", {
+      toolkits,
+      dropped: allowedTools.filter((t) => !filteredAllowed.includes(t)),
+    });
+  }
+  allowedTools = filteredAllowed;
+
   const unfilteredToolkits = toolkits.filter((slug) => {
     const prefix = slug.toUpperCase() + "_";
     return !allowedTools.some((t) => t.startsWith(prefix));
@@ -338,18 +355,41 @@ export async function getOrCreateComposioMcpServer(
       }
     }
 
+    // Retry helper: if Composio rejects allowed_tools (renamed/removed tool
+    // slugs we can't predict), drop the filter and run with all toolkit tools.
+    // Less restrictive but unblocks the run.
+    async function withToolFallback<T>(label: string, fn: (allowed: string[]) => Promise<T>): Promise<T> {
+      try {
+        return await fn(resolvedAllowedTools);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (resolvedAllowedTools.length > 0 && msg.includes("MCP_InvalidToolsProvided")) {
+          logger.warn("Composio rejected allowed_tools; retrying without filter", {
+            label,
+            user_id: userId,
+            agent_id: agentId,
+            error: msg.slice(0, 300),
+          });
+          return await fn([]);
+        }
+        throw err;
+      }
+    }
+
     if (usableExistingId) {
       const { authConfigIds } = await splitToolkitsForMcp(client, userId, toolkits);
 
       serverId = usableExistingId;
       serverName = agentName;
 
-      await client.mcp.update(serverId, {
-        auth_config_ids: authConfigIds,
-        toolkits: toolkits.map((t) => t.toLowerCase()),
-        ...(resolvedAllowedTools.length > 0 ? { allowed_tools: resolvedAllowedTools } : {}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
+      await withToolFallback("update-existing", async (allowed) => {
+        await client.mcp.update(serverId, {
+          auth_config_ids: authConfigIds,
+          toolkits: toolkits.map((t) => t.toLowerCase()),
+          ...(allowed.length > 0 ? { allowed_tools: allowed } : {}),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any);
+      });
       logger.info("Composio MCP server updated with current toolkits", {
         user_id: userId,
         agent_id: agentId,
@@ -375,12 +415,14 @@ export async function getOrCreateComposioMcpServer(
 
       let server: { id: string; name: string };
       if (existingByName) {
-        await client.mcp.update(existingByName.id, {
-          auth_config_ids: authConfigIds,
-          toolkits: toolkits.map((t) => t.toLowerCase()),
-          ...(resolvedAllowedTools.length > 0 ? { allowed_tools: resolvedAllowedTools } : {}),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any);
+        await withToolFallback("update-by-name", async (allowed) => {
+          await client.mcp.update(existingByName.id, {
+            auth_config_ids: authConfigIds,
+            toolkits: toolkits.map((t) => t.toLowerCase()),
+            ...(allowed.length > 0 ? { allowed_tools: allowed } : {}),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any);
+        });
         server = existingByName;
         logger.info("Composio MCP server updated and recovered by name", {
           user_id: userId,
@@ -391,14 +433,16 @@ export async function getOrCreateComposioMcpServer(
           no_auth_apps: noAuthApps,
         });
       } else {
-        server = await client.mcp.create({
-          name,
-          auth_config_ids: authConfigIds,
-          managed_auth_via_composio: true,
-          no_auth_apps: noAuthApps,
-          ...(resolvedAllowedTools.length > 0 ? { allowed_tools: resolvedAllowedTools } : {}),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any);
+        server = await withToolFallback("create", async (allowed) =>
+          await client.mcp.create({
+            name,
+            auth_config_ids: authConfigIds,
+            managed_auth_via_composio: true,
+            no_auth_apps: noAuthApps,
+            ...(allowed.length > 0 ? { allowed_tools: allowed } : {}),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any),
+        );
       }
       serverId = server.id;
       serverName = server.name;
