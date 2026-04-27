@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { execute } from "@/db";
 import { logger } from "@/lib/logger";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -247,56 +247,51 @@ export async function POST(
 
   const prompt = buildPromptFromTemplate(source.prompt_template, payload, { name: source.name });
 
-  let runId: RunId;
-  try {
-    const created = await createRun(
-      source.tenant_id as TenantId,
-      source.agent_id as AgentId,
-      prompt,
-      {
-        triggeredBy: "webhook",
-        webhookSourceId: source.id as WebhookSourceId,
-      },
-    );
-    runId = created.run.id as RunId;
-  } catch (err) {
-    let code: DeliveryError = "internal_error";
-    let status = 500;
-    if (err instanceof ConcurrencyLimitError) {
-      code = "rate_limited";
-      status = 429;
-    } else if (err instanceof BudgetExceededError) {
-      code = "internal_error";
-      status = 402;
+  // Respond 202 immediately, then create the run in the background. Linear
+  // (and most webhook senders) retry if we don't 2xx within ~5 seconds.
+  // createRun touches the DB, runs concurrency + budget checks, and starts
+  // sandbox prep — too slow for the inline path. Idempotency is preserved by
+  // the recordDelivery row above: a retry with the same delivery_id hits the
+  // duplicate branch and returns the original response shape.
+  after(async () => {
+    try {
+      const created = await createRun(
+        source.tenant_id as TenantId,
+        source.agent_id as AgentId,
+        prompt,
+        {
+          triggeredBy: "webhook",
+          webhookSourceId: source.id as WebhookSourceId,
+        },
+      );
+      const runId = created.run.id as RunId;
+      await Promise.all([
+        attachDeliveryRun(initialDelivery.deliveryRowId, runId),
+        touchSourceLastTriggered(source.id as WebhookSourceId),
+      ]).catch((err) => {
+        logger.warn("webhook post-create attach failed", {
+          source_id: source.id,
+          run_id: runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } catch (err) {
+      let code: DeliveryError = "internal_error";
+      if (err instanceof ConcurrencyLimitError) code = "rate_limited";
+      else if (err instanceof BudgetExceededError) code = "internal_error";
+      await markDeliveryError(initialDelivery.deliveryRowId, code).catch(() => {});
+      logger.warn("webhook run creation failed (background)", {
+        source_id: source.id,
+        delivery_id: deliveryId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-    await markDeliveryError(initialDelivery.deliveryRowId, code);
-    logger.warn("webhook run creation failed", {
-      source_id: source.id,
-      delivery_id: deliveryId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return NextResponse.json(
-      { error: { code, message: err instanceof Error ? err.message : "Internal error" } },
-      { status },
-    );
-  }
-
-  await Promise.all([
-    attachDeliveryRun(initialDelivery.deliveryRowId, runId),
-    touchSourceLastTriggered(source.id as WebhookSourceId),
-  ]).catch((err) => {
-    logger.warn("webhook post-create attach failed", {
-      source_id: source.id,
-      run_id: runId,
-      error: err instanceof Error ? err.message : String(err),
-    });
   });
 
   return NextResponse.json(
     {
-      run_id: runId,
-      duplicate: false,
-      status_url: `/api/runs/${runId}`,
+      delivery_id: deliveryId,
+      accepted: true,
       source_name: source.name,
     },
     { status: 202 },
