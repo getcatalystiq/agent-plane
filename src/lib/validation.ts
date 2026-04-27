@@ -724,3 +724,45 @@ export const UpdateDedupeRuleSchema = z
     { message: "patch must include at least one of key_path, window_seconds, enabled" },
   );
 export type UpdateDedupeRuleInput = z.infer<typeof UpdateDedupeRuleSchema>;
+
+// --- Webhook Payload Filter Rules ---
+//
+// Per-source boolean expression evaluated against the parsed payload after
+// content-dedupe. Mismatch = drop with audit (200 + filtered: true). Empty
+// conditions or null rules = no filtering. See src/lib/webhook-filter.ts for
+// the evaluator and operator semantics.
+
+export const FilterOperatorSchema = z.enum([
+  "equals",
+  "not_equals",
+  "contains",
+  "not_contains",
+  "exists",
+  "not_exists",
+]);
+export type FilterOperator = z.infer<typeof FilterOperatorSchema>;
+
+const FilterConditionSchema = z
+  .object({
+    keyPath: DedupeKeyPathSchema,
+    operator: FilterOperatorSchema,
+    // Required for non-existence operators; ignored for exists/not_exists.
+    value: z.string().max(500).optional(),
+  })
+  .refine(
+    (cond) =>
+      cond.operator === "exists" ||
+      cond.operator === "not_exists" ||
+      typeof cond.value === "string",
+    {
+      message:
+        "value is required for equals/not_equals/contains/not_contains operators",
+    },
+  );
+export type FilterCondition = z.infer<typeof FilterConditionSchema>;
+
+export const FilterRulesSchema = z.object({
+  combinator: z.enum(["AND", "OR"]),
+  conditions: z.array(FilterConditionSchema).max(50),
+});
+export type FilterRules = z.infer<typeof FilterRulesSchema>;

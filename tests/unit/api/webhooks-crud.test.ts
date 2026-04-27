@@ -56,6 +56,7 @@ function fakeSource(overrides: Partial<WebhookSourceRow> = {}): WebhookSourceRow
     previous_secret_expires_at: null,
     prompt_template: "Event: {{payload}}",
     last_triggered_at: null,
+    filter_rules: null,
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
@@ -73,6 +74,7 @@ function publicSource(overrides: Partial<PublicWebhookSourceRow> = {}): PublicWe
     signature_format: "sha256_hex",
     prompt_template: "Event: {{payload}}",
     last_triggered_at: null,
+    filter_rules: null,
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
@@ -113,6 +115,47 @@ describe("POST /api/webhooks", () => {
     expect(body.secret).toBe("whsec_revealed_once");
     expect(body).not.toHaveProperty("secret_enc");
     expect(body).not.toHaveProperty("previous_secret_enc");
+  });
+
+  it("creates with filter_rules forwarded to lib", async () => {
+    const rules = {
+      combinator: "AND",
+      conditions: [
+        { keyPath: "data.action", operator: "equals", value: "create" },
+      ],
+    };
+    mocks.createWebhookSource.mockResolvedValueOnce({
+      source: fakeSource({ filter_rules: rules as never }),
+      secret: "whsec_x",
+    });
+    const req = postRequest("https://app.example.com/api/webhooks", {
+      agent_id: AGENT_ID,
+      name: "linear-create-only",
+      prompt_template: "Event: {{payload}}",
+      filter_rules: rules,
+    });
+    const res = await collectionPost(req);
+    expect(res.status).toBe(201);
+    expect(mocks.createWebhookSource).toHaveBeenCalledWith(
+      expect.objectContaining({ filterRules: rules }),
+    );
+  });
+
+  it("creates with filterRules: null when filter_rules omitted", async () => {
+    mocks.createWebhookSource.mockResolvedValueOnce({
+      source: fakeSource(),
+      secret: "whsec_x",
+    });
+    const req = postRequest("https://app.example.com/api/webhooks", {
+      agent_id: AGENT_ID,
+      name: "no-filter",
+      prompt_template: "Event: {{payload}}",
+    });
+    const res = await collectionPost(req);
+    expect(res.status).toBe(201);
+    expect(mocks.createWebhookSource).toHaveBeenCalledWith(
+      expect.objectContaining({ filterRules: null }),
+    );
   });
 
   it("returns 400 on invalid input (Zod)", async () => {
@@ -191,6 +234,64 @@ describe("PATCH /api/webhooks/[id]", () => {
       SOURCE_ID,
       { enabled: false },
     );
+  });
+
+  it("accepts filter_rules and forwards to updateWebhookSource", async () => {
+    const rules = {
+      combinator: "AND",
+      conditions: [
+        { keyPath: "data.action", operator: "equals", value: "create" },
+      ],
+    };
+    mocks.updateWebhookSource.mockResolvedValueOnce(
+      publicSource({ filter_rules: rules as never }),
+    );
+    const req = postRequest(
+      `https://app.example.com/api/webhooks/${SOURCE_ID}`,
+      { filter_rules: rules },
+      "PATCH",
+    );
+    const res = await itemPatch(req, { params: Promise.resolve({ sourceId: SOURCE_ID }) });
+    expect(res.status).toBe(200);
+    expect(mocks.updateWebhookSource).toHaveBeenCalledWith(
+      TENANT_ID,
+      SOURCE_ID,
+      { filter_rules: rules },
+    );
+  });
+
+  it("accepts filter_rules: null to clear", async () => {
+    mocks.updateWebhookSource.mockResolvedValueOnce(publicSource());
+    const req = postRequest(
+      `https://app.example.com/api/webhooks/${SOURCE_ID}`,
+      { filter_rules: null },
+      "PATCH",
+    );
+    const res = await itemPatch(req, { params: Promise.resolve({ sourceId: SOURCE_ID }) });
+    expect(res.status).toBe(200);
+    expect(mocks.updateWebhookSource).toHaveBeenCalledWith(
+      TENANT_ID,
+      SOURCE_ID,
+      { filter_rules: null },
+    );
+  });
+
+  it("rejects invalid filter_rules with 400", async () => {
+    const req = postRequest(
+      `https://app.example.com/api/webhooks/${SOURCE_ID}`,
+      {
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data..bad", operator: "equals", value: "x" },
+          ],
+        },
+      },
+      "PATCH",
+    );
+    const res = await itemPatch(req, { params: Promise.resolve({ sourceId: SOURCE_ID }) });
+    expect(res.status).toBe(400);
+    expect(mocks.updateWebhookSource).not.toHaveBeenCalled();
   });
 });
 

@@ -36,6 +36,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       signatureHeader: input.signature_header,
       secret: input.secret,
       enabled: input.enabled,
+      filterRules: input.filter_rules ?? null,
     });
     return jsonResponse(
       {

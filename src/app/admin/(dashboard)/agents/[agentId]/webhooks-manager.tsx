@@ -10,6 +10,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
 import { PROVIDER_OPTIONS, PROVIDER_PRESETS, detectProvider } from "./webhook-provider-presets";
+import {
+  OPERATOR_LABELS,
+  VALUE_REQUIRED_OPERATORS,
+  type FilterCondition,
+  type FilterOperator,
+  type FilterRules,
+} from "@/lib/webhook-filter";
 
 interface WebhookSource {
   id: string;
@@ -20,7 +27,200 @@ interface WebhookSource {
   signature_header: string;
   prompt_template: string;
   last_triggered_at: string | null;
+  filter_rules: FilterRules | null;
   created_at: string;
+}
+
+const OPERATORS_IN_ORDER: FilterOperator[] = [
+  "equals",
+  "not_equals",
+  "contains",
+  "not_contains",
+  "exists",
+  "not_exists",
+];
+
+const KEY_PATH_REGEX =
+  /^[a-zA-Z_][a-zA-Z0-9_]{0,63}(\.[a-zA-Z_][a-zA-Z0-9_]{0,63}){0,9}$/;
+
+function emptyCondition(): FilterCondition {
+  return { keyPath: "data.action", operator: "equals", value: "create" };
+}
+
+function FilterEditor({
+  rules,
+  onChange,
+}: {
+  rules: FilterRules | null;
+  onChange: (rules: FilterRules | null) => void;
+}) {
+  const conditions = rules?.conditions ?? [];
+  const combinator = rules?.combinator ?? "AND";
+
+  function update(next: FilterRules | null) {
+    onChange(next);
+  }
+
+  function addCondition() {
+    const newConditions = [...conditions, emptyCondition()];
+    update({ combinator, conditions: newConditions });
+  }
+
+  function removeCondition(index: number) {
+    const newConditions = conditions.filter((_, i) => i !== index);
+    if (newConditions.length === 0) {
+      update(null);
+    } else {
+      update({ combinator, conditions: newConditions });
+    }
+  }
+
+  function setCondition(index: number, patch: Partial<FilterCondition>) {
+    const next: FilterCondition[] = conditions.map((c, i) =>
+      i === index ? { ...c, ...patch } : c,
+    );
+    update({ combinator, conditions: next });
+  }
+
+  function setCombinator(value: "AND" | "OR") {
+    if (conditions.length === 0) return;
+    update({ combinator: value, conditions });
+  }
+
+  if (conditions.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+        No filters — every verified event triggers a run.{" "}
+        <button
+          type="button"
+          onClick={addCondition}
+          className="text-primary hover:underline"
+        >
+          Add condition
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-3 text-xs">
+        <label className="flex items-center gap-1">
+          <input
+            type="radio"
+            name={`filter-combinator`}
+            checked={combinator === "AND"}
+            onChange={() => setCombinator("AND")}
+          />
+          Match ALL conditions
+        </label>
+        <label className="flex items-center gap-1">
+          <input
+            type="radio"
+            name={`filter-combinator`}
+            checked={combinator === "OR"}
+            onChange={() => setCombinator("OR")}
+          />
+          Match ANY condition
+        </label>
+      </div>
+
+      <div className="space-y-2">
+        {conditions.map((cond, i) => {
+          const valueRequired = VALUE_REQUIRED_OPERATORS.has(cond.operator);
+          const keyPathError =
+            cond.keyPath.length > 0 && !KEY_PATH_REGEX.test(cond.keyPath);
+          const valueMissing =
+            valueRequired && (cond.value === undefined || cond.value === "");
+          return (
+            <div key={i} className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  type="text"
+                  value={cond.keyPath}
+                  onChange={(e) =>
+                    setCondition(i, { keyPath: e.target.value })
+                  }
+                  placeholder="data.action"
+                  className="font-mono text-xs flex-1 min-w-[120px]"
+                />
+                <select
+                  value={cond.operator}
+                  onChange={(e) =>
+                    setCondition(i, {
+                      operator: e.target.value as FilterOperator,
+                      // Clear value when switching to existence operator.
+                      ...(VALUE_REQUIRED_OPERATORS.has(
+                        e.target.value as FilterOperator,
+                      )
+                        ? {}
+                        : { value: undefined }),
+                    })
+                  }
+                  className="flex h-9 rounded-md border border-border bg-background px-2 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {OPERATORS_IN_ORDER.map((op) => (
+                    <option key={op} value={op}>
+                      {OPERATOR_LABELS[op]}
+                    </option>
+                  ))}
+                </select>
+                {valueRequired ? (
+                  <Input
+                    type="text"
+                    value={cond.value ?? ""}
+                    onChange={(e) =>
+                      setCondition(i, { value: e.target.value })
+                    }
+                    placeholder="value"
+                    className="font-mono text-xs flex-1 min-w-[100px]"
+                  />
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => removeCondition(i)}
+                  aria-label="Remove condition"
+                >
+                  ×
+                </Button>
+              </div>
+              {keyPathError ? (
+                <div className="text-xs text-destructive">
+                  Key path must be dot-separated identifiers
+                  (e.g. <code>data.action</code>).
+                </div>
+              ) : null}
+              {valueMissing ? (
+                <div className="text-xs text-destructive">
+                  Value is required for this operator.
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+
+      <Button size="sm" variant="outline" onClick={addCondition}>
+        Add condition
+      </Button>
+    </div>
+  );
+}
+
+function isFilterRulesValid(rules: FilterRules | null): boolean {
+  if (!rules) return true;
+  if (rules.conditions.length === 0) return true;
+  for (const c of rules.conditions) {
+    if (!KEY_PATH_REGEX.test(c.keyPath)) return false;
+    if (
+      VALUE_REQUIRED_OPERATORS.has(c.operator) &&
+      (c.value === undefined || c.value === "")
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 interface EffectiveDedupeRule {
@@ -235,6 +435,9 @@ function WebhookRow({
     }
   }
 
+  const [editingFilter, setEditingFilter] = useState(false);
+  const filterCount = source.filter_rules?.conditions.length ?? 0;
+
   return (
     <tr className="border-t border-border">
       <td className="p-3 font-medium text-foreground align-top">
@@ -249,6 +452,20 @@ function WebhookRow({
             >
               Manage →
             </a>
+          </div>
+        ) : null}
+        {filterCount > 0 && source.filter_rules ? (
+          <div className="mt-1 text-xs font-normal text-muted-foreground">
+            Filtering: {filterCount} condition{filterCount === 1 ? "" : "s"}{" "}
+            ({source.filter_rules.combinator})
+            {" · "}
+            <button
+              type="button"
+              onClick={() => setEditingFilter(true)}
+              className="text-primary hover:underline"
+            >
+              Edit →
+            </button>
           </div>
         ) : null}
       </td>
@@ -266,6 +483,9 @@ function WebhookRow({
       </td>
       <td className="p-3 text-right">
         <div className="flex justify-end gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setEditingFilter(true)} disabled={busy}>
+            {filterCount > 0 ? "Filter" : "Add filter"}
+          </Button>
           <Button size="sm" variant="ghost" onClick={toggle} disabled={busy}>
             {source.enabled ? "Disable" : "Enable"}
           </Button>
@@ -276,8 +496,83 @@ function WebhookRow({
             Delete
           </Button>
         </div>
+        {editingFilter ? (
+          <EditFilterDialog
+            source={source}
+            tenantId={tenantId}
+            onClose={() => setEditingFilter(false)}
+            onSaved={() => {
+              setEditingFilter(false);
+              onChanged();
+            }}
+            onError={onError}
+          />
+        ) : null}
       </td>
     </tr>
+  );
+}
+
+function EditFilterDialog({
+  source,
+  tenantId,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  source: WebhookSource;
+  tenantId: string;
+  onClose: () => void;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [rules, setRules] = useState<FilterRules | null>(source.filter_rules);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await adminFetch(`/webhooks/${source.id}?tenant_id=${tenantId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ tenant_id: tenantId, filter_rules: rules }),
+      });
+      onSaved();
+    } catch (err) {
+      onError(err instanceof AdminApiError ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Payload filter — {source.name}</DialogTitle>
+        </DialogHeader>
+        <DialogBody>
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Only trigger this agent when the webhook payload matches.
+              An empty rule list disables filtering — every verified event will run the agent.
+            </p>
+            <FilterEditor rules={rules} onChange={setRules} />
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button
+            variant="default"
+            onClick={save}
+            disabled={saving || !isFilterRulesValid(rules)}
+          >
+            {saving ? "Saving…" : "Save filter"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -297,6 +592,8 @@ function CreateWebhookDialog({
   const [provider, setProvider] = useState("github");
   const [signatureHeader, setSignatureHeader] = useState(PROVIDER_PRESETS.github.signatureHeader);
   const [signingSecret, setSigningSecret] = useState("");
+  const [filterRules, setFilterRules] = useState<FilterRules | null>(null);
+  const [showFilter, setShowFilter] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -325,6 +622,7 @@ function CreateWebhookDialog({
           prompt_template: promptTemplate,
           signature_header: signatureHeader,
           ...(trimmedSecret ? { secret: trimmedSecret } : {}),
+          ...(filterRules ? { filter_rules: filterRules } : {}),
         }),
       });
       const { secret, ...source } = res;
@@ -399,12 +697,39 @@ function CreateWebhookDialog({
                 className="font-mono text-xs"
               />
             </div>
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowFilter((v) => !v)}
+                className="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary"
+              >
+                <span>{showFilter ? "▾" : "▸"}</span>
+                Payload filter{" "}
+                <span className="font-normal text-muted-foreground">
+                  (optional — only fire the agent when the payload matches)
+                </span>
+              </button>
+              {showFilter ? (
+                <div className="mt-2">
+                  <FilterEditor rules={filterRules} onChange={setFilterRules} />
+                </div>
+              ) : null}
+            </div>
             {error ? <div className="text-sm text-destructive">{error}</div> : null}
           </div>
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose} disabled={submitting}>Cancel</Button>
-          <Button variant="default" onClick={submit} disabled={submitting || !name || !promptTemplate}>
+          <Button
+            variant="default"
+            onClick={submit}
+            disabled={
+              submitting ||
+              !name ||
+              !promptTemplate ||
+              !isFilterRulesValid(filterRules)
+            }
+          >
             {submitting ? "Creating…" : "Create webhook"}
           </Button>
         </DialogFooter>

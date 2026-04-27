@@ -38,6 +38,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       signatureHeader: input.signature_header,
       secret: input.secret,
       enabled: input.enabled,
+      filterRules: input.filter_rules ?? null,
     });
     const { secret_enc, previous_secret_enc, previous_secret_expires_at, ...publicFields } = source;
     void secret_enc; void previous_secret_enc; void previous_secret_expires_at;

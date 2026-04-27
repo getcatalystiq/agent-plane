@@ -3,6 +3,7 @@ import { execute, query, queryOne, withTenantTransaction } from "@/db";
 import { encrypt, decrypt } from "./crypto";
 import { generateWebhookSecret, verifySignature, type VerifyResult } from "./webhook-signing";
 import { getEnv } from "./env";
+import { FilterRulesSchema, type FilterRules } from "./validation";
 import type {
   AgentId,
   RunId,
@@ -29,6 +30,9 @@ export const CreateWebhookSourceSchema = z.object({
   // is used as-is (still encrypted at rest) and the response does NOT echo it.
   secret: z.string().min(8).max(200).optional(),
   enabled: z.boolean().optional(),
+  // Tri-state on the wire: omitted = no filter, null = no filter, object =
+  // apply this rule set. Persisted as JSONB on webhook_sources.
+  filter_rules: FilterRulesSchema.nullable().optional(),
 });
 export type CreateWebhookSourceInput = z.infer<typeof CreateWebhookSourceSchema>;
 
@@ -42,6 +46,9 @@ export const UpdateWebhookSourceSchema = z.object({
     .regex(/^[A-Za-z0-9-]+$/, "signature_header must be a valid HTTP header name")
     .optional(),
   enabled: z.boolean().optional(),
+  // Tri-state on the wire: omitted = no change, null = clear filter,
+  // object = replace with this rule set.
+  filter_rules: FilterRulesSchema.nullable().optional(),
 });
 export type UpdateWebhookSourceInput = z.infer<typeof UpdateWebhookSourceSchema>;
 
@@ -58,6 +65,7 @@ export const WebhookSourceRow = z.object({
   previous_secret_expires_at: z.coerce.date().nullable(),
   prompt_template: z.string(),
   last_triggered_at: z.coerce.date().nullable(),
+  filter_rules: FilterRulesSchema.nullable(),
   created_at: z.coerce.date(),
   updated_at: z.coerce.date(),
 });
@@ -65,7 +73,7 @@ export type WebhookSourceRow = z.infer<typeof WebhookSourceRow>;
 
 const PUBLIC_SOURCE_COLUMNS =
   "id, tenant_id, agent_id, name, enabled, signature_header, signature_format, " +
-  "prompt_template, last_triggered_at, created_at, updated_at";
+  "prompt_template, last_triggered_at, filter_rules, created_at, updated_at";
 
 export const PublicWebhookSourceRow = WebhookSourceRow.omit({
   secret_enc: true,
@@ -85,6 +93,8 @@ export const WebhookDeliveryRow = z.object({
   run_id: z.string().nullable(),
   dedupe_key: z.string().nullable(),
   suppressed_by_run_id: z.string().nullable(),
+  filtered: z.boolean(),
+  filtered_reason: z.string().nullable(),
   created_at: z.coerce.date(),
 });
 export type WebhookDeliveryRow = z.infer<typeof WebhookDeliveryRow>;
@@ -118,7 +128,7 @@ export async function loadWebhookSource(
     WebhookSourceRow,
     `SELECT id, tenant_id, agent_id, name, enabled, signature_header, signature_format,
             secret_enc, previous_secret_enc, previous_secret_expires_at,
-            prompt_template, last_triggered_at, created_at, updated_at
+            prompt_template, last_triggered_at, filter_rules, created_at, updated_at
      FROM webhook_sources
      WHERE id = $1`,
     [sourceId],
@@ -287,6 +297,18 @@ export async function markDeliverySuppressed(
   );
 }
 
+export async function markDeliveryFiltered(
+  deliveryRowId: string,
+  reason: string,
+): Promise<void> {
+  await execute(
+    `UPDATE webhook_deliveries
+     SET filtered = true, filtered_reason = $1
+     WHERE id = $2`,
+    [reason, deliveryRowId],
+  );
+}
+
 export async function attachDeliveryRun(
   deliveryRowId: string,
   runId: RunId,
@@ -375,6 +397,8 @@ export interface CreateWebhookSourceParams {
   /** Caller-supplied signing secret. When omitted, the backend generates one. */
   secret?: string;
   enabled?: boolean;
+  /** Optional payload filter applied after content-dedupe, before createRun. */
+  filterRules?: FilterRules | null;
 }
 
 export interface CreateWebhookSourceResult {
@@ -443,6 +467,11 @@ export async function updateWebhookSource(
     params.push(patch.enabled);
     sets.push(`enabled = $${++i}`);
   }
+  if (patch.filter_rules !== undefined) {
+    // null clears the filter; object replaces it.
+    params.push(patch.filter_rules === null ? null : JSON.stringify(patch.filter_rules));
+    sets.push(`filter_rules = $${++i}::jsonb`);
+  }
   if (sets.length === 0) return getWebhookSource(tenantId, sourceId);
   return queryOne(
     PublicWebhookSourceRow,
@@ -476,12 +505,12 @@ export async function createWebhookSource(
       WebhookSourceRow,
       `INSERT INTO webhook_sources
          (tenant_id, agent_id, name, enabled, signature_header,
-          secret_enc, prompt_template)
-       VALUES ($1, $2, $3, $4, COALESCE($5, 'X-AgentPlane-Signature'), $6, $7)
+          secret_enc, prompt_template, filter_rules)
+       VALUES ($1, $2, $3, $4, COALESCE($5, 'X-AgentPlane-Signature'), $6, $7, $8::jsonb)
        RETURNING id, tenant_id, agent_id, name, enabled, signature_header,
                  signature_format, secret_enc, previous_secret_enc,
                  previous_secret_expires_at, prompt_template, last_triggered_at,
-                 created_at, updated_at`,
+                 filter_rules, created_at, updated_at`,
       [
         params.tenantId,
         params.agentId,
@@ -490,6 +519,7 @@ export async function createWebhookSource(
         params.signatureHeader ?? null,
         secretEnc,
         params.promptTemplate,
+        params.filterRules ? JSON.stringify(params.filterRules) : null,
       ],
     );
     if (!source) throw new Error("webhook_source_insert_failed");

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   touchSourceLastTriggered: vi.fn(),
   findRecentDeliveryByDedupeKey: vi.fn(),
   markDeliverySuppressed: vi.fn(),
+  markDeliveryFiltered: vi.fn(),
   buildPromptFromTemplate: vi.fn(
     (template: string, payload: unknown, source: { name: string }) =>
       `${template} :: ${source.name} :: ${JSON.stringify(payload)}`,
@@ -51,6 +52,7 @@ vi.mock("@/lib/webhooks", () => ({
   touchSourceLastTriggered: mocks.touchSourceLastTriggered,
   findRecentDeliveryByDedupeKey: mocks.findRecentDeliveryByDedupeKey,
   markDeliverySuppressed: mocks.markDeliverySuppressed,
+  markDeliveryFiltered: mocks.markDeliveryFiltered,
   buildPromptFromTemplate: mocks.buildPromptFromTemplate,
 }));
 
@@ -85,6 +87,7 @@ const {
   touchSourceLastTriggered,
   findRecentDeliveryByDedupeKey,
   markDeliverySuppressed,
+  markDeliveryFiltered,
   createRun,
   checkRateLimit,
   computeDedupeKey,
@@ -106,6 +109,7 @@ function source(overrides: Partial<WebhookSourceRow> = {}): WebhookSourceRow {
     previous_secret_expires_at: null,
     prompt_template: "Event: {{payload}}",
     last_triggered_at: null,
+    filter_rules: null,
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
@@ -143,6 +147,7 @@ beforeEach(() => {
   touchSourceLastTriggered.mockResolvedValue(undefined);
   findRecentDeliveryByDedupeKey.mockResolvedValue(null);
   markDeliverySuppressed.mockResolvedValue(undefined);
+  markDeliveryFiltered.mockResolvedValue(undefined);
   // Default: no rule applies (matches custom-header source default).
   computeDedupeKey.mockResolvedValue({ key: null, rule: null, provider: "custom" });
   createRun.mockResolvedValue({
@@ -451,6 +456,169 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(res.status).toBe(200);
     expect(findRecentDeliveryByDedupeKey).not.toHaveBeenCalled();
     expect(markDeliverySuppressed).not.toHaveBeenCalled();
+  });
+
+  // ─── Content filter (U3) ──────────────────────────────────────────────────
+
+  it("source with no filter rules: filter step is a no-op (existing flow)", async () => {
+    // Default source mock has filter_rules: null. Should run through to createRun.
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-no-filter",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+  });
+
+  it("filter mismatch returns 200 + filtered:true and skips createRun", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: { action: "update" } }),
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-filter-mismatch",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      run_id: null,
+      accepted: false,
+      filtered: true,
+      status_url: null,
+    });
+    expect(markDeliveryFiltered).toHaveBeenCalledTimes(1);
+    expect(markDeliveryFiltered).toHaveBeenCalledWith(
+      "delivery-row-1",
+      expect.stringContaining("condition_no_match"),
+    );
+    // createRun runs in after() (mocked); flush microtasks to be sure it didn't fire
+    await new Promise((r) => setImmediate(r));
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("filter match continues to createRun", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: { action: "create" } }),
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-filter-match",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(createRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("filter on missing field is a mismatch (failure-open)", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: {} }),
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-filter-missing",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.filtered).toBe(true);
+    expect(markDeliveryFiltered).toHaveBeenCalledTimes(1);
+  });
+
+  it("dedupe match short-circuits before filter runs", async () => {
+    // Source has both a filter rule AND triggers a dedupe match. Dedupe wins.
+    computeDedupeKey.mockResolvedValueOnce({
+      key: "https://linear.app/x",
+      rule: { keyPath: "data.url", windowSeconds: 60, enabled: true },
+      provider: "linear",
+    });
+    findRecentDeliveryByDedupeKey.mockResolvedValueOnce({
+      id: "prior-row",
+      runId: "run-original-7",
+    });
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: { url: "https://linear.app/x", action: "update" } }),
+      headers: {
+        "linear-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-dedupe-and-filter",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      run_id: "run-original-7",
+      duplicate: true,
+    });
+    // Dedupe response shape, not filter response shape
+    expect(body.filtered).toBeUndefined();
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+  });
+
+  it("filter with empty conditions array is a no-op", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({ filter_rules: { combinator: "AND", conditions: [] } }),
+    );
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-empty-rules",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
   });
 
   it("rolls delivery row to error on createRun ConcurrencyLimitError", async () => {

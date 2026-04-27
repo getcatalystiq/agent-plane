@@ -56,6 +56,7 @@ function fakeSource(overrides: Partial<WebhookSourceRow> = {}): WebhookSourceRow
     previous_secret_expires_at: null,
     prompt_template: "Event from {{source.name}}: {{payload}}",
     last_triggered_at: null,
+    filter_rules: null,
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,

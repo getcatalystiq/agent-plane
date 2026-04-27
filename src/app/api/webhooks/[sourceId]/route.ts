@@ -16,6 +16,7 @@ import {
   findRecentDeliveryByDedupeKey,
   getWebhookSource,
   loadWebhookSource,
+  markDeliveryFiltered,
   markDeliverySuppressed,
   recordDelivery,
   touchSourceLastTriggered,
@@ -24,6 +25,7 @@ import {
   type DeliveryError,
 } from "@/lib/webhooks";
 import { computeDedupeKey } from "@/lib/webhook-dedupe";
+import { describeMismatchReason, evaluateFilter } from "@/lib/webhook-filter";
 import type {
   AgentId,
   RunId,
@@ -329,6 +331,37 @@ export async function POST(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // Content filter: runs after dedupe, before createRun. The evaluator owns
+  // try/catch end-to-end — it returns either {matched: true} or
+  // {matched: false, failingCondition?, error?}. Mismatch (including
+  // evaluator errors) marks the delivery filtered + audited and short-circuits
+  // with a 200 response. No createRun, no after().
+  const filterEval = evaluateFilter(source.filter_rules, payload);
+  if (!filterEval.matched) {
+    const reason = describeMismatchReason(filterEval);
+    await markDeliveryFiltered(initialDelivery.deliveryRowId, reason).catch(() => {});
+    if (filterEval.error) {
+      logger.info("webhook_filter_evaluator_error", {
+        source_id: source.id,
+        error: filterEval.error,
+      });
+    } else {
+      logger.info("webhook_filter_dropped", {
+        source_id: source.id,
+        failing_condition: filterEval.failingCondition,
+      });
+    }
+    return NextResponse.json(
+      {
+        run_id: null,
+        accepted: false,
+        filtered: true,
+        status_url: null,
+      },
+      { status: 200 },
+    );
   }
 
   const prompt = buildPromptFromTemplate(source.prompt_template, payload, { name: source.name });
