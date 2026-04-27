@@ -111,7 +111,21 @@ async function getOrCreateAuthConfig(
     } catch (createErr) {
       const msg = createErr instanceof Error ? createErr.message : String(createErr);
       if (msg.includes("DefaultAuthConfigNotFound") || msg.includes("managed credentials")) {
-        logger.warn("No Composio-managed auth for toolkit; tenant must supply credentials", {
+        // Last resort: any ENABLED auth_config Composio has for this toolkit.
+        // DCR_OAUTH and similar dynamic-registration schemes use
+        // Composio-provisioned default configs that aren't typed as
+        // `use_composio_managed_auth` but carry no per-tenant secrets either,
+        // so sharing across tenants is safe.
+        const fallback = existing.items.find((c) => c.status === "ENABLED");
+        if (fallback?.id) {
+          logger.info("Using Composio-provided default auth config for toolkit", {
+            tenant_id: tenantId,
+            slug,
+            id: fallback.id,
+          });
+          return fallback.id;
+        }
+        logger.warn("No managed/default auth config for toolkit; tenant must supply credentials", {
           tenant_id: tenantId,
           slug,
         });
