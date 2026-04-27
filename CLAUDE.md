@@ -143,7 +143,8 @@ src/
     mcp-oauth.ts          # OAuth 2.1 PKCE HTTP calls (discovery, registration, token exchange)
     mcp-oauth-state.ts    # signed MCP OAuth state token generation
     oauth-state.ts        # signed Composio OAuth state token generation
-    composio.ts           # Composio MCP integration (toolkit auth, server lifecycle, shared discovery helpers)
+    composio.ts           # Composio MCP integration (toolkit auth, server lifecycle, shared discovery helpers, BYOA OAuth + custom-token + whoami capture)
+    connection-metadata.ts  # JSONB merge helpers for agents.composio_connection_metadata + audit log
     plugins.ts            # plugin discovery + file fetching (GitHub, caching)
     github.ts             # GitHub API client (tree, content, write access, atomic push)
     identity.ts           # SoulSpec v0.5 identity parsing (SOUL.md, IDENTITY.md, STYLE.md), deriveIdentity, progressive disclosure (Level 1/2/3)
@@ -197,7 +198,7 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 - Tenant-scoped transactions via `withTenantTransaction()`
 - Migrations: numbered SQL files in `src/db/migrations/` (currently 001–029), run via `npm run migrate`
 - `tenants` table includes: `timezone` column for schedule evaluation, `logo_url` (base64 data URL or external URL)
-- `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600), `a2a_enabled` (boolean, default false; partial index on `tenant_id WHERE a2a_enabled = true`), SoulSpec v0.5 identity columns (`soul_md`, `identity_md`, `style_md`, `agents_md`, `heartbeat_md`, `user_template_md`, `examples_good_md`, `examples_bad_md`, `soul_spec_version` TEXT default '0.5', `identity` JSONB auto-derived)
+- `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `composio_connection_metadata` JSONB (per-toolkit `auth_method` + `bot_user_id` + `display_name` for the auth-method picker), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600), `a2a_enabled` (boolean, default false; partial index on `tenant_id WHERE a2a_enabled = true`), SoulSpec v0.5 identity columns (`soul_md`, `identity_md`, `style_md`, `agents_md`, `heartbeat_md`, `user_template_md`, `examples_good_md`, `examples_bad_md`, `soul_spec_version` TEXT default '0.5', `identity` JSONB auto-derived)
 - `tenants` table includes: `clawsouls_api_token` (encrypted, for ClawSouls registry publish)
 - `runs` table includes: `triggered_by` column (`api`, `schedule`, `playground`, `chat`, `a2a`, `webhook`) to track run source; `created_by_key_id` FK to api_keys (audit trail for A2A); `session_id` FK to sessions table for chat messages; `webhook_source_id` FK to webhook_sources for webhook-triggered runs (NULL for all other sources)
 - `sessions` table includes: `sandbox_id` (NULL when stopped), `sdk_session_id` (Claude Agent SDK session), `session_blob_url` (Vercel Blob backup), `status` (creating/active/idle/stopped), `message_count`, `idle_since`, `last_backup_at`; state machine: creating→active/idle/stopped, active→idle/stopped, idle→active/stopped; max 5 concurrent sessions per tenant
@@ -271,6 +272,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - All DB queries go through typed helpers in `src/db/index.ts` with Zod validation
 - Use `withErrorHandler()` wrapper on every API route handler
 - Composio MCP server URL + API key are cached per agent in the `agents` table (encrypted at rest)
+- Composio connectors support three auth methods, picked per-toolkit on the connector card: **Composio-managed OAuth** (default), **bring-your-own-app OAuth** (tenant supplies `client_id` + `client_secret`, e.g. Linear `actor=app`), and **custom token** (Slack `xoxb-`, Notion `secret_…`). Auth configs are per-tenant; MCP server creation looks up the auth config via `connectedAccounts.list({ user_ids: [tenantId] })` to prevent cross-tenant credential leaks. Post-connect identity is captured via a slug-keyed whoami registry (slack/notion/linear) and stored in `agents.composio_connection_metadata` as `bot_user_id` + `display_name`. Capture failures set `capture_deferred: true`; the UI exposes a re-capture link.
 - Custom MCP servers use OAuth 2.1 PKCE; tokens refreshed automatically with 2-phase retry on transient 5xx
 - Agent skills are injected as files into the sandbox at `.claude/skills/<folder>/<path>`
 - Plugin files are injected into the sandbox at `.claude/skills/` and `.claude/agents/`

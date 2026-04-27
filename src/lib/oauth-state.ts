@@ -5,11 +5,13 @@
  */
 
 import { signState, verifyState } from "./hmac-state";
+import type { AuthMethod } from "./types";
 
 interface OAuthStatePayload {
   agentId: string;
   tenantId: string;
   toolkit: string;
+  authMethod?: AuthMethod;
 }
 
 export async function signOAuthState(payload: OAuthStatePayload): Promise<string> {
@@ -17,6 +19,7 @@ export async function signOAuthState(payload: OAuthStatePayload): Promise<string
     a: payload.agentId,
     t: payload.tenantId,
     k: payload.toolkit,
+    ...(payload.authMethod ? { m: payload.authMethod } : {}),
   });
 }
 
@@ -29,5 +32,6 @@ export async function verifyOAuthState(
     agentId: data.a as string,
     tenantId: data.t as string,
     toolkit: data.k as string,
+    authMethod: (data.m as AuthMethod | undefined) ?? undefined,
   };
 }
