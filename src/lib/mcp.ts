@@ -45,6 +45,7 @@ export async function buildMcpConfig(
         agent.composio_toolkits,
         agent.composio_mcp_server_id,
         agent.composio_allowed_tools,
+        agent.id,
       );
       if (mcpConfig) {
         const mcpUrl = mcpConfig.url;

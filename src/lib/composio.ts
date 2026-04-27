@@ -244,6 +244,7 @@ export async function getOrCreateComposioMcpServer(
   toolkits: string[],
   existingServerId?: string | null,
   allowedTools?: string[],
+  agentId?: string,
 ): Promise<ComposioMcpConfig | null> {
   const client = getClient();
   if (!client) return null;
@@ -251,15 +252,50 @@ export async function getOrCreateComposioMcpServer(
   try {
     const resolvedAllowedTools = await resolveAllowedTools(client, toolkits, allowedTools);
 
+    // Per-agent MCP server name. Composio's MCP server has a single toolkit
+    // list at any moment; if multiple agents on the same tenant shared a
+    // server, their `mcp.update` calls would race and clobber each other's
+    // toolkit configs. We name the server by agent so each agent has its own
+    // stable toolkit list. Tenant identity for connected-account routing is
+    // still carried by `user_ids` on URL generation below.
+    const agentName = agentId ? `ap-${agentId.slice(0, 16)}` : `ap-${userId.slice(0, 16)}`;
+
     let serverId: string;
     let serverName: string;
 
+    // Treat a stored existingServerId as a hint: only honor it when the
+    // server's current name matches the agent-scoped expectation. If a legacy
+    // tenant-named server is referenced, fall through to lookup-by-name so we
+    // create / pick up the correct agent-scoped server instead of stomping on
+    // a server some other agent owns.
+    let usableExistingId: string | null = null;
     if (existingServerId) {
+      try {
+        const peek = await client.mcp.retrieve(existingServerId);
+        if (peek.name === agentName) {
+          usableExistingId = peek.id;
+        } else {
+          logger.info("Stored MCP server name doesn't match expected agent-scoped name; recreating", {
+            user_id: userId,
+            agent_id: agentId,
+            stored_server_id: existingServerId,
+            stored_name: peek.name,
+            expected_name: agentName,
+          });
+        }
+      } catch (err) {
+        logger.warn("Failed to retrieve stored Composio MCP server; falling back to lookup-by-name", {
+          stored_server_id: existingServerId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (usableExistingId) {
       const { authConfigIds } = await splitToolkitsForMcp(client, userId, toolkits);
 
-      const server = await client.mcp.retrieve(existingServerId);
-      serverId = server.id;
-      serverName = server.name;
+      serverId = usableExistingId;
+      serverName = agentName;
 
       await client.mcp.update(serverId, {
         auth_config_ids: authConfigIds,
@@ -269,6 +305,7 @@ export async function getOrCreateComposioMcpServer(
       } as any);
       logger.info("Composio MCP server updated with current toolkits", {
         user_id: userId,
+        agent_id: agentId,
         server_id: serverId,
         toolkits,
         auth_config_ids: authConfigIds,
@@ -279,11 +316,12 @@ export async function getOrCreateComposioMcpServer(
 
       logger.info("Composio toolkit auth split", {
         user_id: userId,
+        agent_id: agentId,
         no_auth_apps: noAuthApps,
         auth_config_ids: authConfigIds,
       });
 
-      const name = `ap-${userId.slice(0, 16)}`;
+      const name = agentName;
 
       const existing = await client.mcp.list({ name, limit: 5 });
       const existingByName = existing.items.find((s) => s.name === name);
