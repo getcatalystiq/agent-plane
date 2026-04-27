@@ -70,9 +70,13 @@ function statusColor(status: string | null) {
 /** Map a connector's available_schemes to the methods we render in the picker. */
 function supportedMethodsFor(schemes: AuthScheme[]): AuthMethod[] {
   const out: AuthMethod[] = [];
-  if (schemes.includes("OAUTH2") || schemes.includes("OAUTH1")) {
+  // OAuth-class schemes Composio handles via its managed OAuth flow. DCR_OAUTH
+  // (RFC 7591 dynamic client registration) is opaque to the user — Composio
+  // registers the client per-connection and runs the standard OAuth dance.
+  if (schemes.includes("OAUTH2") || schemes.includes("OAUTH1") || schemes.includes("DCR_OAUTH")) {
     out.push("composio_oauth");
   }
+  // BYOA only meaningful for OAUTH2 (where bringing-your-own-app makes sense).
   if (schemes.includes("OAUTH2")) {
     out.push("byoa_oauth");
   }
