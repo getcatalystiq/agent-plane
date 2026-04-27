@@ -111,11 +111,8 @@ async function getOrCreateAuthConfig(
     } catch (createErr) {
       const msg = createErr instanceof Error ? createErr.message : String(createErr);
       if (msg.includes("DefaultAuthConfigNotFound") || msg.includes("managed credentials")) {
-        // Last resort: any ENABLED auth_config Composio has for this toolkit.
-        // DCR_OAUTH and similar dynamic-registration schemes use
-        // Composio-provisioned default configs that aren't typed as
-        // `use_composio_managed_auth` but carry no per-tenant secrets either,
-        // so sharing across tenants is safe.
+        // 4a. Existing ENABLED auth_config (any type) — covers cases where
+        //     Composio pre-provisions a default we should reuse.
         const fallback = existing.items.find((c) => c.status === "ENABLED");
         if (fallback?.id) {
           logger.info("Using Composio-provided default auth config for toolkit", {
@@ -125,7 +122,43 @@ async function getOrCreateAuthConfig(
           });
           return fallback.id;
         }
-        logger.warn("No managed/default auth config for toolkit; tenant must supply credentials", {
+
+        // 4b. No managed credentials AND no default config — try a
+        //     custom-auth create with the toolkit's reported auth scheme. For
+        //     DCR_OAUTH (RFC 7591 dynamic client registration), Composio
+        //     handles the dynamic registration server-side without static
+        //     credentials; we just need to create an auth_config with the
+        //     scheme so connectedAccounts.create has something to reference.
+        try {
+          const tkRes = await client.toolkits.list({ search: slug, limit: 5 });
+          const tk = tkRes.items.find((t) => t.slug === slug);
+          const reportedScheme = tk?.auth_schemes?.[0];
+          if (reportedScheme) {
+            const customResult = await client.authConfigs.create({
+              toolkit: { slug },
+              auth_config: {
+                type: "use_custom_auth",
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                authScheme: reportedScheme as any,
+              },
+            });
+            logger.info("Created custom-auth config for dynamic-registration toolkit", {
+              tenant_id: tenantId,
+              slug,
+              auth_scheme: reportedScheme,
+              id: customResult.auth_config.id,
+            });
+            return customResult.auth_config.id;
+          }
+        } catch (customErr) {
+          logger.warn("Custom-auth fallback also failed", {
+            tenant_id: tenantId,
+            slug,
+            error: customErr instanceof Error ? customErr.message : String(customErr),
+          });
+        }
+
+        logger.warn("No managed/default/custom auth config available for toolkit", {
           tenant_id: tenantId,
           slug,
         });
