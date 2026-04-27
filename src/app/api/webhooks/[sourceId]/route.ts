@@ -2,7 +2,9 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { execute } from "@/db";
 import { logger } from "@/lib/logger";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { createRun } from "@/lib/runs";
+import { createRun, transitionRunStatus } from "@/lib/runs";
+import { executeRunInBackground } from "@/lib/run-executor";
+import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { NotFoundError, ConcurrencyLimitError, BudgetExceededError } from "@/lib/errors";
@@ -273,6 +275,7 @@ export async function POST(
   // the recordDelivery row above: a retry with the same delivery_id hits the
   // duplicate branch and returns the original response shape.
   after(async () => {
+    let runId: RunId | null = null;
     try {
       const created = await createRun(
         source.tenant_id as TenantId,
@@ -283,7 +286,7 @@ export async function POST(
           webhookSourceId: source.id as WebhookSourceId,
         },
       );
-      const runId = created.run.id as RunId;
+      runId = created.run.id as RunId;
       await Promise.all([
         attachDeliveryRun(initialDelivery.deliveryRowId, runId),
         touchSourceLastTriggered(source.id as WebhookSourceId),
@@ -294,14 +297,39 @@ export async function POST(
           error: err instanceof Error ? err.message : String(err),
         });
       });
+
+      // createRun only inserts the row in `pending` state. Without an executor
+      // the run sits there forever and the cleanup cron eventually marks it
+      // `timed_out` / `orphaned_sandbox`. Execute inline so the agent actually
+      // runs against the webhook payload.
+      const effectiveBudget = Math.min(created.agent.max_budget_usd, created.remainingBudget);
+      await executeRunInBackground({
+        agent: created.agent,
+        tenantId: source.tenant_id as TenantId,
+        runId,
+        prompt,
+        platformApiUrl: getCallbackBaseUrl(),
+        effectiveBudget,
+        effectiveMaxTurns: created.agent.max_turns,
+        maxRuntimeSeconds: created.agent.max_runtime_seconds,
+      });
     } catch (err) {
       let code: DeliveryError = "internal_error";
       if (err instanceof ConcurrencyLimitError) code = "rate_limited";
       else if (err instanceof BudgetExceededError) code = "internal_error";
       await markDeliveryError(initialDelivery.deliveryRowId, code).catch(() => {});
+      // If the run was created but execution threw, transition it to failed
+      // so it doesn't sit in `pending` until the cleanup cron times it out.
+      if (runId) {
+        await transitionRunStatus(runId, source.tenant_id as TenantId, "pending", "failed", {
+          completed_at: new Date().toISOString(),
+          result_summary: "Webhook execution failed",
+        }).catch(() => {});
+      }
       logger.warn("webhook run creation failed (background)", {
         source_id: source.id,
         delivery_id: deliveryId,
+        run_id: runId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
