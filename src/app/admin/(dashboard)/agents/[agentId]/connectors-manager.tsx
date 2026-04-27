@@ -791,11 +791,9 @@ function ComposioConnectorCard(props: CardProps) {
           </Button>
           <FormError error={props.error} />
 
-          {props.byoaAuthorizeUrl && (
+          {props.byoaAuthorizeUrl && props.byoaAttributionNote && (
             <div className="mt-1 flex flex-col gap-1 rounded-md border border-border/60 bg-muted/30 p-2">
-              {props.byoaAttributionNote && (
-                <p className="text-[10px] text-muted-foreground leading-snug">{props.byoaAttributionNote}</p>
-              )}
+              <p className="text-[10px] text-muted-foreground leading-snug">{props.byoaAttributionNote}</p>
               <div className="flex items-center gap-1">
                 <a
                   href={props.byoaAuthorizeUrl}
