@@ -36,11 +36,15 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       name: input.name,
       promptTemplate: input.prompt_template,
       signatureHeader: input.signature_header,
+      secret: input.secret,
       enabled: input.enabled,
     });
     const { secret_enc, previous_secret_enc, previous_secret_expires_at, ...publicFields } = source;
     void secret_enc; void previous_secret_enc; void previous_secret_expires_at;
-    return jsonResponse({ ...publicFields, secret }, 201);
+    // Only echo the secret when the caller didn't supply one — they need to
+    // see the auto-generated value once. If they supplied a secret, they
+    // already know it; don't bounce it back.
+    return jsonResponse({ ...publicFields, ...(input.secret ? {} : { secret }) }, 201);
   } catch (err) {
     if (typeof err === "object" && err && "code" in err) {
       const code = (err as { code: string }).code;

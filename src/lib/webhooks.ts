@@ -24,6 +24,10 @@ export const CreateWebhookSourceSchema = z.object({
     .max(100)
     .regex(/^[A-Za-z0-9-]+$/, "signature_header must be a valid HTTP header name")
     .optional(),
+  // Optional caller-supplied signing secret. When omitted, the backend
+  // generates one and reveals it in the response. When supplied, the secret
+  // is used as-is (still encrypted at rest) and the response does NOT echo it.
+  secret: z.string().min(8).max(200).optional(),
   enabled: z.boolean().optional(),
 });
 export type CreateWebhookSourceInput = z.infer<typeof CreateWebhookSourceSchema>;
@@ -306,6 +310,8 @@ export interface CreateWebhookSourceParams {
   name: string;
   promptTemplate: string;
   signatureHeader?: string;
+  /** Caller-supplied signing secret. When omitted, the backend generates one. */
+  secret?: string;
   enabled?: boolean;
 }
 
@@ -400,7 +406,7 @@ export async function deleteWebhookSource(
 export async function createWebhookSource(
   params: CreateWebhookSourceParams,
 ): Promise<CreateWebhookSourceResult> {
-  const secret = generateWebhookSecret();
+  const secret = params.secret ?? generateWebhookSecret();
   const secretEnc = await encryptSecret(secret);
 
   return withTenantTransaction(params.tenantId, async (tx) => {

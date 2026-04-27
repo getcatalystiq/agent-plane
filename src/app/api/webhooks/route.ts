@@ -34,12 +34,13 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       name: input.name,
       promptTemplate: input.prompt_template,
       signatureHeader: input.signature_header,
+      secret: input.secret,
       enabled: input.enabled,
     });
     return jsonResponse(
       {
         ...redactSecrets(source),
-        secret,
+        ...(input.secret ? {} : { secret }),
       },
       201,
     );

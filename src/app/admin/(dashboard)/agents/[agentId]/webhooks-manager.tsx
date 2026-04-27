@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTi
 import { SectionHeader } from "@/components/ui/section-header";
 import { CopyButton } from "@/components/ui/copy-button";
 import { adminFetch, AdminApiError } from "@/app/admin/lib/api";
+import { PROVIDER_OPTIONS, PROVIDER_PRESETS, detectProvider } from "./webhook-provider-presets";
 
 interface WebhookSource {
   id: string;
@@ -258,15 +259,29 @@ function CreateWebhookDialog({
 }) {
   const [name, setName] = useState("");
   const [promptTemplate, setPromptTemplate] = useState(DEFAULT_TEMPLATE);
-  const [signatureHeader, setSignatureHeader] = useState("X-AgentPlane-Signature");
+  const [provider, setProvider] = useState("github");
+  const [signatureHeader, setSignatureHeader] = useState(PROVIDER_PRESETS.github.signatureHeader);
+  const [signingSecret, setSigningSecret] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function handleProviderChange(value: string) {
+    setProvider(value);
+    const preset = PROVIDER_PRESETS[value];
+    if (preset) setSignatureHeader(preset.signatureHeader);
+  }
+
+  function handleSignatureHeaderChange(value: string) {
+    setSignatureHeader(value);
+    setProvider(detectProvider(value));
+  }
 
   async function submit() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await adminFetch<WebhookSource & { secret: string }>(`/webhooks`, {
+      const trimmedSecret = signingSecret.trim();
+      const res = await adminFetch<WebhookSource & { secret?: string }>(`/webhooks`, {
         method: "POST",
         body: JSON.stringify({
           tenant_id: tenantId,
@@ -274,10 +289,13 @@ function CreateWebhookDialog({
           name,
           prompt_template: promptTemplate,
           signature_header: signatureHeader,
+          ...(trimmedSecret ? { secret: trimmedSecret } : {}),
         }),
       });
       const { secret, ...source } = res;
-      onCreated(source, secret);
+      // When the user supplied a secret, the API doesn't echo it back —
+      // they already know it, no reveal dialog needed.
+      onCreated(source, secret ?? trimmedSecret);
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : "Create failed");
     } finally {
@@ -287,7 +305,7 @@ function CreateWebhookDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent>
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>New webhook</DialogTitle>
         </DialogHeader>
@@ -304,6 +322,39 @@ function CreateWebhookDialog({
               />
             </div>
             <div>
+              <label className="block text-xs uppercase text-zinc-500">Provider</label>
+              <select
+                value={provider}
+                onChange={(e) => handleProviderChange(e.target.value)}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              >
+                {PROVIDER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs uppercase text-zinc-500">Signature header</label>
+              <input
+                type="text"
+                value={signatureHeader}
+                onChange={(e) => handleSignatureHeaderChange(e.target.value)}
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs uppercase text-zinc-500">
+                Signing secret <span className="ml-2 normal-case text-zinc-500">(optional)</span>
+              </label>
+              <input
+                type="password"
+                value={signingSecret}
+                onChange={(e) => setSigningSecret(e.target.value)}
+                placeholder="Leave empty to auto-generate"
+                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-xs"
+              />
+            </div>
+            <div>
               <label className="block text-xs uppercase text-zinc-500">
                 Prompt template <span className="ml-2 normal-case text-zinc-500">— supports {"{{payload}}"} and {"{{source.name}}"}</span>
               </label>
@@ -314,22 +365,13 @@ function CreateWebhookDialog({
                 className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-xs"
               />
             </div>
-            <div>
-              <label className="block text-xs uppercase text-zinc-500">Signature header</label>
-              <input
-                type="text"
-                value={signatureHeader}
-                onChange={(e) => setSignatureHeader(e.target.value)}
-                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-xs"
-              />
-            </div>
             {error ? <div className="text-sm text-red-400">{error}</div> : null}
           </div>
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose} disabled={submitting}>Cancel</Button>
           <Button variant="default" onClick={submit} disabled={submitting || !name || !promptTemplate}>
-            {submitting ? "Creating…" : "Create"}
+            {submitting ? "Creating…" : "Create webhook"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -361,7 +403,7 @@ function SecretRevealDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Webhook secret — copy now</DialogTitle>
         </DialogHeader>
