@@ -23,6 +23,15 @@ interface WebhookSource {
   created_at: string;
 }
 
+interface EffectiveDedupeRule {
+  keyPath: string;
+  windowSeconds: number;
+  enabled: boolean;
+  source: "default" | "override";
+}
+
+type EffectiveDedupeMap = Record<string, EffectiveDedupeRule>;
+
 interface RevealedSecret {
   webhookId: string;
   webhookName: string;
@@ -42,6 +51,7 @@ export function WebhooksManager({
   baseUrl: string;
 }) {
   const [sources, setSources] = useState<WebhookSource[]>([]);
+  const [dedupeRules, setDedupeRules] = useState<EffectiveDedupeMap>({});
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,10 +61,16 @@ export function WebhooksManager({
     setLoading(true);
     setError(null);
     try {
-      const data = await adminFetch<{ data: WebhookSource[] }>(
-        `/webhooks?tenant_id=${tenantId}&agent_id=${agentId}`,
-      );
+      const [data, rulesResponse] = await Promise.all([
+        adminFetch<{ data: WebhookSource[] }>(
+          `/webhooks?tenant_id=${tenantId}&agent_id=${agentId}`,
+        ),
+        adminFetch<{ effective: EffectiveDedupeMap }>(
+          `/dedupe-rules?tenant_id=${tenantId}`,
+        ).catch(() => ({ effective: {} })),
+      ]);
       setSources(data.data);
+      setDedupeRules(rulesResponse.effective ?? {});
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : "Failed to load webhooks");
     } finally {
@@ -106,6 +122,7 @@ export function WebhooksManager({
                   source={s}
                   baseUrl={baseUrl}
                   tenantId={tenantId}
+                  dedupeRule={dedupeRules[detectProvider(s.signature_header)] ?? null}
                   onChanged={refresh}
                   onSecretRevealed={(secret) =>
                     setReveal({
@@ -156,6 +173,7 @@ function WebhookRow({
   source,
   baseUrl,
   tenantId,
+  dedupeRule,
   onChanged,
   onSecretRevealed,
   onError,
@@ -163,6 +181,7 @@ function WebhookRow({
   source: WebhookSource;
   baseUrl: string;
   tenantId: string;
+  dedupeRule: EffectiveDedupeRule | null;
   onChanged: () => void;
   onSecretRevealed: (secret: string) => void;
   onError: (msg: string) => void;
@@ -218,8 +237,22 @@ function WebhookRow({
 
   return (
     <tr className="border-t border-border">
-      <td className="p-3 font-medium text-foreground">{source.name}</td>
-      <td className="p-3">
+      <td className="p-3 font-medium text-foreground align-top">
+        <div>{source.name}</div>
+        {dedupeRule && dedupeRule.enabled ? (
+          <div className="mt-1 text-xs font-normal text-muted-foreground">
+            Deduping: <code className="rounded bg-muted px-1 py-0.5 text-foreground">{dedupeRule.keyPath}</code>
+            {" · "}{dedupeRule.windowSeconds}s · {dedupeRule.source}{" "}
+            <a
+              href="/admin/settings#dedupe-rules"
+              className="text-primary hover:underline"
+            >
+              Manage →
+            </a>
+          </div>
+        ) : null}
+      </td>
+      <td className="p-3 align-top">
         <Badge>{source.enabled ? "Enabled" : "Disabled"}</Badge>
       </td>
       <td className="p-3 text-muted-foreground">

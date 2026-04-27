@@ -13,14 +13,17 @@ import {
   attachDeliveryRun,
   buildPromptFromTemplate,
   deleteWebhookSource,
+  findRecentDeliveryByDedupeKey,
   getWebhookSource,
   loadWebhookSource,
+  markDeliverySuppressed,
   recordDelivery,
   touchSourceLastTriggered,
   updateWebhookSource,
   verifyAndPrepare,
   type DeliveryError,
 } from "@/lib/webhooks";
+import { computeDedupeKey } from "@/lib/webhook-dedupe";
 import type {
   AgentId,
   RunId,
@@ -245,6 +248,28 @@ export async function POST(
     );
   }
 
+  // Content-based dedupe layer (failure-open). Resolves the rule for this
+  // tenant + provider, extracts the configured key from the payload, and
+  // persists it on the delivery row so a window-based lookup can suppress
+  // logical duplicates whose `delivery_id` differs.
+  let dedupeContext: Awaited<ReturnType<typeof computeDedupeKey>> = {
+    key: null,
+    rule: null,
+    provider: "custom",
+  };
+  try {
+    dedupeContext = await computeDedupeKey(
+      source.tenant_id,
+      source.signature_header,
+      payload,
+    );
+  } catch (err) {
+    logger.warn("webhook_dedupe_compute_failed", {
+      source_id: source.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   const initialDelivery = await recordDelivery({
     tenantId: source.tenant_id as TenantId,
     sourceId: source.id as WebhookSourceId,
@@ -253,6 +278,7 @@ export async function POST(
     valid: true,
     error: null,
     runId: null,
+    dedupeKey: dedupeContext.key,
   });
 
   if (initialDelivery.kind === "duplicate") {
@@ -264,6 +290,45 @@ export async function POST(
       },
       { status: 200 },
     );
+  }
+
+  // Content-dedupe window lookup. Runs only when a rule resolved AND the key
+  // extracted cleanly. Failure-open: any throw here lets the run proceed.
+  if (dedupeContext.key && dedupeContext.rule) {
+    try {
+      const match = await findRecentDeliveryByDedupeKey(
+        source.id as WebhookSourceId,
+        dedupeContext.key,
+        dedupeContext.rule.windowSeconds,
+        initialDelivery.deliveryRowId,
+      );
+      if (match) {
+        await markDeliverySuppressed(
+          initialDelivery.deliveryRowId,
+          match.runId,
+        ).catch(() => {});
+        logger.info("webhook_dedupe_suppressed", {
+          source_id: source.id,
+          provider: dedupeContext.provider,
+          dedupe_key: dedupeContext.key.slice(0, 80),
+          matched_run_id: match.runId,
+          window_seconds: dedupeContext.rule.windowSeconds,
+        });
+        return NextResponse.json(
+          {
+            run_id: match.runId,
+            duplicate: true,
+            status_url: match.runId ? `/api/runs/${match.runId}` : null,
+          },
+          { status: 200 },
+        );
+      }
+    } catch (err) {
+      logger.warn("webhook_dedupe_lookup_failed", {
+        source_id: source.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const prompt = buildPromptFromTemplate(source.prompt_template, payload, { name: source.name });

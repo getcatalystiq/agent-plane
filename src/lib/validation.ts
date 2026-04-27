@@ -673,3 +673,54 @@ export const SessionResponseRow = SessionRow.omit({
 });
 
 export type SessionResponse = z.infer<typeof SessionResponseRow>;
+
+// --- Webhook Dedupe Rules ---
+
+// Dot-path segments must look like JSON identifiers and chain with dots.
+// Allows 1–10 segments, each up to 64 chars. Total length capped at 200.
+const DEDUPE_KEY_PATH_REGEX =
+  /^[a-zA-Z_][a-zA-Z0-9_]{0,63}(\.[a-zA-Z_][a-zA-Z0-9_]{0,63}){0,9}$/;
+
+const DedupeKeyPathSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(
+    DEDUPE_KEY_PATH_REGEX,
+    "key_path must be 1–10 dot-separated segments of letters/digits/underscore (e.g. 'data.url')",
+  );
+
+const DedupeWindowSecondsSchema = z
+  .number()
+  .int()
+  .min(1, "window_seconds must be ≥ 1")
+  .max(3600, "window_seconds must be ≤ 3600");
+
+const DedupeProviderSchema = z
+  .string()
+  .min(1)
+  .max(50)
+  .regex(/^[a-z][a-z0-9_-]*$/, "provider must be lowercase letters/digits/underscore/hyphen");
+
+export const CreateDedupeRuleSchema = z.object({
+  provider: DedupeProviderSchema,
+  key_path: DedupeKeyPathSchema,
+  window_seconds: DedupeWindowSecondsSchema,
+  enabled: z.boolean().optional(),
+});
+export type CreateDedupeRuleInput = z.infer<typeof CreateDedupeRuleSchema>;
+
+export const UpdateDedupeRuleSchema = z
+  .object({
+    key_path: DedupeKeyPathSchema.optional(),
+    window_seconds: DedupeWindowSecondsSchema.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(
+    (patch) =>
+      patch.key_path !== undefined ||
+      patch.window_seconds !== undefined ||
+      patch.enabled !== undefined,
+    { message: "patch must include at least one of key_path, window_seconds, enabled" },
+  );
+export type UpdateDedupeRuleInput = z.infer<typeof UpdateDedupeRuleSchema>;

@@ -83,6 +83,8 @@ export const WebhookDeliveryRow = z.object({
   valid: z.boolean(),
   error: z.string().nullable(),
   run_id: z.string().nullable(),
+  dedupe_key: z.string().nullable(),
+  suppressed_by_run_id: z.string().nullable(),
   created_at: z.coerce.date(),
 });
 export type WebhookDeliveryRow = z.infer<typeof WebhookDeliveryRow>;
@@ -142,9 +144,14 @@ export async function verifyAndPrepare(
 ): Promise<VerifyAndPrepareResult> {
   if (!signature) return { ok: false, error: "missing_signature" };
 
-  // Timestamp is only required for prefixed (`sha256=...`) and Stripe-style
+  // Timestamp is required for prefixed (`sha256=...`) and Stripe-style
   // (`t=...,v1=...`) formats. Raw HMAC (Linear, Vercel, Sentry) carries no
   // timestamp at all — verifySignature handles that path without one.
+  const requiresTimestamp =
+    signature.startsWith("sha256=") || signature.startsWith("t=");
+  if (requiresTimestamp && !timestamp) {
+    return { ok: false, error: "missing_timestamp" };
+  }
   const ts = timestamp ?? "";
 
   const currentSecret = await decryptSecret(source.secret_enc);
@@ -185,6 +192,8 @@ export interface RecordDeliveryParams {
   valid: boolean;
   error: DeliveryError | null;
   runId: RunId | null;
+  /** Content-projection key for window-based dedupe. Null when no rule applies. */
+  dedupeKey?: string | null;
 }
 
 export type RecordDeliveryResult =
@@ -197,8 +206,8 @@ export async function recordDelivery(
   const inserted = await query(
     z.object({ id: z.string() }),
     `INSERT INTO webhook_deliveries
-       (tenant_id, source_id, delivery_id, payload_hash, valid, error, run_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (tenant_id, source_id, delivery_id, payload_hash, valid, error, run_id, dedupe_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (source_id, delivery_id) DO NOTHING
      RETURNING id`,
     [
@@ -209,6 +218,7 @@ export async function recordDelivery(
       params.valid,
       params.error,
       params.runId,
+      params.dedupeKey ?? null,
     ],
   );
 
@@ -227,6 +237,54 @@ export async function recordDelivery(
     kind: "duplicate",
     existingRunId: (existing?.run_id ?? null) as RunId | null,
   };
+}
+
+/**
+ * Look up the most recent prior delivery for the same `source_id` whose
+ * `dedupe_key` matches and whose `created_at` is within the sliding window.
+ * Excludes a specific `excludeDeliveryRowId` so the just-inserted delivery
+ * doesn't match itself.
+ *
+ * Only deliveries with `valid = true` and a non-null `run_id` count as a
+ * suppression target — we don't want to point a sender at an invalid prior
+ * delivery, and we want to point them at the run that absorbed the work.
+ */
+export async function findRecentDeliveryByDedupeKey(
+  sourceId: WebhookSourceId,
+  dedupeKey: string,
+  windowSeconds: number,
+  excludeDeliveryRowId: string,
+): Promise<{ id: string; runId: RunId | null } | null> {
+  const row = await queryOne(
+    z.object({
+      id: z.string(),
+      run_id: z.string().nullable(),
+    }),
+    `SELECT id, run_id
+     FROM webhook_deliveries
+     WHERE source_id = $1
+       AND dedupe_key = $2
+       AND id <> $3
+       AND valid = true
+       AND created_at >= now() - ($4::int * interval '1 second')
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [sourceId, dedupeKey, excludeDeliveryRowId, windowSeconds],
+  );
+  if (!row) return null;
+  return { id: row.id, runId: (row.run_id ?? null) as RunId | null };
+}
+
+export async function markDeliverySuppressed(
+  deliveryRowId: string,
+  suppressedByRunId: RunId | null,
+): Promise<void> {
+  await execute(
+    `UPDATE webhook_deliveries
+     SET suppressed_by_run_id = $1
+     WHERE id = $2`,
+    [suppressedByRunId, deliveryRowId],
+  );
 }
 
 export async function attachDeliveryRun(

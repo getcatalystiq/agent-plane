@@ -5,6 +5,7 @@ import { z } from "zod";
 import { CompanyForm } from "./company-form";
 import { ApiKeysSection } from "./api-keys-section";
 import { ClawSoulsSection } from "./clawsouls-section";
+import { DedupeRulesManager } from "./dedupe-rules-manager";
 import { DeleteCompanyButton } from "./delete-company-button";
 
 export const dynamic = "force-dynamic";
@@ -70,6 +71,9 @@ export default async function SettingsPage() {
 
       {/* ClawSouls Registry */}
       <ClawSoulsSection tenantId={tenant.id} hasToken={tenant.has_clawsouls_token} />
+
+      {/* Webhook Dedupe Rules */}
+      <DedupeRulesManager tenantId={tenant.id} />
 
       {/* Danger Zone */}
       <div className="rounded-lg border border-destructive/30 p-5">
