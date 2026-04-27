@@ -82,13 +82,16 @@ export async function prepareSessionSandbox(
   const env = getEnv();
   const effectiveRunner = resolveEffectiveRunner(params.agent.model, params.agent.runner);
 
-  // Skip MCP token refresh + plugin fetch when tokens are fresh (< 30 min).
-  // The hot path handles empty servers gracefully (skips updateMcpConfig).
-  const skipMcpRefresh = !!session.sandbox_id && isMcpFresh(session);
-  const mcpPromise = skipMcpRefresh
-    ? Promise.resolve(EMPTY_MCP)
-    : buildMcpConfig(params.agent, params.tenantId);
-  const pluginPromise = skipMcpRefresh
+  // MCP config must be rebuilt on every message: reconnectSessionSandbox
+  // rebuilds the sandbox baseEnv from config.mcpServers, so skipping the
+  // build leaves the sandbox without MCP_SERVERS_JSON for follow-up turns
+  // (Composio tools disappear between messages in the same session). The
+  // build is one Composio API call — cheap enough to do unconditionally.
+  // Plugin content can still be cached by the freshness window since it's
+  // file content rather than a token-bearing URL.
+  const skipPluginRefresh = !!session.sandbox_id && isMcpFresh(session);
+  const mcpPromise = buildMcpConfig(params.agent, params.tenantId);
+  const pluginPromise = skipPluginRefresh
     ? Promise.resolve(EMPTY_PLUGINS)
     : fetchPluginContent(params.agent.plugins ?? []);
   const authPromise = resolveSandboxAuth(params.tenantId as TenantId, effectiveRunner);
@@ -131,14 +134,12 @@ export async function prepareSessionSandbox(
       if (idleSinceMs > 5 * 60 * 1000) {
         await reconnectResult.extendTimeout(DEFAULT_SESSION_TIMEOUT_MS);
       }
-      if (!skipMcpRefresh) {
-        recordMcpRefresh(params.sessionId, params.tenantId);
-      }
+      recordMcpRefresh(params.sessionId, params.tenantId);
 
       logger.info("Session sandbox reconnected", {
         session_id: params.sessionId,
         sandbox_id: session.sandbox_id,
-        fast_path: skipMcpRefresh,
+        plugin_fast_path: skipPluginRefresh,
         skipped_extend_timeout: idleSinceMs <= 5 * 60 * 1000,
       });
       return reconnectResult;
