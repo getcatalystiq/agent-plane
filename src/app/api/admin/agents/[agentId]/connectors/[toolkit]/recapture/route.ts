@@ -32,7 +32,7 @@ export const POST = withErrorHandler(async (_request: NextRequest, context) => {
     );
   }
 
-  const statuses = await getConnectorStatuses(agent.tenant_id, [slugLower]);
+  const statuses = await getConnectorStatuses(agent.id, [slugLower]);
   const status = statuses[0];
   if (!status?.connectedAccountId || status.connectionStatus !== "ACTIVE") {
     return NextResponse.json(

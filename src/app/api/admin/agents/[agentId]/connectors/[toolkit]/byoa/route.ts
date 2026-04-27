@@ -61,7 +61,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   ).toString();
 
   const result = await initiateByoaOAuthConnector(
-    agent.tenant_id,
+    agent.id,
     toolkit,
     credentials.client_id,
     credentials.client_secret,

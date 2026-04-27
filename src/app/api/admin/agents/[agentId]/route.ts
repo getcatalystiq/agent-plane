@@ -161,7 +161,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     const newSet = new Set(input.composio_toolkits.map((t) => t.toLowerCase()));
     const removed = current.composio_toolkits.filter((t) => !newSet.has(t.toLowerCase()));
     if (removed.length > 0) {
-      removeToolkitConnections(current.tenant_id, removed).catch(() => {});
+      removeToolkitConnections(current.id, removed).catch(() => {});
     }
   }
 
@@ -194,7 +194,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
 
   // Clean up Composio connections
   if (agent.composio_toolkits.length > 0) {
-    removeToolkitConnections(agent.tenant_id, agent.composio_toolkits).catch(() => {});
+    removeToolkitConnections(agent.id, agent.composio_toolkits).catch(() => {});
   }
 
   // Delete related data then the agent

@@ -38,7 +38,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   // don't have the connectedAccountId in the redirect URL, so resolve via
   // Composio. Failure here doesn't block the response — the user still sees
   // a successful page and metadata capture is deferred.
-  const statuses = await getConnectorStatuses(payload.tenantId, [slugLower]);
+  const statuses = await getConnectorStatuses(payload.agentId, [slugLower]);
   const status = statuses[0];
   const connectedAccountId = status?.connectedAccountId ?? null;
   const primaryScheme = status?.primaryScheme ?? "OAUTH2";

@@ -135,7 +135,7 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
   const agents = await query(AgentRow, "SELECT * FROM agents WHERE tenant_id = $1", [tenantId]);
   for (const agent of agents) {
     if (agent.composio_toolkits.length > 0) {
-      removeToolkitConnections(tenantId, agent.composio_toolkits).catch(() => {});
+      removeToolkitConnections(agent.id, agent.composio_toolkits).catch(() => {});
     }
   }
 

@@ -26,7 +26,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   );
   if (!agent) throw new NotFoundError("Agent not found");
 
-  const statuses = await getConnectorStatuses(agent.tenant_id, agent.composio_toolkits);
+  const statuses = await getConnectorStatuses(agent.id, agent.composio_toolkits);
   return jsonResponse({ data: statuses.map(toTenantConnectorInfo) });
 });
 
@@ -58,7 +58,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   try {
-    await saveApiKeyConnector(agent.tenant_id, toolkit, api_key);
+    await saveApiKeyConnector(agent.id, toolkit, api_key);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new ValidationError(sanitizeComposioError(msg));

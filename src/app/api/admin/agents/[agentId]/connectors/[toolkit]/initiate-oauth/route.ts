@@ -31,7 +31,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     request.url,
   ).toString();
 
-  const result = await initiateOAuthConnector(agent.tenant_id, toolkit, callbackUrl);
+  const result = await initiateOAuthConnector(agent.id, toolkit, callbackUrl);
   if (!result) {
     return NextResponse.json({ error: { code: "upstream_error", message: "Failed to initiate OAuth" } }, { status: 502 });
   }

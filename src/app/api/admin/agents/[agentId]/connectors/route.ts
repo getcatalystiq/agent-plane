@@ -30,7 +30,7 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
     return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
-  const statuses = await getConnectorStatuses(agent.tenant_id, agent.composio_toolkits);
+  const statuses = await getConnectorStatuses(agent.id, agent.composio_toolkits);
   const stored = await readConnectionMetadata(agentId);
   const reconciled: typeof statuses = [];
   const driftedSlugs: string[] = [];
@@ -118,7 +118,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   // Save via Composio. If switching from a different method, the stale auth
   // config + connected account get cleaned up after the new one is in place.
   try {
-    await saveCustomAuthConnector(agent.tenant_id, slugLower, scheme, token);
+    await saveCustomAuthConnector(agent.id, slugLower, scheme, token);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
