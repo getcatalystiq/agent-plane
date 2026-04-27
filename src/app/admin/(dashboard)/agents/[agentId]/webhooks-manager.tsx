@@ -70,7 +70,7 @@ export function WebhooksManager({
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
         <SectionHeader title="Webhooks">
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-muted-foreground">
             HMAC-signed inbound webhooks that trigger this agent.
           </p>
         </SectionHeader>
@@ -79,18 +79,18 @@ export function WebhooksManager({
         </Button>
       </div>
 
-      {error ? <div className="text-sm text-red-400">{error}</div> : null}
+      {error ? <div className="text-sm text-destructive">{error}</div> : null}
 
       {loading ? (
-        <div className="text-sm text-zinc-400">Loading…</div>
+        <div className="text-sm text-muted-foreground">Loading…</div>
       ) : sources.length === 0 ? (
-        <div className="rounded border border-zinc-800 p-6 text-sm text-zinc-400">
-          No webhooks yet. Click <span className="text-zinc-200">New webhook</span> to add one.
+        <div className="rounded border border-border p-6 text-sm text-muted-foreground">
+          No webhooks yet. Click <span className="text-foreground">New webhook</span> to add one.
         </div>
       ) : (
-        <div className="overflow-hidden rounded border border-zinc-800">
+        <div className="overflow-hidden rounded border border-border">
           <table className="w-full text-sm">
-            <thead className="bg-zinc-900 text-left text-xs uppercase text-zinc-500">
+            <thead className="bg-muted text-left text-xs uppercase text-muted-foreground">
               <tr>
                 <th className="p-3">Name</th>
                 <th className="p-3">Enabled</th>
@@ -217,17 +217,17 @@ function WebhookRow({
   }
 
   return (
-    <tr className="border-t border-zinc-800">
-      <td className="p-3 font-medium text-zinc-100">{source.name}</td>
+    <tr className="border-t border-border">
+      <td className="p-3 font-medium text-foreground">{source.name}</td>
       <td className="p-3">
         <Badge>{source.enabled ? "Enabled" : "Disabled"}</Badge>
       </td>
-      <td className="p-3 text-zinc-400">
+      <td className="p-3 text-muted-foreground">
         {source.last_triggered_at ? new Date(source.last_triggered_at).toLocaleString() : "—"}
       </td>
       <td className="p-3">
         <div className="flex items-center gap-2">
-          <code className="truncate rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-300">{ingressUrl}</code>
+          <code className="truncate rounded bg-muted px-2 py-1 text-xs text-foreground">{ingressUrl}</code>
           <CopyButton text={ingressUrl} />
         </div>
       </td>
@@ -410,20 +410,20 @@ function SecretRevealDialog({
         </DialogHeader>
         <DialogBody>
           <div className="space-y-4">
-            <div className="rounded border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm text-yellow-200">
+            <div className="rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
               This secret is shown only once. Store it somewhere safe — it cannot be retrieved later.
             </div>
             <div>
-              <label className="block text-xs uppercase text-zinc-500">Secret</label>
+              <label className="block text-xs uppercase text-muted-foreground">Secret</label>
               <div className="mt-1 flex items-center gap-2">
-                <code className="flex-1 rounded bg-zinc-900 px-3 py-2 font-mono text-xs">{revealed.secret}</code>
+                <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-xs">{revealed.secret}</code>
                 <CopyButton text={revealed.secret} />
               </div>
             </div>
             <div>
-              <label className="block text-xs uppercase text-zinc-500">Example request</label>
+              <label className="block text-xs uppercase text-muted-foreground">Example request</label>
               <div className="mt-1 flex items-start gap-2">
-                <pre className="flex-1 overflow-x-auto rounded bg-zinc-900 p-3 font-mono text-xs text-zinc-300">{curlExample}</pre>
+                <pre className="flex-1 overflow-x-auto rounded bg-muted p-3 font-mono text-xs text-foreground">{curlExample}</pre>
                 <CopyButton text={curlExample} />
               </div>
             </div>
