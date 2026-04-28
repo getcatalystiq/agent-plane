@@ -188,10 +188,10 @@ describe("fetchPluginContent", () => {
   it("enforces MAX_FILES_PER_PLUGIN including agent files", async () => {
     (query as ReturnType<typeof vi.fn>).mockResolvedValue([mockMarketplace]);
 
-    // Create 21 files (exceeds default limit of 20)
-    const entries = Array.from({ length: 15 }, (_, i) => ({
+    // Create 51 files (exceeds default limit of 50)
+    const entries = Array.from({ length: 40 }, (_, i) => ({
       path: `my-plugin/skills/s${i}/SKILL.md`, type: "blob" as const, sha: `s${i}`, size: 100, url: "", mode: "100644",
-    })).concat(Array.from({ length: 6 }, (_, i) => ({
+    })).concat(Array.from({ length: 11 }, (_, i) => ({
       path: `my-plugin/agents/agent${i}.md`, type: "blob" as const, sha: `a${i}`, size: 100, url: "", mode: "100644",
     })));
 

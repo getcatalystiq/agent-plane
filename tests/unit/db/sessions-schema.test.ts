@@ -28,13 +28,13 @@ describe("033_runs_sessions_unify migration", () => {
 
   describe("legacy table teardown", () => {
     it("drops the runs table without CASCADE", () => {
-      expect(sql).toMatch(/DROP\s+TABLE\s+runs\s*;/i);
-      expect(sql).not.toMatch(/DROP\s+TABLE\s+runs\s+CASCADE/i);
+      expect(sql).toMatch(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?runs\s*;/i);
+      expect(sql).not.toMatch(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?runs\s+CASCADE/i);
     });
 
     it("drops the sessions table without CASCADE", () => {
-      expect(sql).toMatch(/DROP\s+TABLE\s+sessions\s*;/i);
-      expect(sql).not.toMatch(/DROP\s+TABLE\s+sessions\s+CASCADE/i);
+      expect(sql).toMatch(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?sessions\s*;/i);
+      expect(sql).not.toMatch(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?sessions\s+CASCADE/i);
     });
 
     it("explicitly drops every FK pointing into runs(id) before DROP TABLE", () => {
@@ -42,7 +42,7 @@ describe("033_runs_sessions_unify migration", () => {
       // webhook_deliveries.suppressed_by_run_id. We assert the loop exists
       // and references confrelid = 'runs' before either DROP TABLE.
       const dropFkLoopIdx = sql.search(/confrelid\s*=\s*'runs'::regclass/i);
-      const dropRunsIdx = sql.search(/DROP\s+TABLE\s+runs\s*;/i);
+      const dropRunsIdx = sql.search(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?runs\s*;/i);
       expect(dropFkLoopIdx).toBeGreaterThan(0);
       expect(dropFkLoopIdx).toBeLessThan(dropRunsIdx);
     });
@@ -50,7 +50,7 @@ describe("033_runs_sessions_unify migration", () => {
 
   describe("sessions table", () => {
     it("creates the sessions table with required columns", () => {
-      expect(sql).toMatch(/CREATE\s+TABLE\s+sessions\s*\(/i);
+      expect(sql).toMatch(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?sessions\s*\(/i);
       // Required column set per the plan.
       const required = [
         "id",
@@ -131,7 +131,7 @@ describe("033_runs_sessions_unify migration", () => {
 
   describe("session_messages table", () => {
     it("creates the session_messages table", () => {
-      expect(sql).toMatch(/CREATE\s+TABLE\s+session_messages\s*\(/i);
+      expect(sql).toMatch(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?session_messages\s*\(/i);
     });
 
     it("cascades from sessions on delete", () => {
