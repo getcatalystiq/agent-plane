@@ -1,219 +1,50 @@
 "use client";
 
-import { use, useState, useRef, useEffect, useCallback } from "react";
+import { use, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Card, CardContent } from "@/components/ui/card";
+import { MetricCard } from "@/components/ui/metric-card";
+import { TranscriptViewer, type TranscriptEvent } from "@/components/transcript-viewer";
 import { adminFetch, adminStream } from "@/app/admin/lib/api";
 
-function MarkdownContent({ children }: { children: string }) {
-  return (
-    <div className="text-sm text-foreground [&_p]:my-1 [&_h1]:text-lg [&_h1]:font-bold [&_h1]:my-2 [&_h2]:text-base [&_h2]:font-semibold [&_h2]:my-2 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 [&_li]:my-0.5 [&_pre]:bg-muted [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:text-xs [&_pre]:my-2 [&_code:not(pre_code)]:bg-muted [&_code:not(pre_code)]:px-1 [&_code:not(pre_code)]:py-0.5 [&_code:not(pre_code)]:rounded [&_code:not(pre_code)]:text-xs [&_code:not(pre_code)]:font-mono [&_a]:text-blue-400 [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_blockquote]:my-2 [&_hr]:border-border [&_hr]:my-3 [&_table]:border-collapse [&_table]:text-xs [&_table]:w-full [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_th]:bg-muted [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_strong]:font-semibold [&_em]:italic">
-      <ReactMarkdown
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        remarkPlugins={[remarkGfm as any]}
-        components={{
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
-          ),
-        }}
-      >
-        {children}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-interface PlaygroundEvent {
-  type: string;
-  [key: string]: unknown;
-}
-
-function CollapsibleJson({ data, maxHeight = "12rem" }: { data: unknown; maxHeight?: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const json = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-  return (
-    <div className="relative">
-      <pre
-        className={`text-xs font-mono text-muted-foreground bg-muted/50 rounded-md p-2 overflow-x-auto whitespace-pre-wrap break-all ${expanded ? "" : "overflow-hidden"}`}
-        style={expanded ? undefined : { maxHeight }}
-      >
-        {json}
-      </pre>
-      {json.length > 200 && (
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="text-xs text-blue-400 hover:text-blue-300 mt-1"
-        >
-          {expanded ? "Collapse" : "Expand"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function renderEvent(event: PlaygroundEvent, idx: number) {
-  if (event.type === "heartbeat") return null;
-  if (event.type === "text_delta") return null;
-  if (event.type === "session_created") return null;
-  if (event.type === "session_info") return null;
-  if (event.type === "mcp_status") return null;
-  if (event.type === "rate_limit_event") return null;
-
-  if (event.type === "user_message") {
-    return (
-      <div key={idx} className="border-t border-border pt-3 mt-1">
-        <span className="text-xs font-semibold text-emerald-400 uppercase">You</span>
-        <p className="text-sm text-foreground mt-1 whitespace-pre-wrap">{String(event.text)}</p>
-      </div>
-    );
-  }
-
-  if (event.type === "assistant") {
-    const content = event.message as { content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> } | undefined;
-    const blocks = content?.content ?? [];
-    const textBlocks = blocks.filter((c) => c.type === "text").map((c) => c.text).join("");
-    const toolUseBlocks = blocks.filter((c) => c.type === "tool_use");
-    if (!textBlocks && toolUseBlocks.length === 0) return null;
-    return (
-      <div key={idx} className="space-y-2">
-        {textBlocks && (
-          <div className="space-y-1">
-            <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
-            <MarkdownContent>{textBlocks}</MarkdownContent>
-          </div>
-        )}
-        {toolUseBlocks.map((tool, ti) => (
-          <div key={ti} className="space-y-1 ml-3 pl-3 border-l-2 border-yellow-800/50">
-            <span className="text-xs font-semibold text-yellow-400 uppercase">
-              Tool Call: {tool.name ?? "unknown"}
-            </span>
-            {tool.id && <span className="text-xs text-muted-foreground ml-2 font-mono">{String(tool.id)}</span>}
-            {tool.input != null && <CollapsibleJson data={tool.input} />}
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (event.type === "tool_use") {
-    const toolName = String(event.tool_name ?? event.name ?? "unknown");
-    return (
-      <div key={idx} className="space-y-1 ml-3 pl-3 border-l-2 border-yellow-800/50">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-yellow-400 uppercase">Tool Call</span>
-          <span className="text-xs font-mono text-yellow-400/80">{toolName}</span>
-          {event.tool_use_id ? <span className="text-xs text-muted-foreground font-mono">{String(event.tool_use_id)}</span> : null}
-        </div>
-        {event.input != null ? <CollapsibleJson data={event.input} /> : null}
-      </div>
-    );
-  }
-
-  if (event.type === "tool_result") {
-    const isError = event.is_error === true || event.error === true;
-    const content = event.output ?? event.content ?? "";
-    const contentStr = typeof content === "string" ? content : JSON.stringify(content, null, 2);
-    return (
-      <div key={idx} className={`space-y-1 ml-3 pl-3 border-l-2 ${isError ? "border-red-800/50" : "border-green-800/50"}`}>
-        <div className="flex items-center gap-2">
-          <span className={`text-xs font-semibold uppercase ${isError ? "text-red-400" : "text-green-400"}`}>
-            {isError ? "Tool Error" : "Tool Result"}
-          </span>
-          {event.tool_name ? <span className="text-xs font-mono text-muted-foreground">{String(event.tool_name)}</span> : null}
-          {event.tool_use_id ? <span className="text-xs text-muted-foreground font-mono">{String(event.tool_use_id)}</span> : null}
-        </div>
-        {contentStr ? <CollapsibleJson data={contentStr} /> : null}
-      </div>
-    );
-  }
-
-  if (event.type === "result") {
-    const success = event.subtype === "success";
-    const costUsd = event.cost_usd ?? event.total_cost_usd;
-    return (
-      <div key={idx} className={`rounded-md px-3 py-2 flex items-center gap-3 ${success ? "bg-green-950 border border-green-900" : "bg-red-950 border border-red-900"}`}>
-        <span className={`text-xs font-semibold ${success ? "text-green-400" : "text-red-400"}`}>
-          {success ? "Completed" : "Failed"}
-        </span>
-        <div className="flex flex-wrap gap-3 text-xs text-zinc-400">
-          {event.num_turns != null && <span>{String(event.num_turns)} turns</span>}
-          {costUsd != null && Number(costUsd) > 0 && <span>${Number(costUsd).toFixed(4)}</span>}
-          {event.duration_ms != null && <span>{(Number(event.duration_ms) / 1000).toFixed(1)}s</span>}
-          {event.duration_api_ms != null && <span>API: {(Number(event.duration_api_ms) / 1000).toFixed(1)}s</span>}
-        </div>
-      </div>
-    );
-  }
-
-  if (event.type === "error") {
-    return (
-      <div key={idx} className="rounded-md p-3 bg-red-950 border border-red-800">
-        <div className="flex items-center gap-2">
-          <p className="text-sm font-semibold text-red-400">Error</p>
-          {event.code ? <span className="text-xs font-mono text-red-400/70">{String(event.code)}</span> : null}
-        </div>
-        <p className="text-sm text-foreground mt-1">{String(event.error ?? "Unknown error")}</p>
-      </div>
-    );
-  }
-
-  if (event.type === "stream_detached") {
-    return (
-      <div key={idx} className="text-xs text-muted-foreground italic border-t border-border pt-2">
-        Stream detached at {event.timestamp ? new Date(String(event.timestamp)).toLocaleTimeString() : "unknown"} — run continues in background
-      </div>
-    );
-  }
-
-  if (event.type === "queued") {
-    return (
-      <div key={idx} className="text-xs text-muted-foreground">Queued…</div>
-    );
-  }
-
-  if (event.type === "sandbox_starting") {
-    return (
-      <div key={idx} className="text-xs text-muted-foreground">Starting sandbox…</div>
-    );
-  }
-
-  if (event.type === "run_started") {
-    return (
-      <div key={idx} className="text-xs text-muted-foreground">
-        Agent started
-        {event.model ? <span className="ml-2 font-mono text-foreground/60">{String(event.model)}</span> : null}
-        {event.mcp_server_count != null && Number(event.mcp_server_count) > 0 && (
-          <span className="ml-2">{String(event.mcp_server_count)} MCP server{Number(event.mcp_server_count) !== 1 ? "s" : ""}</span>
-        )}
-      </div>
-    );
-  }
-
-  if (event.type === "system") {
-    return (
-      <div key={idx} className="text-xs text-muted-foreground italic">
-        {String(event.message ?? JSON.stringify(event))}
-      </div>
-    );
-  }
-
-  // Catch-all: show any unrecognized events so nothing is hidden
-  return (
-    <div key={idx} className="space-y-1">
-      <span className="text-xs font-semibold text-purple-400 uppercase">{event.type}</span>
-      <CollapsibleJson data={event} maxHeight="8rem" />
-    </div>
-  );
-}
-
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out"]);
+
+interface RunMetrics {
+  costUsd: number;
+  numTurns: number;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+function aggregateMetrics(events: TranscriptEvent[]): RunMetrics {
+  let costUsd = 0;
+  let numTurns = 0;
+  let durationMs = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+
+  for (const ev of events) {
+    if (ev.type === "result") {
+      costUsd += Number(ev.cost_usd ?? ev.total_cost_usd ?? 0);
+      numTurns += Number(ev.num_turns ?? 0);
+      durationMs += Number(ev.duration_ms ?? 0);
+      const usage = ev.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+      if (usage) {
+        inputTokens += Number(usage.input_tokens ?? 0);
+        outputTokens += Number(usage.output_tokens ?? 0);
+      }
+    }
+  }
+
+  return { costUsd, numTurns, durationMs, inputTokens, outputTokens };
+}
 
 export default function PlaygroundPage({ params }: { params: Promise<{ agentId: string }> }) {
   const { agentId } = use(params);
   const [prompt, setPrompt] = useState("");
-  const [events, setEvents] = useState<PlaygroundEvent[]>([]);
+  const [events, setEvents] = useState<TranscriptEvent[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [running, setRunning] = useState(false);
   const [polling, setPolling] = useState(false);
@@ -222,13 +53,9 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
   const sessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [events, streamingText]);
+  const metrics = useMemo(() => aggregateMetrics(events), [events]);
 
   // Cleanup AbortController on unmount
   useEffect(() => {
@@ -268,7 +95,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           const trimmed = line.trim();
           if (!trimmed) continue;
           try {
-            const event = JSON.parse(trimmed) as PlaygroundEvent;
+            const event = JSON.parse(trimmed) as TranscriptEvent;
             if (event.type === "heartbeat") continue;
 
             if (event.type === "stream_detached") {
@@ -323,12 +150,12 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         const run = data.run as Record<string, unknown> | undefined;
 
         if (run && TERMINAL_STATUSES.has(run.status as string)) {
-          const transcript = data.transcript as PlaygroundEvent[] | undefined;
+          const transcript = data.transcript as TranscriptEvent[] | undefined;
           if (transcript && transcript.length > 0) {
             const detachIdx = transcript.findIndex((ev) => ev.type === "stream_detached");
             const eventsAfterDetach = detachIdx >= 0 ? transcript.slice(detachIdx + 1) : [];
             const newEvents = eventsAfterDetach.filter(
-              (ev: PlaygroundEvent) =>
+              (ev: TranscriptEvent) =>
                 ev.type !== "heartbeat" &&
                 ev.type !== "text_delta" &&
                 ev.type !== "run_started" &&
@@ -342,7 +169,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
           setEvents((prev) => {
             if (prev.some((ev) => ev.type === "result")) return prev;
-            const syntheticResult: PlaygroundEvent = {
+            const syntheticResult: TranscriptEvent = {
               type: "result",
               subtype: run.status === "completed" ? "success" : "failed",
               cost_usd: run.cost_usd,
@@ -392,7 +219,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           const trimmed = line.trim();
           if (!trimmed) continue;
           try {
-            const event = JSON.parse(trimmed) as PlaygroundEvent;
+            const event = JSON.parse(trimmed) as TranscriptEvent;
 
             // Capture session ID from session_created event
             if (event.type === "session_created" && event.session_id) {
@@ -446,7 +273,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     setError(null);
     setPolling(false);
 
-    // Show user message in the event stream
+    // Show user message in the event stream (rendered by TranscriptViewer)
     setEvents((prev) => [...prev, { type: "user_message", text: messageText }]);
 
     const abort = new AbortController();
@@ -457,7 +284,6 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
       const currentSessionId = sessionIdRef.current;
       if (currentSessionId) {
-        // Follow-up message to existing session
         res = await adminStream(`/sessions/${currentSessionId}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -465,7 +291,6 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           signal: abort.signal,
         });
       } else {
-        // First message — create session with prompt
         res = await adminStream("/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -488,7 +313,6 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
   function handleNewChat() {
     abortRef.current?.abort();
-    // Stop the current session in the background
     if (sessionId) {
       adminFetch(`/sessions/${sessionId}`, { method: "DELETE" }).catch((err) => {
         console.error("Failed to stop session:", err);
@@ -519,10 +343,11 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
   }
 
   const hasContent = events.length > 0 || running;
+  const isStreaming = running;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-6rem)]">
-      <div className="flex items-center gap-3 mb-4">
+    <div className="space-y-6">
+      <div className="flex items-center gap-3">
         {(sessionId || events.length > 0) && (
           <Button onClick={handleNewChat} variant="outline" size="sm" disabled={running}>
             New Chat
@@ -535,27 +360,49 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         )}
       </div>
 
-      {/* Scrollable output area */}
       {hasContent && (
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-border bg-muted/20 p-4 space-y-4 mb-4">
-          {events.map((ev, i) => renderEvent(ev, i))}
-          {streamingText && (
-            <div className="space-y-1">
-              <span className="text-xs font-semibold text-blue-400 uppercase">Assistant</span>
-              <MarkdownContent>{streamingText}</MarkdownContent>
-              <span className="inline-block w-0.5 h-4 bg-foreground animate-pulse align-text-bottom" />
-            </div>
+        <>
+          {/* Metric cards — same shape as runs view */}
+          <div className="grid gap-4 grid-cols-4">
+            <MetricCard label="Cost">
+              <span className="font-mono">${metrics.costUsd > 0 ? metrics.costUsd.toFixed(4) : "—"}</span>
+            </MetricCard>
+            <MetricCard label="Turns">{metrics.numTurns}</MetricCard>
+            <MetricCard label="Duration">
+              {metrics.durationMs > 0 ? `${(metrics.durationMs / 1000).toFixed(1)}s` : isStreaming ? "..." : "—"}
+            </MetricCard>
+            <MetricCard label="Tokens">
+              {(metrics.inputTokens + metrics.outputTokens).toLocaleString()}
+              <p className="text-xs text-muted-foreground mt-0.5 font-normal">
+                {metrics.inputTokens.toLocaleString()} in / {metrics.outputTokens.toLocaleString()} out
+              </p>
+            </MetricCard>
+          </div>
+
+          {/* Transcript — exact same component as runs view */}
+          <TranscriptViewer transcript={events} isStreaming={isStreaming} />
+
+          {/* Streaming text accumulation — same as runs view */}
+          {isStreaming && streamingText && (
+            <Card>
+              <CardContent className="py-3">
+                <div className="text-xs font-medium text-muted-foreground mb-1">Streaming text...</div>
+                <pre className="text-sm font-mono whitespace-pre-wrap text-foreground">{streamingText}</pre>
+              </CardContent>
+            </Card>
           )}
+
           {running && !streamingText && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="animate-pulse">●</span> {polling ? "Reconnected to sandbox, streaming updates…" : "Running…"}
+              <span className="animate-pulse">●</span>
+              {polling ? "Reconnected to sandbox, streaming updates…" : "Running…"}
             </div>
           )}
-        </div>
+        </>
       )}
 
-      {/* Input area at the bottom */}
-      <div className="space-y-2 shrink-0">
+      {/* Input area */}
+      <div className="space-y-2">
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Textarea
           ref={textareaRef}

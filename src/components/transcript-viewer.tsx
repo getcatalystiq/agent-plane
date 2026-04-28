@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-interface TranscriptEvent {
+export interface TranscriptEvent {
   type: string;
   [key: string]: unknown;
 }
@@ -19,7 +19,7 @@ interface ContentBlock {
 }
 
 interface ConversationItem {
-  role: "system" | "assistant" | "tool" | "result" | "error" | "a2a_incoming" | "mcp_status" | "rate_limit";
+  role: "user" | "system" | "assistant" | "tool" | "result" | "error" | "a2a_incoming" | "mcp_status" | "rate_limit";
   text?: string;
   toolName?: string;
   toolInput?: unknown;
@@ -45,7 +45,9 @@ function buildConversation(events: TranscriptEvent[]): ConversationItem[] {
   const toolCallMap = new Map<string, number>();
 
   for (const event of events) {
-    if (event.type === "system") {
+    if (event.type === "user_message") {
+      items.push({ role: "user", text: String(event.text || "") });
+    } else if (event.type === "system") {
       items.push({
         role: "system",
         model: String((event as TranscriptEvent).model || ""),
@@ -224,6 +226,8 @@ function ConversationView({ items }: { items: ConversationItem[] }) {
     <div className="space-y-3">
       {items.map((item, i) => {
         switch (item.role) {
+          case "user":
+            return <UserItem key={i} item={item} />;
           case "a2a_incoming":
             return <A2AIncomingItem key={i} item={item} />;
           case "system":
@@ -244,6 +248,17 @@ function ConversationView({ items }: { items: ConversationItem[] }) {
             return null;
         }
       })}
+    </div>
+  );
+}
+
+function UserItem({ item }: { item: ConversationItem }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 px-4 py-3">
+      <div className="flex items-center gap-2 mb-1">
+        <Badge variant="outline" className="text-[10px]">user</Badge>
+      </div>
+      <pre className="text-xs font-mono whitespace-pre-wrap">{item.text}</pre>
     </div>
   );
 }

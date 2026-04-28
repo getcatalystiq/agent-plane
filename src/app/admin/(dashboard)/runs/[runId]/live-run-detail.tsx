@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { MetricCard } from "@/components/ui/metric-card";
 import { LocalDate } from "@/components/local-date";
-import { TranscriptViewer } from "./transcript-viewer";
+import { TranscriptViewer } from "@/components/transcript-viewer";
 import { CancelRunButton } from "./cancel-run-button";
 import { adminStream } from "@/app/admin/lib/api";
 import { toast } from "@/hooks/use-toast";
