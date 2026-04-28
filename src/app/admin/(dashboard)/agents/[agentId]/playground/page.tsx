@@ -304,6 +304,19 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
         });
       }
 
+      // Dispatcher returns the session id via response header on the first
+      // message — there is no `session_created` NDJSON event. Capture it
+      // before consuming the stream so follow-up messages target this session.
+      const headerSessionId = res.headers.get("X-Session-Id");
+      if (headerSessionId && !sessionIdRef.current) {
+        sessionIdRef.current = headerSessionId;
+        setSessionId(headerSessionId);
+      }
+      const headerMessageId = res.headers.get("X-Message-Id");
+      if (headerMessageId) {
+        runIdRef.current = headerMessageId;
+      }
+
       await consumeStream(res);
     } catch (err) {
       if ((err as Error)?.name !== "AbortError") {
@@ -405,10 +418,10 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
             </Card>
           )}
 
-          {running && !streamingText && (
+          {running && !streamingText && polling && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="animate-pulse">●</span>
-              {polling ? "Reconnected to sandbox, streaming updates…" : "Running…"}
+              Reconnected to sandbox, streaming updates…
             </div>
           )}
         </>
