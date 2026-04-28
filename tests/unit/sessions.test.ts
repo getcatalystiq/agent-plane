@@ -279,24 +279,36 @@ describe("incrementMessageCount", () => {
 describe("getIdleSessions", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("queries idle sessions past threshold", async () => {
+  it("queries idle sessions past per-session TTL", async () => {
     vi.mocked(query).mockResolvedValue([]);
-    await getIdleSessions(10);
+    await getIdleSessions();
     const sql = vi.mocked(query).mock.calls[0][1] as string;
     expect(sql).toContain("status = 'idle'");
     expect(sql).toContain("idle_since");
+    // Per-session TTL column is now read from the row, not a global parameter.
+    expect(sql).toContain("idle_ttl_seconds");
   });
 });
 
 describe("getStuckSessions", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("queries stuck creating and active sessions", async () => {
+  it("queries stuck creating sessions when called with creating", async () => {
     vi.mocked(query).mockResolvedValue([]);
-    await getStuckSessions();
+    await getStuckSessions("creating", 5);
     const sql = vi.mocked(query).mock.calls[0][1] as string;
-    expect(sql).toContain("creating");
-    expect(sql).toContain("active");
+    expect(sql).toContain("status = $1");
+    const params = vi.mocked(query).mock.calls[0][2] as unknown[];
+    expect(params).toContain("creating");
+    expect(params).toContain(5);
+  });
+
+  it("queries stuck active sessions when called with active", async () => {
+    vi.mocked(query).mockResolvedValue([]);
+    await getStuckSessions("active", 30);
+    const params = vi.mocked(query).mock.calls[0][2] as unknown[];
+    expect(params).toContain("active");
+    expect(params).toContain(30);
   });
 });
 

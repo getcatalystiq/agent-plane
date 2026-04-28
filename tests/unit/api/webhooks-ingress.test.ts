@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   loadWebhookSource: vi.fn(),
   verifyAndPrepare: vi.fn(),
   recordDelivery: vi.fn(),
-  attachDeliveryRun: vi.fn(),
+  attachDeliveryMessage: vi.fn(),
   touchSourceLastTriggered: vi.fn(),
   findRecentDeliveryByDedupeKey: vi.fn(),
   markDeliverySuppressed: vi.fn(),
@@ -14,9 +14,8 @@ const mocks = vi.hoisted(() => ({
     (template: string, payload: unknown, source: { name: string }) =>
       `${template} :: ${source.name} :: ${JSON.stringify(payload)}`,
   ),
-  createRun: vi.fn(),
-  transitionRunStatus: vi.fn(),
-  executeRunInBackground: vi.fn(),
+  dispatchSessionMessage: vi.fn(),
+  transitionMessageStatus: vi.fn(),
   getCallbackBaseUrl: vi.fn(() => "https://app.example.com"),
   checkRateLimit: vi.fn(() => ({ allowed: true, remaining: 59, retryAfterMs: 0 })),
   computeDedupeKey: vi.fn(),
@@ -24,9 +23,9 @@ const mocks = vi.hoisted(() => ({
 
 // Mock next/server's `after()` so the route can call it without a request
 // scope. The real implementation requires Next's request context which the
-// test harness doesn't provide; the body of the callback exercises createRun
-// which is itself mocked, so we just invoke it inline so its assertions stay
-// observable.
+// test harness doesn't provide; the body of the callback exercises
+// dispatchSessionMessage which is itself mocked, so we just invoke it inline
+// so its assertions stay observable.
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>("next/server");
   return {
@@ -48,7 +47,7 @@ vi.mock("@/lib/webhooks", () => ({
   loadWebhookSource: mocks.loadWebhookSource,
   verifyAndPrepare: mocks.verifyAndPrepare,
   recordDelivery: mocks.recordDelivery,
-  attachDeliveryRun: mocks.attachDeliveryRun,
+  attachDeliveryMessage: mocks.attachDeliveryMessage,
   touchSourceLastTriggered: mocks.touchSourceLastTriggered,
   findRecentDeliveryByDedupeKey: mocks.findRecentDeliveryByDedupeKey,
   markDeliverySuppressed: mocks.markDeliverySuppressed,
@@ -60,13 +59,12 @@ vi.mock("@/lib/webhook-dedupe", () => ({
   computeDedupeKey: mocks.computeDedupeKey,
 }));
 
-vi.mock("@/lib/runs", () => ({
-  createRun: mocks.createRun,
-  transitionRunStatus: mocks.transitionRunStatus,
+vi.mock("@/lib/dispatcher", () => ({
+  dispatchSessionMessage: mocks.dispatchSessionMessage,
 }));
 
-vi.mock("@/lib/run-executor", () => ({
-  executeRunInBackground: mocks.executeRunInBackground,
+vi.mock("@/lib/session-messages", () => ({
+  transitionMessageStatus: mocks.transitionMessageStatus,
 }));
 
 vi.mock("@/lib/mcp-connections", () => ({
@@ -83,12 +81,12 @@ const {
   loadWebhookSource,
   verifyAndPrepare,
   recordDelivery,
-  attachDeliveryRun,
+  attachDeliveryMessage,
   touchSourceLastTriggered,
   findRecentDeliveryByDedupeKey,
   markDeliverySuppressed,
   markDeliveryFiltered,
-  createRun,
+  dispatchSessionMessage,
   checkRateLimit,
   computeDedupeKey,
 } = mocks;
@@ -137,23 +135,31 @@ function makeRequest({
 
 const ctx = { params: Promise.resolve({ sourceId: SOURCE_ID }) };
 
+// Build a minimal stream that the dispatcher mock returns. The route code
+// drains the stream via reader.read(); a one-shot empty stream is enough.
+function emptyStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(c) { c.close(); },
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   checkRateLimit.mockReturnValue({ allowed: true, remaining: 59, retryAfterMs: 0 });
   loadWebhookSource.mockResolvedValue(source());
   verifyAndPrepare.mockResolvedValue({ ok: true, usedPrevious: false });
   recordDelivery.mockResolvedValue({ kind: "inserted", deliveryRowId: "delivery-row-1" });
-  attachDeliveryRun.mockResolvedValue(undefined);
+  attachDeliveryMessage.mockResolvedValue(undefined);
   touchSourceLastTriggered.mockResolvedValue(undefined);
   findRecentDeliveryByDedupeKey.mockResolvedValue(null);
   markDeliverySuppressed.mockResolvedValue(undefined);
   markDeliveryFiltered.mockResolvedValue(undefined);
   // Default: no rule applies (matches custom-header source default).
   computeDedupeKey.mockResolvedValue({ key: null, rule: null, provider: "custom" });
-  createRun.mockResolvedValue({
-    run: { id: "run-abc-123" },
-    agent: {},
-    remainingBudget: 100,
+  dispatchSessionMessage.mockResolvedValue({
+    sessionId: "session-abc",
+    messageId: "message-abc-123",
+    stream: emptyStream(),
   });
 });
 
@@ -174,10 +180,10 @@ describe("POST /api/webhooks/[sourceId]", () => {
       accepted: true,
       source_name: "github",
     });
-    // createRun runs in `after()` (mocked to fire-and-forget); flush microtasks
+    // dispatchSessionMessage runs in `after()` (mocked to fire-and-forget); flush microtasks
     // so the spy observes the call before assertions.
     await new Promise((r) => setImmediate(r));
-    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(dispatchSessionMessage).toHaveBeenCalledTimes(1);
   });
 
   it("synthesizes a delivery_id when Webhook-Delivery-Id header is missing", async () => {
@@ -244,10 +250,10 @@ describe("POST /api/webhooks/[sourceId]", () => {
       expect.objectContaining({
         valid: false,
         error: "signature_mismatch",
-        runId: null,
+        messageId: null,
       }),
     );
-    expect(createRun).not.toHaveBeenCalled();
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
   });
 
   it("returns 401 and records delivery on stale timestamp", async () => {
@@ -298,11 +304,11 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(recordDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ valid: false, error: "invalid_json" }),
     );
-    expect(createRun).not.toHaveBeenCalled();
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
   });
 
-  it("returns 200 with existing run_id on duplicate delivery_id", async () => {
-    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingRunId: "run-existing-9" });
+  it("returns 200 with existing message_id on duplicate delivery_id", async () => {
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: "message-existing-9" });
     const req = makeRequest({
       headers: {
         "x-agentplane-signature": "sha256=abc",
@@ -313,8 +319,8 @@ describe("POST /api/webhooks/[sourceId]", () => {
     const res = await POST(req, ctx);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ run_id: "run-existing-9", duplicate: true });
-    expect(createRun).not.toHaveBeenCalled();
+    expect(body).toMatchObject({ message_id: "message-existing-9", duplicate: true });
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
   });
 
   it("returns 429 when per-source rate limit is exceeded", async () => {
@@ -350,7 +356,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     });
     findRecentDeliveryByDedupeKey.mockResolvedValueOnce({
       id: "prior-delivery-row",
-      runId: "run-original-7",
+      messageId: "message-original-7",
     });
 
     const req = makeRequest({
@@ -368,9 +374,9 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({
-      run_id: "run-original-7",
+      message_id: "message-original-7",
       duplicate: true,
-      status_url: "/api/runs/run-original-7",
+      status_url: "/api/sessions/_/messages/message-original-7",
     });
 
     expect(recordDelivery).toHaveBeenCalledWith(
@@ -381,15 +387,15 @@ describe("POST /api/webhooks/[sourceId]", () => {
     );
     expect(markDeliverySuppressed).toHaveBeenCalledWith(
       "delivery-row-1",
-      "run-original-7",
+      "message-original-7",
     );
-    expect(createRun).not.toHaveBeenCalled();
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
   });
 
   it("persists dedupe key on insert when no prior match exists (custom source, no-rule path)", async () => {
     // Custom source → computeDedupeKey returns null rule → recordDelivery is
     // called with dedupeKey: null. Verifying the dedupeKey field is wired in.
-    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingRunId: "run-x" });
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: "message-x" });
     const req = makeRequest({
       headers: {
         "x-agentplane-signature": "sha256=abc",
@@ -415,7 +421,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
       rule: { keyPath: "data.url", windowSeconds: 60, enabled: true },
       provider: "linear",
     });
-    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingRunId: "run-existing-9" });
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: "message-existing-9" });
 
     const req = makeRequest({
       body: JSON.stringify({ data: { url: "https://linear.app/x/issue/TRU-857" } }),
@@ -428,9 +434,9 @@ describe("POST /api/webhooks/[sourceId]", () => {
     const res = await POST(req, ctx);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ run_id: "run-existing-9", duplicate: true });
+    expect(body).toMatchObject({ message_id: "message-existing-9", duplicate: true });
     expect(findRecentDeliveryByDedupeKey).not.toHaveBeenCalled();
-    expect(createRun).not.toHaveBeenCalled();
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
   });
 
   it("does not call dedupe lookup when computeDedupeKey returns no key (failure-open)", async () => {
@@ -442,7 +448,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     });
     // Force the duplicate path so we don't hit `after()` in this assertion-
     // only test (avoiding the unrelated next/server limitation).
-    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingRunId: null });
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: null });
 
     const req = makeRequest({
       body: JSON.stringify({ data: {} }),
@@ -461,7 +467,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
   // ─── Content filter (U3) ──────────────────────────────────────────────────
 
   it("source with no filter rules: filter step is a no-op (existing flow)", async () => {
-    // Default source mock has filter_rules: null. Should run through to createRun.
+    // Default source mock has filter_rules: null. Should run through to dispatch.
     const req = makeRequest({
       headers: {
         "x-agentplane-signature": "sha256=" + "a".repeat(64),
@@ -474,7 +480,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(markDeliveryFiltered).not.toHaveBeenCalled();
   });
 
-  it("filter mismatch returns 200 + filtered:true and skips createRun", async () => {
+  it("filter mismatch returns 200 + filtered:true and skips dispatch", async () => {
     loadWebhookSource.mockResolvedValueOnce(
       source({
         filter_rules: {
@@ -497,7 +503,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({
-      run_id: null,
+      message_id: null,
       accepted: false,
       filtered: true,
       status_url: null,
@@ -507,12 +513,12 @@ describe("POST /api/webhooks/[sourceId]", () => {
       "delivery-row-1",
       expect.stringContaining("condition_no_match"),
     );
-    // createRun runs in after() (mocked); flush microtasks to be sure it didn't fire
+    // dispatch runs in after() (mocked); flush microtasks to be sure it didn't fire
     await new Promise((r) => setImmediate(r));
-    expect(createRun).not.toHaveBeenCalled();
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
   });
 
-  it("filter match continues to createRun", async () => {
+  it("filter match continues to dispatch", async () => {
     loadWebhookSource.mockResolvedValueOnce(
       source({
         filter_rules: {
@@ -535,7 +541,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(res.status).toBe(202);
     expect(markDeliveryFiltered).not.toHaveBeenCalled();
     await new Promise((r) => setImmediate(r));
-    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(dispatchSessionMessage).toHaveBeenCalledTimes(1);
   });
 
   it("filter on missing field is a mismatch (failure-open)", async () => {
@@ -573,7 +579,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     });
     findRecentDeliveryByDedupeKey.mockResolvedValueOnce({
       id: "prior-row",
-      runId: "run-original-7",
+      messageId: "message-original-7",
     });
     loadWebhookSource.mockResolvedValueOnce(
       source({
@@ -597,7 +603,7 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({
-      run_id: "run-original-7",
+      message_id: "message-original-7",
       duplicate: true,
     });
     // Dedupe response shape, not filter response shape
@@ -621,12 +627,12 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(markDeliveryFiltered).not.toHaveBeenCalled();
   });
 
-  it("rolls delivery row to error on createRun ConcurrencyLimitError", async () => {
+  it("rolls delivery row to error on dispatch ConcurrencyLimitError", async () => {
     // Response is 202 immediately (the run runs in `after()`); the failure
     // surfaces by the delivery row being updated to error state and
-    // attachDeliveryRun never being called for a successful run.
+    // attachDeliveryMessage never being called for a successful run.
     const { ConcurrencyLimitError } = await import("@/lib/errors");
-    createRun.mockRejectedValueOnce(new ConcurrencyLimitError("limit"));
+    dispatchSessionMessage.mockRejectedValueOnce(new ConcurrencyLimitError("limit"));
     const req = makeRequest({
       headers: {
         "x-agentplane-signature": "sha256=" + "a".repeat(64),
@@ -638,6 +644,6 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(res.status).toBe(202);
     // Flush microtasks so the after() callback runs and the catch fires.
     await new Promise((r) => setImmediate(r));
-    expect(attachDeliveryRun).not.toHaveBeenCalled();
+    expect(attachDeliveryMessage).not.toHaveBeenCalled();
   });
 });

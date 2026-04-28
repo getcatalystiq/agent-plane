@@ -151,11 +151,38 @@ This is the right architecture. The `@a2a-js/sdk` `DefaultRequestHandler` is sta
 
 **Batch requests:** JSON-RPC 2.0 allows batch (array of request objects). The `@a2a-js/sdk` `JsonRpcTransportHandler` handles this. Verify your body-size limit (currently 1MB) is sufficient for batch use cases; 1MB is reasonable.
 
-**Error sanitization (already implemented — keep it):** Your `RunBackedTaskStore.save()` catches all errors and throws `A2AError.internalError("Internal storage error")` to prevent SQL detail leaks. This is correct. Never let Postgres error messages reach the JSON-RPC response.
+**Error sanitization (already implemented — keep it):** Your `MessageBackedTaskStore.save()` catches all errors and throws `A2AError.internalError("Internal storage error")` to prevent SQL detail leaks. This is correct. Never let Postgres error messages reach the JSON-RPC response.
 
 **Idempotency:** Your idempotency layer keyed on `A2A-Request-Id` is correct per spec. The spec requires servers to deduplicate requests with the same ID within a reasonable window (you should document your window — 24h is standard).
 
 **Missing: `tasks/list`** — The spec defines `tasks/list` (3.1.4) with filtering by context ID and status. The `@a2a-js/sdk` may not implement this yet. Track it; external orchestrators will expect it.
+
+---
+
+---
+
+## 6. taskId mapping change + Agent Card metadata v2 (2026-04-27)
+
+The runs/sessions unification (migration `033_runs_sessions_unify.sql`) changed how A2A `taskId`s map onto AgentPlane internals.
+
+**Before (legacy):**
+- `taskId` was the `runs.id` of the platform-level run row.
+- `RunBackedTaskStore` translated A2A status updates into `runs.status` writes.
+- `tasks/cancel(taskId)` resolved directly to a run row → cancel.
+
+**After (current):**
+- `taskId` is the `session_messages.id` — the per-execution row inside a session. The A2A protocol's single-message-per-task semantics align cleanly with the message grain.
+- `MessageBackedTaskStore` is the new TaskStore implementation. It preserves the `lastWrittenStatus` dedupe optimization (~3 DB writes per message instead of ~200) and the same sanitized-error pattern.
+- `tasks/cancel(taskId)` resolves `taskId` → `messageId` → parent `sessionId` → `cancelSession()`.
+- A `contextId` carried by the A2A client is matched against `sessions.context_id`; a hit reuses the existing non-stopped session as a non-ephemeral session (multi-turn A2A). Without a `contextId`, the dispatcher creates a fresh `ephemeral: true` session.
+
+**Agent Card metadata version bump to `v2`.**
+
+Agent Card `metadata` now advertises `agentplane.taskIdMapping = "session_message_id"`. External clients that cached an Agent Card from before the cutover will see the new mapping after the next refresh (60s cache TTL, 5min recommended client-side recheck per spec). Clients that hold older `taskId` strings during the cutover window will receive 404 from `tasks/get(taskId)` because the underlying `runs` rows no longer exist; the migration is documented as a hard cut. SoulSpec metadata also stays at its existing `soulspec:identity:v2` channel — the version bump labelled here is specifically for the runs→messages mapping.
+
+**Cutover-day client behavior:**
+- In-flight `taskId`s held by external A2A clients at deploy time → 404 on the next `tasks/get`. Clients should retry by re-sending `message/send`. The single-message-per-task A2A model bounds the in-flight window, so this is a brief disruption.
+- Agent Card cache (60s) means up to 1 minute of clients seeing the old metadata. Acceptable per the hard-cut policy.
 
 ---
 

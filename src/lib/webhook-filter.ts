@@ -6,7 +6,7 @@
 //   rate-limit → load source → verify signature → parse JSON
 //   → content-dedupe (src/lib/webhook-dedupe.ts)
 //   → filter (this module)
-//   → createRun via after()
+//   → dispatchSessionMessage via after()
 
 import type {
   FilterCondition,

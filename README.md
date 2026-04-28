@@ -7,50 +7,53 @@ A multi-tenant platform for running AI agents in isolated [Vercel Sandboxes](htt
 ### Features
 
 - **Any model, any provider** — supports all models via Vercel AI Gateway; dual runner: Claude Agent SDK for Anthropic models, Vercel AI SDK for everything else
-- **Isolated sandboxes** — every run spins up a Vercel Sandbox from a pre-built SDK snapshot (~3s cold start) with its own filesystem, network policy, and resource limits
+- **Isolated sandboxes** — every execution spins up a Vercel Sandbox from a pre-built SDK snapshot (~3s cold start) with its own filesystem, network policy, and resource limits
 - **Skills & plugins** — inject custom skills and tenant-scoped marketplace plugins into agents before execution
-- **Scheduled runs** — configure agents to run on a schedule (hourly, daily, weekdays, weekly) with timezone-aware execution
+- **Scheduled executions** — configure agents to run on a schedule (hourly, daily, weekdays, weekly) with timezone-aware execution
 - **Multi-tenant** — row-level security, per-tenant API keys, budget controls, and rate limiting
 - **MCP connectors** — connect agents to external tools via Composio (GitHub, Slack, Firecrawl) or tenant-scoped custom OAuth 2.1 MCP servers
 - **A2A protocol** — expose agents to external A2A-compliant clients (LangGraph, CrewAI, Semantic Kernel, etc.) via Agent Cards and JSON-RPC; streaming SSE, idempotency, budget clamping
-- **Full observability** — every run stores a transcript, token usage, cost, duration, and trigger source (API/schedule/playground/chat/A2A)
+- **Full observability** — every session message stores a transcript, token usage, cost, duration, and trigger source (API/schedule/playground/chat/A2A/webhook)
 - **Playground** — test agents interactively from the admin dashboard with real-time event streaming
 - **SoulSpec v0.5 identity** — full [SoulSpec](https://clawsouls.ai/spec) compliance: SOUL.md (Personality/Tone/Principles), IDENTITY.md (Name/Role/Creature/Emoji/Vibe), STYLE.md, AGENTS.md, HEARTBEAT.md, examples; progressive disclosure (Level 1/2/3); `.soul/` directory injected into sandboxes
 - **ClawSouls registry** — import, export, publish, and validate agent personas via the [ClawSouls](https://clawsouls.ai) registry API; tenant-scoped API tokens; SoulScan verification
 - **Generate Soul** — LLM-powered generation of all SoulSpec files from agent configuration (name, description, tools, skills) via AI Gateway
 - **Multi-turn sessions** — persistent conversations with context retention across messages; sandbox kept alive between turns; automatic backup/restore on cold start
 - **Configurable runtime** — set max runtime per agent (60–3600 seconds)
-- **Admin dashboard** — manage companies, agents, runs, connectors, plugins, and schedules; tabbed agent detail (General, Identity, Connectors, Skills, Plugins, Schedules, Runs); AgentCo-inspired design system
+- **Admin dashboard** — manage companies, agents, sessions, connectors, plugins, and schedules; tabbed agent detail (General, Identity, Connectors, Skills, Plugins, Schedules, Sessions); AgentCo-inspired design system
 
 ## How It Works
 
-### One-shot runs
+Every execution is a session. Sessions own one or more `session_messages` (the per-execution rows that carry the prompt, transcript, status, billing, and audit fields). One-shot calls just flag `ephemeral: true` so the sandbox stops as soon as the message finishes.
 
-Fire-and-forget agent execution. A sandbox is created, the agent runs, events stream back, and the sandbox is torn down.
+### One-shot (ephemeral) execution
+
+Fire-and-forget. A session is created, the agent runs, events stream back, the sandbox is torn down before the response closes.
 
 ```
-POST /api/runs  →  Sandbox created  →  Events stream (NDJSON)  →  Transcript stored
+POST /api/sessions ({"ephemeral": true})  →  Sandbox created  →  Events stream (NDJSON)  →  Sandbox stopped
 ```
 
 ```bash
-curl -N -X POST $BASE_URL/api/runs \
+curl -N -X POST $BASE_URL/api/sessions \
   -H "Authorization: Bearer $API_KEY" \
-  -d '{"agent_id": "ag_01", "prompt": "Deploy the app"}'
+  -d '{"agent_id": "ag_01", "prompt": "Deploy the app", "ephemeral": true}'
 ```
 
 ### Multi-turn sessions
 
-Persistent conversations where the sandbox stays alive between messages. Context is retained across turns via Claude Agent SDK's `resume` mechanism, with automatic backup/restore on cold start.
+Persistent conversations where the sandbox stays alive between messages. Context is retained across turns via Claude Agent SDK's `resume` mechanism (or via replayed conversation history for the Vercel AI SDK runner), with automatic backup/restore on cold start.
 
 ```
-POST /api/sessions           →  Sandbox created, session enters idle
-POST /api/sessions/:id/messages  →  Agent resumes with full context  →  Events stream
-POST /api/sessions/:id/messages  →  Agent still remembers everything  →  Events stream
-DELETE /api/sessions/:id     →  Sandbox stopped, session closed
+POST /api/sessions                   →  Sandbox created, session enters idle
+POST /api/sessions/:id/messages      →  Agent resumes with full context  →  Events stream
+POST /api/sessions/:id/messages      →  Agent still remembers everything  →  Events stream
+POST /api/sessions/:id/cancel        →  Abort + stop sandbox
+DELETE /api/sessions/:id             →  Stop session
 ```
 
 ```bash
-# Create session
+# Create session (no prompt = idle session)
 curl -X POST $BASE_URL/api/sessions \
   -H "Authorization: Bearer $API_KEY" \
   -d '{"agent_id": "ag_01"}'
@@ -63,6 +66,16 @@ curl -N -X POST $BASE_URL/api/sessions/$SESSION_ID/messages \
 curl -N -X POST $BASE_URL/api/sessions/$SESSION_ID/messages \
   -H "Authorization: Bearer $API_KEY" \
   -d '{"prompt": "What is my name?"}'  # → "Alice"
+```
+
+### Reconnecting to long-running messages
+
+If the inbound stream is dropped (or a message takes longer than 4.5 minutes and the route detaches), reconnect to the per-message stream:
+
+```bash
+curl -N $BASE_URL/api/sessions/$SESSION_ID/messages/$MESSAGE_ID/stream
+# or session-level sugar that resolves to the in-flight message:
+curl -N $BASE_URL/api/sessions/$SESSION_ID/stream
 ```
 
 ### A2A Protocol (Agent-to-Agent)
@@ -237,7 +250,7 @@ npm run dev
 
 The app runs at [http://localhost:3000](http://localhost:3000):
 - **Landing page** at `/` — public marketing page ("AI Agents as an API")
-- **Admin dashboard** at `/admin` — manage companies, agents, runs, connectors, plugins, and settings
+- **Admin dashboard** at `/admin` — manage companies, agents, sessions, connectors, plugins, and settings
 
 ## Environment Variables
 
@@ -274,23 +287,21 @@ API keys are hashed with SHA-256 and optionally encrypted at rest with AES-256-G
 | `GET` | `/api/agents/:id` | Get agent |
 | `PATCH` | `/api/agents/:id` | Update agent |
 | `DELETE` | `/api/agents/:id` | Delete agent |
-| `POST` | `/api/agents/:id/runs` | Create & stream run (NDJSON) |
-| `GET` | `/api/agents/:id/runs` | List runs for agent |
 | `GET` | `/api/agents/:id/connectors` | List Composio connector status |
 | `POST` | `/api/agents/:id/connectors/:toolkit/initiate-oauth` | Start Composio OAuth |
 | `GET` | `/api/agents/:id/mcp-connections` | List custom MCP connections |
 | `POST` | `/api/agents/:id/mcp-connections/:mcpServerId/initiate-oauth` | Start MCP OAuth |
 | `PATCH` | `/api/agents/:id/mcp-connections/:mcpServerId` | Update MCP tool allowlist |
 | `GET` | `/api/agents/:id/mcp-connections/:mcpServerId/tools` | List available MCP tools |
-| `GET` | `/api/runs` | List runs (filterable by `agent_id`, `status`) |
-| `POST` | `/api/runs` | Create run (shorthand, requires `agent_id` in body) |
-| `GET` | `/api/runs/:id` | Get run status (NDJSON stream) |
-| `POST` | `/api/runs/:id/cancel` | Cancel a run |
-| `GET` | `/api/runs/:id/transcript` | Get run transcript |
-| `POST` | `/api/sessions` | Create a session |
+| `POST` | `/api/sessions` | Create a session (optional first message + NDJSON stream; pass `ephemeral: true` for one-shot) |
 | `GET` | `/api/sessions` | List sessions (filterable by `agent_id`, `status`) |
-| `GET` | `/api/sessions/:id` | Get session (includes runs) |
-| `POST` | `/api/sessions/:id/messages` | Send message (NDJSON stream) |
+| `GET` | `/api/sessions/:id` | Get session metadata + messages summary |
+| `POST` | `/api/sessions/:id/messages` | Send next message (NDJSON stream) |
+| `GET` | `/api/sessions/:id/messages` | List messages for session |
+| `GET` | `/api/sessions/:id/messages/:messageId` | Get single message (status, transcript URL, billing) |
+| `GET` | `/api/sessions/:id/messages/:messageId/stream` | Reconnect to in-flight message NDJSON (`?offset=N` resumes) |
+| `GET` | `/api/sessions/:id/stream` | Session-level stream sugar (resolves to in-flight message) |
+| `POST` | `/api/sessions/:id/cancel` | Cancel in-flight + stop sandbox |
 | `DELETE` | `/api/sessions/:id` | Stop session |
 | `GET` | `/api/tenants/me` | Get current tenant |
 | `GET` | `/api/keys` | List API keys |
@@ -322,8 +333,7 @@ API keys are hashed with SHA-256 and optionally encrypted at rest with AES-256-G
 | | `/api/admin/mcp-servers/*` | Tenant-scoped MCP server CRUD |
 | | `/api/admin/plugin-marketplaces/*` | Tenant-scoped marketplace CRUD + plugin listing + file editing |
 | | `/api/admin/tenants/*` | Tenant CRUD + API key management |
-| | `/api/admin/runs/*` | Admin run viewing + cancellation |
-| | `/api/admin/sessions/*` | Admin session management + playground messaging |
+| | `/api/admin/sessions/*` | Admin session management + playground messaging + cancellation |
 
 ## Deployment
 
@@ -354,9 +364,8 @@ The app is deployed on Vercel.
 For this to work, `DATABASE_URL_UNPOOLED` (or `DATABASE_URL_DIRECT`) must be set in Vercel's environment variables for the **build** environment. If you linked Neon via the Vercel integration, `DATABASE_URL_UNPOOLED` is set automatically.
 
 Vercel Cron jobs are configured in `vercel.json`:
-- **Scheduled runs** — every minute (dispatches due agent runs)
-- **Sandbox cleanup** — every 5 minutes (excludes session-owned sandboxes)
-- **Session cleanup** — every 5 minutes (idle timeout after 10 min, stuck session watchdog)
+- **Scheduled runs** — every minute (dispatches due agents through `dispatchSessionMessage` with `ephemeral: true`)
+- **Session cleanup** — every 5 minutes (per-session idle TTL, stuck `creating`/`active` watchdogs, orphan-sandbox sweep, hard `expires_at` cap)
 - **Transcript cleanup** — daily at 3:00 AM UTC
 - **SDK snapshot refresh** — daily at 4:00 AM UTC (pre-builds sandbox snapshot with Claude Agent SDK installed)
 - **Budget reset** — daily at midnight UTC
