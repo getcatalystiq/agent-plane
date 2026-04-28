@@ -10,8 +10,7 @@ const ROUTE_LABELS: Record<string, string> = {
   "/admin/agents": "Agents",
   "/admin/mcp-servers": "Custom Connectors",
   "/admin/plugin-marketplaces": "Plugins",
-  "/admin/runs": "Runs",
-  "/admin/sessions": "Sessions",
+  "/admin/sessions": "Runs",
   "/admin/tenants": "Tenants",
   "/admin/settings": "Settings",
 };
@@ -25,7 +24,7 @@ function useEntityName(parentRoute: string, entityId: string | undefined): strin
 
     const apiMap: Record<string, string> = {
       "/admin/agents": `/api/admin/agents/${entityId}`,
-      "/admin/runs": `/api/admin/runs/${entityId}`,
+      "/admin/sessions": `/api/admin/sessions/${entityId}`,
       "/admin/plugin-marketplaces": `/api/admin/plugin-marketplaces/${entityId}`,
       "/admin/tenants": `/api/admin/tenants/${entityId}`,
     };
@@ -38,13 +37,13 @@ function useEntityName(parentRoute: string, entityId: string | undefined): strin
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (!data) return;
-        // Agents API returns { agent, ... }, runs returns { run, ... } or flat
-        const entity = data.agent ?? data.run ?? data.marketplace ?? data.tenant ?? data;
+        // Agents API returns { agent, ... }, sessions returns flat session row.
+        const entity = data.agent ?? data.session ?? data.marketplace ?? data.tenant ?? data;
         const resolved = entity?.name ?? entity?.slug;
         if (resolved) {
           setName(resolved);
         } else if (entity?.id) {
-          // For runs, show short ID
+          // For sessions, show short ID
           setName(entity.id.slice(0, 8) + "...");
         }
       })

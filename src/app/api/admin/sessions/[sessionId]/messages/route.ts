@@ -1,24 +1,27 @@
-import { NextRequest } from "next/server";
-import { queryOne, withTenantTransaction } from "@/db";
-import { withErrorHandler } from "@/lib/api";
-import { SendMessageSchema, SessionRow, AgentRowInternal } from "@/lib/validation";
-import { transitionSessionStatus } from "@/lib/sessions";
-import { checkTenantBudget } from "@/lib/runs";
-import { supportsClaudeRunner } from "@/lib/models";
-import { prepareSessionSandbox, executeSessionMessage, createSessionStreamResponse } from "@/lib/session-executor";
-import { ConflictError, NotFoundError } from "@/lib/errors";
-import { logger } from "@/lib/logger";
-import type { TenantId, SessionStatus } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { query, queryOne } from "@/db";
+import { withErrorHandler, jsonResponse } from "@/lib/api";
+import { SessionRow, SessionMessageRow, PaginationSchema, SessionMessageStatusSchema } from "@/lib/validation";
+import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { deriveTriggeredBy } from "@/lib/trigger";
+import { NotFoundError, SessionStoppedError } from "@/lib/errors";
+import type { AgentId, TenantId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+const SendMessageRequestSchema = z.object({
+  prompt: z.string().min(1).max(100_000),
+  idempotency_key: z.string().min(1).max(200).optional(),
+});
+
 export const POST = withErrorHandler(async (request: NextRequest, context) => {
   const { sessionId } = await context!.params;
   const body = await request.json();
-  const input = SendMessageSchema.parse(body);
+  const input = SendMessageRequestSchema.parse(body);
 
-  // Admin: no RLS — query directly
+  // Admin: no RLS — query directly.
   const session = await queryOne(
     SessionRow,
     "SELECT * FROM sessions WHERE id = $1",
@@ -26,86 +29,85 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   );
   if (!session) throw new NotFoundError("Session not found");
 
-  if (session.status === "stopped") {
-    throw new ConflictError("Session is stopped");
-  }
-  if (session.status === "active") {
-    throw new ConflictError("Session is currently processing a message");
-  }
-
   const tenantId = session.tenant_id as TenantId;
-
-  // Atomically claim the session lock: transition idle/creating → active
-  const fromStatus = session.status as SessionStatus;
-  const claimed = await transitionSessionStatus(
-    sessionId,
-    tenantId,
-    fromStatus,
-    "active",
-    { idle_since: null },
-  );
-  if (!claimed) {
-    throw new ConflictError("Session is currently processing a message");
-  }
-
-  // Load agent first (need model to determine subscription status), then budget check
-  const agent = await queryOne(
-    AgentRowInternal,
-    "SELECT * FROM agents WHERE id = $1",
-    [session.agent_id],
-  );
-  if (!agent) throw new NotFoundError("Agent not found");
-
-  const isSubscriptionRun = supportsClaudeRunner(agent.model);
-  await withTenantTransaction(tenantId, async (tx) => {
-    await checkTenantBudget(tx, tenantId, { isSubscriptionRun });
-  }).catch(async (err) => {
-    await transitionSessionStatus(sessionId, tenantId, "active", "idle", {
-      idle_since: new Date().toISOString(),
-    }).catch((rollbackErr) => {
-      logger.error("Failed to rollback session to idle after budget check failure", {
-        session_id: sessionId,
-        error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-      });
-    });
-    throw err;
+  const isFirstMessage = session.message_count === 0;
+  const triggeredBy = deriveTriggeredBy({
+    authSource: "admin",
+    isFirstMessage,
   });
 
-  const effectiveBudget = Math.min(
-    input.max_budget_usd ?? agent.max_budget_usd,
-    agent.max_budget_usd,
-  );
-  const effectiveMaxTurns = Math.min(
-    input.max_turns ?? agent.max_turns,
-    agent.max_turns,
-  );
-
-  const sandbox = await prepareSessionSandbox(
-    {
-      sessionId,
+  try {
+    const result = await dispatchSessionMessage({
       tenantId,
-      agent,
-      prompt: input.prompt,
-      platformApiUrl: new URL(request.url).origin,
-      effectiveBudget,
-      effectiveMaxTurns,
-    },
-    session,
-  );
-
-  const result = await executeSessionMessage(
-    {
+      agentId: session.agent_id as AgentId,
       sessionId,
-      tenantId,
-      agent,
       prompt: input.prompt,
+      triggeredBy,
+      idempotencyKey: input.idempotency_key,
       platformApiUrl: new URL(request.url).origin,
-      effectiveBudget,
-      effectiveMaxTurns,
-    },
-    sandbox,
-    session,
+    });
+
+    return new Response(result.stream, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/x-ndjson",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Session-Id": result.sessionId,
+        "X-Message-Id": result.messageId,
+      },
+    });
+  } catch (err) {
+    if (err instanceof SessionStoppedError) {
+      return jsonResponse(
+        {
+          error: { code: "session_stopped", message: err.message },
+          hint: "create a new session via POST /api/admin/sessions",
+        },
+        410,
+      );
+    }
+    throw err;
+  }
+});
+
+export const GET = withErrorHandler(async (request: NextRequest, context) => {
+  const { sessionId } = await context!.params;
+  const url = new URL(request.url);
+  const { limit, offset } = PaginationSchema.parse({
+    limit: url.searchParams.get("limit") ?? "50",
+    offset: url.searchParams.get("offset") ?? "0",
+  });
+  const statusParam = url.searchParams.get("status");
+  const status = statusParam ? SessionMessageStatusSchema.parse(statusParam) : undefined;
+
+  const session = await queryOne(
+    SessionRow,
+    "SELECT id FROM sessions WHERE id = $1",
+    [sessionId],
+  );
+  if (!session) throw new NotFoundError("Session not found");
+
+  const conditions: string[] = ["m.session_id = $1"];
+  const params: unknown[] = [sessionId];
+  let idx = 2;
+  if (status) {
+    conditions.push(`m.status = $${idx++}`);
+    params.push(status);
+  }
+  params.push(limit, offset);
+
+  const messages = await query(
+    SessionMessageRow,
+    `SELECT m.*, a.name AS agent_name, a.model AS agent_model, s.agent_id
+     FROM session_messages m
+     LEFT JOIN sessions s ON m.session_id = s.id
+     LEFT JOIN agents a ON s.agent_id = a.id
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY m.created_at DESC
+     LIMIT $${idx++} OFFSET $${idx}`,
+    params,
   );
 
-  return createSessionStreamResponse(result, tenantId, sessionId, effectiveBudget);
+  return NextResponse.json({ data: messages, limit, offset });
 });

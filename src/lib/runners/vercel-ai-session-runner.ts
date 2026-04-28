@@ -97,7 +97,7 @@ async function main() {
 
   emit({
     type: 'run_started',
-    run_id: process.env.AGENT_PLANE_RUN_ID,
+    message_id: process.env.AGENT_PLANE_MESSAGE_ID,
     agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: modelId,
     timestamp: new Date().toISOString(),

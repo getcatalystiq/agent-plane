@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 const DailyStatRow = z.object({
   date: z.string(),
   agent_name: z.string(),
-  run_count: z.coerce.number(),
+  message_count: z.coerce.number(),
   cost_usd: z.coerce.number(),
 });
 
@@ -28,14 +28,15 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   const dailyStats = await query(
     DailyStatRow,
     `SELECT
-       DATE(r.created_at)::text AS date,
+       DATE(m.created_at)::text AS date,
        a.name AS agent_name,
-       COUNT(*)::int AS run_count,
-       COALESCE(SUM(r.cost_usd), 0) AS cost_usd
-     FROM runs r
-     JOIN agents a ON a.id = r.agent_id
-     WHERE r.tenant_id = $1 AND r.created_at >= NOW() - make_interval(days => $2)
-     GROUP BY DATE(r.created_at), a.name
+       COUNT(*)::int AS message_count,
+       COALESCE(SUM(m.cost_usd), 0) AS cost_usd
+     FROM session_messages m
+     JOIN sessions s ON s.id = m.session_id
+     JOIN agents a ON a.id = s.agent_id
+     WHERE m.tenant_id = $1 AND m.created_at >= NOW() - make_interval(days => $2)
+     GROUP BY DATE(m.created_at), a.name
      ORDER BY date ASC`,
     [auth.tenantId, days],
   );

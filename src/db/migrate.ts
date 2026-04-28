@@ -54,8 +54,19 @@ async function migrate() {
       const existingChecksum = appliedMap.get(file);
       if (existingChecksum) {
         if (existingChecksum !== checksum) {
+          if (process.env.MIGRATIONS_RECONCILE_CHECKSUMS === "true") {
+            await pool.query(
+              "UPDATE _migrations SET checksum = $1 WHERE name = $2",
+              [checksum, file],
+            );
+            console.log(
+              `  reconciled ${file} checksum (old=${existingChecksum.slice(0, 12)}, new=${checksum.slice(0, 12)})`,
+            );
+            continue;
+          }
           console.error(
-            `Migration ${file} has been modified after application! Expected checksum ${existingChecksum}, got ${checksum}`,
+            `Migration ${file} has been modified after application! Expected checksum ${existingChecksum}, got ${checksum}.\n` +
+            `Set MIGRATIONS_RECONCILE_CHECKSUMS=true for one deploy to update the stored checksum if the SQL is idempotent.`,
           );
           process.exit(1);
         }

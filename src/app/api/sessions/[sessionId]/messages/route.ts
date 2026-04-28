@@ -1,110 +1,109 @@
 import { NextRequest } from "next/server";
+import { z } from "zod";
 import { authenticateApiKey } from "@/lib/auth";
-import { withErrorHandler } from "@/lib/api";
-import { SendMessageSchema, AgentRowInternal } from "@/lib/validation";
-import { getSession, transitionSessionStatus } from "@/lib/sessions";
-import { checkTenantBudget } from "@/lib/runs";
-import { supportsClaudeRunner } from "@/lib/models";
-import { prepareSessionSandbox, executeSessionMessage, createSessionStreamResponse } from "@/lib/session-executor";
-import { queryOne, withTenantTransaction } from "@/db";
-import { ConflictError, NotFoundError } from "@/lib/errors";
-import { logger } from "@/lib/logger";
-import type { SessionStatus } from "@/lib/types";
+import { withErrorHandler, jsonResponse } from "@/lib/api";
+import { PaginationSchema, SessionMessageStatusSchema } from "@/lib/validation";
+import { getSession } from "@/lib/sessions";
+import { listMessages } from "@/lib/session-messages";
+import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { deriveTriggeredBy } from "@/lib/trigger";
+import { SessionStoppedError } from "@/lib/errors";
+import type { AgentId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
+
+const SendMessageRequestSchema = z.object({
+  prompt: z.string().min(1).max(100_000),
+  idempotency_key: z.string().min(1).max(200).optional(),
+  /** Override agent's max_turns for this message. Bounded by validation. */
+  max_turns: z.number().int().min(1).max(200).optional(),
+  /** Override agent's max_budget_usd for this message. */
+  max_budget_usd: z.number().positive().max(1000).optional(),
+});
 
 export const POST = withErrorHandler(async (request: NextRequest, context) => {
   const auth = await authenticateApiKey(request.headers.get("authorization"));
   const { sessionId } = await context!.params;
   const body = await request.json();
-  const input = SendMessageSchema.parse(body);
+  const input = SendMessageRequestSchema.parse(body);
 
+  // Resolve session up-front to determine first/follow-up + agent.
   const session = await getSession(sessionId, auth.tenantId);
-
-  if (session.status === "stopped") {
-    throw new ConflictError("Session is stopped");
-  }
-  if (session.status === "active") {
-    throw new ConflictError("Session is currently processing a message");
-  }
-
-  // Atomically claim the session lock: transition idle/creating → active
-  // This prevents concurrent message races (WHERE status = fromStatus guard)
-  const fromStatus = session.status as SessionStatus;
-  const claimed = await transitionSessionStatus(
-    sessionId,
-    auth.tenantId,
-    fromStatus,
-    "active",
-    { idle_since: null },
-  );
-  if (!claimed) {
-    throw new ConflictError("Session is currently processing a message");
-  }
-
-  // Load agent first (need model to determine subscription status), then budget check
-  const agent = await queryOne(
-    AgentRowInternal,
-    "SELECT * FROM agents WHERE id = $1 AND tenant_id = $2",
-    [session.agent_id, auth.tenantId],
-  );
-  if (!agent) throw new NotFoundError("Agent not found");
-
-  const isSubscriptionRun = supportsClaudeRunner(agent.model);
-  await withTenantTransaction(auth.tenantId, async (tx) => {
-    await checkTenantBudget(tx, auth.tenantId, { isSubscriptionRun });
-  }).catch(async (err) => {
-    // Rollback session to idle on budget check failure
-    await transitionSessionStatus(sessionId, auth.tenantId, "active", "idle", {
-      idle_since: new Date().toISOString(),
-    }).catch((rollbackErr) => {
-      logger.error("Failed to rollback session to idle after budget check failure", {
-        session_id: sessionId,
-        error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-      });
-    });
-    throw err;
+  const isFirstMessage = session.message_count === 0;
+  const triggeredBy = deriveTriggeredBy({
+    authSource: "tenant",
+    isFirstMessage,
   });
 
-  // Apply per-message overrides capped to agent config
-  const effectiveBudget = Math.min(
-    input.max_budget_usd ?? agent.max_budget_usd,
-    agent.max_budget_usd,
-  );
-  const effectiveMaxTurns = Math.min(
-    input.max_turns ?? agent.max_turns,
-    agent.max_turns,
-  );
-
-  // Get or create sandbox
-  const sandbox = await prepareSessionSandbox(
-    {
-      sessionId,
+  try {
+    const result = await dispatchSessionMessage({
       tenantId: auth.tenantId,
-      agent,
-      prompt: input.prompt,
-      platformApiUrl: new URL(request.url).origin,
-      effectiveBudget,
-      effectiveMaxTurns,
-    },
-    session,
-  );
-
-  // Execute message
-  const result = await executeSessionMessage(
-    {
+      agentId: session.agent_id as AgentId,
       sessionId,
-      tenantId: auth.tenantId,
-      agent,
       prompt: input.prompt,
+      triggeredBy,
+      idempotencyKey: input.idempotency_key,
+      callerKeyId: auth.apiKeyId,
       platformApiUrl: new URL(request.url).origin,
-      effectiveBudget,
-      effectiveMaxTurns,
-    },
-    sandbox,
-    session,
-  );
+      overrides: {
+        maxTurns: input.max_turns,
+        maxBudgetUsd: input.max_budget_usd,
+      },
+    });
 
-  return createSessionStreamResponse(result, auth.tenantId, sessionId, effectiveBudget);
+    return new Response(result.stream, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/x-ndjson",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Session-Id": result.sessionId,
+        "X-Message-Id": result.messageId,
+      },
+    });
+  } catch (err) {
+    if (err instanceof SessionStoppedError) {
+      // CAS-loser path. Surface 410 Gone with explicit hint per the U3
+      // contract. Clients should provision a fresh session and retry.
+      return jsonResponse(
+        {
+          error: {
+            code: "session_stopped",
+            message: err.message,
+          },
+          hint: "create a new session via POST /api/sessions",
+        },
+        410,
+      );
+    }
+    throw err;
+  }
+});
+
+export const GET = withErrorHandler(async (request: NextRequest, context) => {
+  const auth = await authenticateApiKey(request.headers.get("authorization"));
+  const { sessionId } = await context!.params;
+  const url = new URL(request.url);
+  const pagination = PaginationSchema.parse({
+    limit: url.searchParams.get("limit"),
+    offset: url.searchParams.get("offset"),
+  });
+  const statusParam = url.searchParams.get("status");
+  const status = statusParam ? SessionMessageStatusSchema.parse(statusParam) : undefined;
+
+  // Touch the session for tenant-scoped existence check (404 via RLS).
+  await getSession(sessionId, auth.tenantId);
+
+  const messages = await listMessages(auth.tenantId, {
+    sessionId,
+    status,
+    ...pagination,
+  });
+
+  return jsonResponse({
+    data: messages,
+    limit: pagination.limit,
+    offset: pagination.offset,
+  });
 });

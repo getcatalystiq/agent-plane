@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  runStatusToA2a,
-  a2aToRunStatus,
-  runToA2aTask,
+  messageStatusToA2a,
+  a2aToMessageStatus,
+  messageToA2aTask,
   a2aHeaders,
   getCachedAgentCard,
   setCachedAgentCard,
@@ -10,67 +10,68 @@ import {
   sanitizeRequestId,
 } from "@/lib/a2a";
 
-describe("runStatusToA2a", () => {
-  it("maps pending to working", () => {
-    expect(runStatusToA2a("pending")).toBe("working");
+describe("messageStatusToA2a", () => {
+  it("maps queued to submitted", () => {
+    expect(messageStatusToA2a("queued")).toBe("submitted");
   });
 
   it("maps running to working", () => {
-    expect(runStatusToA2a("running")).toBe("working");
+    expect(messageStatusToA2a("running")).toBe("working");
   });
 
   it("maps completed to completed", () => {
-    expect(runStatusToA2a("completed")).toBe("completed");
+    expect(messageStatusToA2a("completed")).toBe("completed");
   });
 
   it("maps failed to failed", () => {
-    expect(runStatusToA2a("failed")).toBe("failed");
+    expect(messageStatusToA2a("failed")).toBe("failed");
   });
 
   it("maps cancelled to canceled (note spelling)", () => {
-    expect(runStatusToA2a("cancelled")).toBe("canceled");
+    expect(messageStatusToA2a("cancelled")).toBe("canceled");
   });
 
   it("maps timed_out to failed", () => {
-    expect(runStatusToA2a("timed_out")).toBe("failed");
+    expect(messageStatusToA2a("timed_out")).toBe("failed");
   });
 });
 
-describe("a2aToRunStatus", () => {
-  it("maps submitted to pending", () => {
-    expect(a2aToRunStatus("submitted")).toBe("pending");
+describe("a2aToMessageStatus", () => {
+  it("maps submitted to queued", () => {
+    expect(a2aToMessageStatus("submitted")).toBe("queued");
   });
 
   it("maps working to running", () => {
-    expect(a2aToRunStatus("working")).toBe("running");
+    expect(a2aToMessageStatus("working")).toBe("running");
   });
 
   it("maps completed to completed", () => {
-    expect(a2aToRunStatus("completed")).toBe("completed");
+    expect(a2aToMessageStatus("completed")).toBe("completed");
   });
 
   it("maps failed to failed", () => {
-    expect(a2aToRunStatus("failed")).toBe("failed");
+    expect(a2aToMessageStatus("failed")).toBe("failed");
   });
 
   it("maps canceled to cancelled", () => {
-    expect(a2aToRunStatus("canceled")).toBe("cancelled");
+    expect(a2aToMessageStatus("canceled")).toBe("cancelled");
   });
 
   it("maps rejected to failed", () => {
-    expect(a2aToRunStatus("rejected")).toBe("failed");
+    expect(a2aToMessageStatus("rejected")).toBe("failed");
   });
 
   it("returns null for unknown states", () => {
-    expect(a2aToRunStatus("input-required")).toBeNull();
-    expect(a2aToRunStatus("auth-required")).toBeNull();
-    expect(a2aToRunStatus("unknown")).toBeNull();
+    expect(a2aToMessageStatus("input-required")).toBeNull();
+    expect(a2aToMessageStatus("auth-required")).toBeNull();
+    expect(a2aToMessageStatus("unknown")).toBeNull();
   });
 });
 
-describe("runToA2aTask", () => {
-  const baseRun = {
+describe("messageToA2aTask", () => {
+  const baseMessage = {
     id: "a0b1c2d3-e4f5-4678-9abc-def012345678",
+    session_id: "11111111-2222-3333-4444-555555555555",
     status: "completed" as const,
     result_summary: "Task completed successfully",
     duration_ms: 5000,
@@ -78,31 +79,31 @@ describe("runToA2aTask", () => {
     completed_at: "2026-01-01T00:00:05Z",
   };
 
-  it("maps completed run with result artifact", () => {
-    const task = runToA2aTask(baseRun);
-    expect(task.id).toBe(baseRun.id);
+  it("maps completed message with result artifact", () => {
+    const task = messageToA2aTask(baseMessage);
+    expect(task.id).toBe(baseMessage.id);
     expect(task.kind).toBe("task");
     expect(task.status.state).toBe("completed");
-    expect(task.status.timestamp).toBe(baseRun.completed_at);
+    expect(task.status.timestamp).toBe(baseMessage.completed_at);
     expect(task.artifacts).toHaveLength(1);
     expect(task.artifacts![0].parts[0]).toEqual({ kind: "text", text: "Task completed successfully" });
   });
 
-  it("maps failed run with result artifact", () => {
-    const task = runToA2aTask({ ...baseRun, status: "failed", result_summary: "Error occurred" });
+  it("maps failed message with result artifact", () => {
+    const task = messageToA2aTask({ ...baseMessage, status: "failed", result_summary: "Error occurred" });
     expect(task.status.state).toBe("failed");
     expect(task.artifacts).toHaveLength(1);
   });
 
-  it("maps pending run with no artifacts", () => {
-    const task = runToA2aTask({ ...baseRun, status: "pending", result_summary: null, completed_at: null });
-    expect(task.status.state).toBe("working");
-    expect(task.status.timestamp).toBe(baseRun.created_at);
+  it("maps queued message with no artifacts", () => {
+    const task = messageToA2aTask({ ...baseMessage, status: "queued", result_summary: null, completed_at: null });
+    expect(task.status.state).toBe("submitted");
+    expect(task.status.timestamp).toBe(baseMessage.created_at);
     expect(task.artifacts).toBeUndefined();
   });
 
   it("does not include transcript URL in metadata", () => {
-    const task = runToA2aTask(baseRun);
+    const task = messageToA2aTask(baseMessage);
     const apMeta = task.metadata?.["agent-plane"] as Record<string, unknown> | undefined;
     expect(apMeta).toBeDefined();
     expect(apMeta?.duration_ms).toBe(5000);
@@ -110,13 +111,19 @@ describe("runToA2aTask", () => {
   });
 
   it("omits metadata when duration is zero", () => {
-    const task = runToA2aTask({ ...baseRun, duration_ms: 0 });
+    const task = messageToA2aTask({ ...baseMessage, duration_ms: 0 });
     expect(task.metadata).toBeUndefined();
   });
 
-  it("uses contextId = taskId (Phase 1)", () => {
-    const task = runToA2aTask(baseRun);
-    expect(task.contextId).toBe(task.id);
+  it("uses contextId = session_id when no override", () => {
+    const task = messageToA2aTask(baseMessage);
+    expect(task.contextId).toBe(baseMessage.session_id);
+  });
+
+  it("honors effectiveContextId override", () => {
+    const override = "abc-123";
+    const task = messageToA2aTask(baseMessage, override);
+    expect(task.contextId).toBe(override);
   });
 });
 

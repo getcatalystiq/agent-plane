@@ -18,7 +18,7 @@ const TenantWithStats = z.object({
   current_month_spend: z.coerce.number(),
   created_at: z.coerce.string(),
   agent_count: z.coerce.number(),
-  run_count: z.coerce.number(),
+  message_count: z.coerce.number(),
 });
 
 export const GET = withErrorHandler(async (request: NextRequest) => {
@@ -32,10 +32,10 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     TenantWithStats,
     `SELECT t.*,
        COUNT(DISTINCT a.id)::int AS agent_count,
-       COUNT(DISTINCT r.id)::int AS run_count
+       COUNT(DISTINCT m.id)::int AS message_count
      FROM tenants t
      LEFT JOIN agents a ON a.tenant_id = t.id
-     LEFT JOIN runs r ON r.tenant_id = t.id
+     LEFT JOIN session_messages m ON m.tenant_id = t.id
      GROUP BY t.id
      ORDER BY t.created_at DESC
      LIMIT $1 OFFSET $2`,

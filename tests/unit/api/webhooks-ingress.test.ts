@@ -1,0 +1,689 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { WebhookSourceRow } from "@/lib/webhooks";
+
+const mocks = vi.hoisted(() => ({
+  loadWebhookSource: vi.fn(),
+  verifyAndPrepare: vi.fn(),
+  recordDelivery: vi.fn(),
+  attachDeliveryMessage: vi.fn(),
+  touchSourceLastTriggered: vi.fn(),
+  findRecentDeliveryByDedupeKey: vi.fn(),
+  markDeliverySuppressed: vi.fn(),
+  markDeliveryFiltered: vi.fn(),
+  buildPromptFromTemplate: vi.fn(
+    (template: string, payload: unknown, source: { name: string }) =>
+      `${template} :: ${source.name} :: ${JSON.stringify(payload)}`,
+  ),
+  dispatchSessionMessage: vi.fn(),
+  transitionMessageStatus: vi.fn(),
+  getSessionIdForMessage: vi.fn(async () => "session-original-fixture"),
+  getCallbackBaseUrl: vi.fn(() => "https://app.example.com"),
+  checkRateLimit: vi.fn(() => ({ allowed: true, remaining: 59, retryAfterMs: 0 })),
+  computeDedupeKey: vi.fn(),
+}));
+
+// Mock next/server's `after()` so the route can call it without a request
+// scope. The real implementation requires Next's request context which the
+// test harness doesn't provide; the body of the callback exercises
+// dispatchSessionMessage which is itself mocked, so we just invoke it inline
+// so its assertions stay observable.
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>("next/server");
+  return {
+    ...actual,
+    after: (fn: () => unknown | Promise<unknown>) => {
+      // Fire-and-forget (matches `after()` semantics in tests).
+      void Promise.resolve().then(() => fn());
+    },
+  };
+});
+
+vi.mock("@/db", () => ({
+  execute: vi.fn().mockResolvedValue({ rowCount: 1 }),
+  // FIX #33: route now does a session_id lookup off message_id when building
+  // duplicate-path status_url. The route also pre-flights concurrency (count
+  // sessions) and budget (load agent) before dispatch. Match each SQL shape:
+  queryOne: vi.fn().mockImplementation((_schema, sql) => {
+    if (typeof sql === "string") {
+      if (sql.includes("FROM session_messages WHERE id")) {
+        return Promise.resolve({ session_id: "session-original-fixture" });
+      }
+      if (sql.includes("COUNT(*)") && sql.includes("FROM sessions")) {
+        return Promise.resolve({ count: 0 });
+      }
+      if (sql.includes("FROM agents")) {
+        return Promise.resolve({
+          id: "agent-1",
+          tenant_id: "tenant-1",
+          model: "anthropic/claude-sonnet-4",
+          max_budget_usd: 10,
+          max_turns: 50,
+          plugins: [],
+        });
+      }
+    }
+    return Promise.resolve(null);
+  }),
+  withTenantTransaction: vi.fn().mockImplementation(async (_tenantId, fn) => {
+    const tx = {
+      queryOne: vi.fn().mockResolvedValue({
+        status: "active",
+        monthly_budget_usd: 100,
+        current_month_spend: 0,
+        has_subscription_token: false,
+      }),
+      execute: vi.fn().mockResolvedValue({ rowCount: 0 }),
+    };
+    return fn(tx);
+  }),
+}));
+
+vi.mock("@/lib/rate-limit", () => ({ checkRateLimit: mocks.checkRateLimit }));
+
+vi.mock("@/lib/webhooks", () => ({
+  loadWebhookSource: mocks.loadWebhookSource,
+  verifyAndPrepare: mocks.verifyAndPrepare,
+  recordDelivery: mocks.recordDelivery,
+  attachDeliveryMessage: mocks.attachDeliveryMessage,
+  touchSourceLastTriggered: mocks.touchSourceLastTriggered,
+  findRecentDeliveryByDedupeKey: mocks.findRecentDeliveryByDedupeKey,
+  markDeliverySuppressed: mocks.markDeliverySuppressed,
+  markDeliveryFiltered: mocks.markDeliveryFiltered,
+  buildPromptFromTemplate: mocks.buildPromptFromTemplate,
+}));
+
+vi.mock("@/lib/webhook-dedupe", () => ({
+  computeDedupeKey: mocks.computeDedupeKey,
+}));
+
+vi.mock("@/lib/dispatcher", () => ({
+  dispatchSessionMessage: mocks.dispatchSessionMessage,
+}));
+
+vi.mock("@/lib/session-messages", () => ({
+  transitionMessageStatus: mocks.transitionMessageStatus,
+  getSessionIdForMessage: mocks.getSessionIdForMessage,
+}));
+
+vi.mock("@/lib/mcp-connections", () => ({
+  getCallbackBaseUrl: mocks.getCallbackBaseUrl,
+}));
+
+vi.mock("@/lib/logger", () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+
+import { POST } from "@/app/api/webhooks/[sourceId]/route";
+
+const {
+  loadWebhookSource,
+  verifyAndPrepare,
+  recordDelivery,
+  attachDeliveryMessage,
+  touchSourceLastTriggered,
+  findRecentDeliveryByDedupeKey,
+  markDeliverySuppressed,
+  markDeliveryFiltered,
+  dispatchSessionMessage,
+  checkRateLimit,
+  computeDedupeKey,
+} = mocks;
+
+const SOURCE_ID = "11111111-1111-1111-1111-111111111111";
+
+function source(overrides: Partial<WebhookSourceRow> = {}): WebhookSourceRow {
+  return {
+    id: SOURCE_ID,
+    tenant_id: "22222222-2222-2222-2222-222222222222",
+    agent_id: "33333333-3333-3333-3333-333333333333",
+    name: "github",
+    enabled: true,
+    signature_header: "X-AgentPlane-Signature",
+    signature_format: "sha256_hex",
+    secret_enc: "{}",
+    previous_secret_enc: null,
+    previous_secret_expires_at: null,
+    prompt_template: "Event: {{payload}}",
+    last_triggered_at: null,
+    filter_rules: null,
+    created_at: new Date(),
+    updated_at: new Date(),
+    ...overrides,
+  };
+}
+
+function makeRequest({
+  body = '{"hello":"world"}',
+  headers = {},
+}: {
+  body?: string;
+  headers?: Record<string, string>;
+} = {}): import("next/server").NextRequest {
+  const req = new Request(`https://app.example.com/api/webhooks/${SOURCE_ID}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "content-length": String(new TextEncoder().encode(body).length),
+      ...headers,
+    },
+    body,
+  });
+  return req as unknown as import("next/server").NextRequest;
+}
+
+const ctx = { params: Promise.resolve({ sourceId: SOURCE_ID }) };
+
+// Build a minimal stream that the dispatcher mock returns. The route code
+// drains the stream via reader.read(); a one-shot empty stream is enough.
+function emptyStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(c) { c.close(); },
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  checkRateLimit.mockReturnValue({ allowed: true, remaining: 59, retryAfterMs: 0 });
+  loadWebhookSource.mockResolvedValue(source());
+  verifyAndPrepare.mockResolvedValue({ ok: true, usedPrevious: false });
+  recordDelivery.mockResolvedValue({ kind: "inserted", deliveryRowId: "delivery-row-1" });
+  attachDeliveryMessage.mockResolvedValue(undefined);
+  touchSourceLastTriggered.mockResolvedValue(undefined);
+  findRecentDeliveryByDedupeKey.mockResolvedValue(null);
+  markDeliverySuppressed.mockResolvedValue(undefined);
+  markDeliveryFiltered.mockResolvedValue(undefined);
+  // Default: no rule applies (matches custom-header source default).
+  computeDedupeKey.mockResolvedValue({ key: null, rule: null, provider: "custom" });
+  dispatchSessionMessage.mockResolvedValue({
+    sessionId: "session-abc",
+    messageId: "message-abc-123",
+    stream: emptyStream(),
+  });
+});
+
+describe("POST /api/webhooks/[sourceId]", () => {
+  it("happy path: valid signed POST returns 202 with delivery acknowledgement", async () => {
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "delivery-1",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      delivery_id: "delivery-1",
+      accepted: true,
+      source_name: "github",
+    });
+    // dispatchSessionMessage runs in `after()` (mocked to fire-and-forget); flush microtasks
+    // so the spy observes the call before assertions.
+    await new Promise((r) => setImmediate(r));
+    expect(dispatchSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("synthesizes a delivery_id when Webhook-Delivery-Id header is missing", async () => {
+    // The route resolves a delivery id from headers → body fields → synthetic
+    // hash, so the request is still accepted (202) and a delivery row is
+    // recorded with the synthesized id.
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(recordDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ valid: true }),
+    );
+  });
+
+  it("returns generic 401 when source is unknown (no delivery row)", async () => {
+    loadWebhookSource.mockResolvedValueOnce(null);
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": "100",
+        "webhook-delivery-id": "x",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error.code).toBe("unauthorized");
+    expect(recordDelivery).not.toHaveBeenCalled();
+  });
+
+  it("returns generic 401 when source is disabled (delivery row recorded)", async () => {
+    loadWebhookSource.mockResolvedValueOnce(source({ enabled: false }));
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": "100",
+        "webhook-delivery-id": "x",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(401);
+    expect(recordDelivery).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 and records delivery on bad signature", async () => {
+    verifyAndPrepare.mockResolvedValueOnce({ ok: false, error: "signature_mismatch" });
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "0".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-1",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error.code).toBe("unauthorized");
+    expect(recordDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        valid: false,
+        error: "signature_mismatch",
+        messageId: null,
+      }),
+    );
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 and records delivery on stale timestamp", async () => {
+    verifyAndPrepare.mockResolvedValueOnce({ ok: false, error: "stale_timestamp" });
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "0".repeat(64),
+        "webhook-timestamp": "1700000000",
+        "webhook-delivery-id": "del-2",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(401);
+    expect(recordDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "stale_timestamp" }),
+    );
+  });
+
+  it("returns 413 when Content-Length exceeds 512KB", async () => {
+    const req = new Request(`https://app.example.com/api/webhooks/${SOURCE_ID}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(513 * 1024),
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": "100",
+        "webhook-delivery-id": "del-3",
+      },
+      body: "{}",
+    }) as unknown as import("next/server").NextRequest;
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(413);
+  });
+
+  it("returns 400 and records delivery on invalid JSON body", async () => {
+    const req = makeRequest({
+      body: "not-json{",
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-4",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe("invalid_json");
+    expect(recordDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ valid: false, error: "invalid_json" }),
+    );
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns 200 with existing message_id on duplicate delivery_id", async () => {
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: "message-existing-9" });
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-5",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ message_id: "message-existing-9", duplicate: true });
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 when per-source rate limit is exceeded", async () => {
+    checkRateLimit.mockReturnValueOnce({
+      allowed: false,
+      remaining: 0,
+      retryAfterMs: 30_000,
+    });
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": "100",
+        "webhook-delivery-id": "del-6",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(loadWebhookSource).not.toHaveBeenCalled();
+  });
+
+  // ─── Content-based dedupe (U4) ────────────────────────────────────────────
+  //
+  // These scenarios exercise the suppression early-return path that exits
+  // before `after()` is called, which keeps them self-contained in the
+  // request-scope assertions.
+
+  it("suppresses delivery when dedupe key matches a recent prior delivery (Linear)", async () => {
+    computeDedupeKey.mockResolvedValueOnce({
+      key: "https://linear.app/x/issue/TRU-857",
+      rule: { keyPath: "data.url", windowSeconds: 60, enabled: true },
+      provider: "linear",
+    });
+    findRecentDeliveryByDedupeKey.mockResolvedValueOnce({
+      id: "prior-delivery-row",
+      messageId: "message-original-7",
+    });
+
+    const req = makeRequest({
+      body: JSON.stringify({
+        action: "create",
+        data: { url: "https://linear.app/x/issue/TRU-857" },
+      }),
+      headers: {
+        "linear-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-dup-1",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      message_id: "message-original-7",
+      duplicate: true,
+      // FIX #33: status_url now uses the real session id from a queryOne
+      // lookup (mocked to "session-original-fixture" in this suite).
+      status_url: "/api/sessions/session-original-fixture/messages/message-original-7",
+    });
+
+    expect(recordDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dedupeKey: "https://linear.app/x/issue/TRU-857",
+        valid: true,
+      }),
+    );
+    expect(markDeliverySuppressed).toHaveBeenCalledWith(
+      "delivery-row-1",
+      "message-original-7",
+    );
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it("persists dedupe key on insert when no prior match exists (custom source, no-rule path)", async () => {
+    // Custom source → computeDedupeKey returns null rule → recordDelivery is
+    // called with dedupeKey: null. Verifying the dedupeKey field is wired in.
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: "message-x" });
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-no-rule",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    expect(recordDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ dedupeKey: null }),
+    );
+    expect(findRecentDeliveryByDedupeKey).not.toHaveBeenCalled();
+    expect(markDeliverySuppressed).not.toHaveBeenCalled();
+  });
+
+  it("does not call dedupe lookup when delivery_id duplicate short-circuits", async () => {
+    // delivery_id duplicate path takes the existing 200 branch. The window
+    // lookup must NOT run on duplicates because there's no inserted row to
+    // exclude from the search.
+    computeDedupeKey.mockResolvedValueOnce({
+      key: "https://linear.app/x/issue/TRU-857",
+      rule: { keyPath: "data.url", windowSeconds: 60, enabled: true },
+      provider: "linear",
+    });
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: "message-existing-9" });
+
+    const req = makeRequest({
+      body: JSON.stringify({ data: { url: "https://linear.app/x/issue/TRU-857" } }),
+      headers: {
+        "linear-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-dupe-id",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ message_id: "message-existing-9", duplicate: true });
+    expect(findRecentDeliveryByDedupeKey).not.toHaveBeenCalled();
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not call dedupe lookup when computeDedupeKey returns no key (failure-open)", async () => {
+    // Linear source but the configured path is missing in the payload.
+    computeDedupeKey.mockResolvedValueOnce({
+      key: null,
+      rule: { keyPath: "data.url", windowSeconds: 60, enabled: true },
+      provider: "linear",
+    });
+    // Force the duplicate path so we don't hit `after()` in this assertion-
+    // only test (avoiding the unrelated next/server limitation).
+    recordDelivery.mockResolvedValueOnce({ kind: "duplicate", existingMessageId: null });
+
+    const req = makeRequest({
+      body: JSON.stringify({ data: {} }),
+      headers: {
+        "linear-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-no-key",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    expect(findRecentDeliveryByDedupeKey).not.toHaveBeenCalled();
+    expect(markDeliverySuppressed).not.toHaveBeenCalled();
+  });
+
+  // ─── Content filter (U3) ──────────────────────────────────────────────────
+
+  it("source with no filter rules: filter step is a no-op (existing flow)", async () => {
+    // Default source mock has filter_rules: null. Should run through to dispatch.
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-no-filter",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+  });
+
+  it("filter mismatch returns 200 + filtered:true and skips dispatch", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: { action: "update" } }),
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-filter-mismatch",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      message_id: null,
+      accepted: false,
+      filtered: true,
+      status_url: null,
+    });
+    expect(markDeliveryFiltered).toHaveBeenCalledTimes(1);
+    expect(markDeliveryFiltered).toHaveBeenCalledWith(
+      "delivery-row-1",
+      expect.stringContaining("condition_no_match"),
+    );
+    // dispatch runs in after() (mocked); flush microtasks to be sure it didn't fire
+    await new Promise((r) => setImmediate(r));
+    expect(dispatchSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it("filter match continues to dispatch", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: { action: "create" } }),
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-filter-match",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(dispatchSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("filter on missing field is a mismatch (failure-open)", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: {} }),
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-filter-missing",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.filtered).toBe(true);
+    expect(markDeliveryFiltered).toHaveBeenCalledTimes(1);
+  });
+
+  it("dedupe match short-circuits before filter runs", async () => {
+    // Source has both a filter rule AND triggers a dedupe match. Dedupe wins.
+    computeDedupeKey.mockResolvedValueOnce({
+      key: "https://linear.app/x",
+      rule: { keyPath: "data.url", windowSeconds: 60, enabled: true },
+      provider: "linear",
+    });
+    findRecentDeliveryByDedupeKey.mockResolvedValueOnce({
+      id: "prior-row",
+      messageId: "message-original-7",
+    });
+    loadWebhookSource.mockResolvedValueOnce(
+      source({
+        filter_rules: {
+          combinator: "AND",
+          conditions: [
+            { keyPath: "data.action", operator: "equals", value: "create" },
+          ],
+        },
+      }),
+    );
+    const req = makeRequest({
+      body: JSON.stringify({ data: { url: "https://linear.app/x", action: "update" } }),
+      headers: {
+        "linear-signature": "sha256=abc",
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-dedupe-and-filter",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      message_id: "message-original-7",
+      duplicate: true,
+    });
+    // Dedupe response shape, not filter response shape
+    expect(body.filtered).toBeUndefined();
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+  });
+
+  it("filter with empty conditions array is a no-op", async () => {
+    loadWebhookSource.mockResolvedValueOnce(
+      source({ filter_rules: { combinator: "AND", conditions: [] } }),
+    );
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-empty-rules",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    expect(markDeliveryFiltered).not.toHaveBeenCalled();
+  });
+
+  it("rolls delivery row to error on dispatch ConcurrencyLimitError", async () => {
+    // Response is 202 immediately (the run runs in `after()`); the failure
+    // surfaces by the delivery row being updated to error state and
+    // attachDeliveryMessage never being called for a successful run.
+    const { ConcurrencyLimitError } = await import("@/lib/errors");
+    dispatchSessionMessage.mockRejectedValueOnce(new ConcurrencyLimitError("limit"));
+    const req = makeRequest({
+      headers: {
+        "x-agentplane-signature": "sha256=" + "a".repeat(64),
+        "webhook-timestamp": String(Math.floor(Date.now() / 1000)),
+        "webhook-delivery-id": "del-7",
+      },
+    });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(202);
+    // Flush microtasks so the after() callback runs and the catch fires.
+    await new Promise((r) => setImmediate(r));
+    expect(attachDeliveryMessage).not.toHaveBeenCalled();
+  });
+});

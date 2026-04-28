@@ -18,7 +18,7 @@ import {
   a2aHeaders,
   buildAgentCard,
   getOrBuildAgentCard,
-  RunBackedTaskStore,
+  MessageBackedTaskStore,
   SandboxAgentExecutor,
   validateA2aMessage,
   sanitizeRequestId,
@@ -134,7 +134,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   }
   const agent = AgentRowInternal.parse(agentRows[0]);
 
-  // Best-effort budget gate — authoritative check is inside createRun() (transactional)
+  // Best-effort budget gate — authoritative check is inside dispatchSessionMessage() (transactional)
   // Subscription runs (Claude model + subscription token) bypass budget enforcement
   const isSubscriptionRun = tenant.has_subscription_token && supportsClaudeRunner(agent.model);
   if (!isSubscriptionRun && tenant.current_month_spend >= tenant.monthly_budget_usd) {
@@ -175,7 +175,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   const requestedMaxBudget = typeof apMeta?.max_budget_usd === "number" ? apMeta.max_budget_usd : undefined;
 
   // Create SDK components per-request
-  const taskStore = new RunBackedTaskStore(auth.tenantId, auth.apiKeyId);
+  const taskStore = new MessageBackedTaskStore(auth.tenantId, auth.apiKeyId);
   const executor = new SandboxAgentExecutor({
     tenantId: auth.tenantId,
     agent,

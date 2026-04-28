@@ -388,14 +388,14 @@ ${historyUpdate}
       try { await client.close(); } catch {}
     }
     const platformUrl = process.env.AGENT_PLANE_PLATFORM_URL;
-    const runToken = process.env.AGENT_PLANE_RUN_TOKEN;
-    if (platformUrl && runToken) {
+    const messageToken = process.env.AGENT_PLANE_MESSAGE_TOKEN;
+    if (platformUrl && messageToken) {
       try {
-        const runId = process.env.AGENT_PLANE_RUN_ID;
+        const messageId = process.env.AGENT_PLANE_MESSAGE_ID;
         const transcript = readFileSync(transcriptPath, 'utf-8');
-        await fetch(platformUrl + '/api/internal/runs/' + runId + '/transcript', {
+        await fetch(platformUrl + '/api/internal/messages/' + messageId + '/transcript', {
           method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + runToken, 'Content-Type': 'application/x-ndjson' },
+          headers: { 'Authorization': 'Bearer ' + messageToken, 'Content-Type': 'application/x-ndjson' },
           body: transcript,
         });
       } catch {}

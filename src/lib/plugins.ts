@@ -192,7 +192,7 @@ export async function listPlugins(githubRepo: string, marketplaceToken?: string)
   return { ok: true, data: plugins.sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
-const MAX_FILES_PER_PLUGIN = 20;
+const MAX_FILES_PER_PLUGIN = 50;
 
 /**
  * Fetch and validate a batch of plugin files from GitHub in parallel.

@@ -107,7 +107,7 @@ function Hero() {
               <code>
                 <span className="text-[hsl(240,5%,50%)]">$ </span>
                 <span className="text-emerald-400">curl</span>
-                <span className="text-white"> -X POST $BASE_URL/api/runs \</span>
+                <span className="text-white"> -X POST $BASE_URL/api/sessions \</span>
                 {"\n"}
                 <span className="text-white">  -H </span>
                 <span className="text-amber-300">{'"Authorization: Bearer $API_KEY"'}</span>
@@ -115,7 +115,7 @@ function Hero() {
                 {"\n"}
                 <span className="text-white">  -d </span>
                 <span className="text-sky-300">{"'"}</span>
-                <span className="text-sky-300">{'{"agent_id": "ag_01", "prompt": "Deploy the app"}'}</span>
+                <span className="text-sky-300">{'{"agent_id": "ag_01", "prompt": "Deploy the app", "ephemeral": true}'}</span>
                 <span className="text-sky-300">{"'"}</span>
               </code>
             </pre>
@@ -217,10 +217,11 @@ function HowItWorks() {
     {
       step: "03",
       title: "Run with a prompt",
-      description: "POST a prompt, get back a streaming NDJSON response with real-time events.",
-      code: `POST /api/runs
+      description: "POST a prompt to start a session, get back a streaming NDJSON response with real-time events.",
+      code: `POST /api/sessions
 { "agent_id": "ag_01",
-  "prompt": "Review the open PRs" }
+  "prompt": "Review the open PRs",
+  "ephemeral": true }
 
 ← {"type":"run_started",...}
 ← {"type":"assistant",...}

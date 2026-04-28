@@ -18,8 +18,8 @@ const AgentWithTenant = z.object({
   max_turns: z.coerce.number(),
   max_budget_usd: z.coerce.number(),
   created_at: z.coerce.string(),
-  run_count: z.coerce.number(),
-  last_run_at: z.coerce.string().nullable(),
+  message_count: z.coerce.number(),
+  last_message_at: z.coerce.string().nullable(),
 });
 
 export const GET = withErrorHandler(async (request: NextRequest) => {
@@ -33,12 +33,10 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     AgentWithTenant,
     `SELECT a.id, a.tenant_id, t.name AS tenant_name, a.name, a.model,
        a.permission_mode, a.composio_toolkits, a.max_turns, a.max_budget_usd, a.created_at,
-       COUNT(r.id)::int AS run_count,
-       MAX(r.created_at) AS last_run_at
+       (SELECT COUNT(*)::int FROM session_messages m WHERE m.session_id IN (SELECT id FROM sessions WHERE agent_id = a.id)) AS message_count,
+       (SELECT MAX(m.created_at) FROM session_messages m WHERE m.session_id IN (SELECT id FROM sessions WHERE agent_id = a.id)) AS last_message_at
      FROM agents a
      JOIN tenants t ON t.id = a.tenant_id
-     LEFT JOIN runs r ON r.agent_id = a.id
-     GROUP BY a.id, t.name
      ORDER BY a.created_at DESC
      LIMIT $1 OFFSET $2`,
     [limit, offset],

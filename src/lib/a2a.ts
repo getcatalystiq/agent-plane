@@ -18,19 +18,14 @@ import {
   A2AError,
 } from "@a2a-js/sdk/server";
 import { getHttpClient } from "@/db";
-import { createRun, getRun, transitionRunStatus } from "@/lib/runs";
-import { prepareRunExecution, finalizeRun } from "@/lib/run-executor";
-import { prepareSessionSandbox, finalizeSessionMessage } from "@/lib/session-executor";
-import { findSessionByContextId, createSession, transitionSessionStatus } from "@/lib/sessions";
-import { captureTranscript } from "@/lib/transcript-utils";
-import { generateRunToken } from "@/lib/crypto";
-import { getEnv } from "@/lib/env";
+import { dispatchSessionMessage, cancelSession } from "@/lib/dispatcher";
+import { findSessionByContextId } from "@/lib/sessions";
+import { ConcurrencyLimitError, BudgetExceededError } from "@/lib/errors";
 import type { CallbackData } from "@/lib/mcp";
-import { reconnectSandbox, type SessionSandboxInstance } from "@/lib/sandbox";
 import { IDENTITY_METADATA_KEY, IDENTITY_METADATA_KEY_V2 } from "@/lib/identity";
 import { logger } from "@/lib/logger";
-import type { RunStatus, TenantId, AgentId, RunId } from "@/lib/types";
-import type { AgentInternal } from "@/lib/validation";
+import type { TenantId, AgentId } from "@/lib/types";
+import type { AgentInternal, SessionMessageStatus } from "@/lib/validation";
 import { z } from "zod";
 import { identityJsonbSchema } from "@/lib/validation";
 
@@ -38,21 +33,26 @@ import { identityJsonbSchema } from "@/lib/validation";
 
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function runStatusToA2a(status: RunStatus): TaskState {
+/**
+ * Map a session_message status to an A2A TaskState. Replaces the legacy
+ * `runStatusToA2a` — the status enum picked up `queued` (pre-`running` slot)
+ * but otherwise carries the same values.
+ */
+export function messageStatusToA2a(status: SessionMessageStatus): TaskState {
   switch (status) {
-    case "pending":   return "working";
+    case "queued":    return "submitted";
     case "running":   return "working";
     case "completed": return "completed";
     case "failed":    return "failed";
     case "cancelled": return "canceled";
     case "timed_out": return "failed";
-    default: { const _: never = status; throw new Error(`Unhandled run status: ${_}`); }
+    default: { const _: never = status; throw new Error(`Unhandled message status: ${_}`); }
   }
 }
 
-export function a2aToRunStatus(state: TaskState): RunStatus | null {
+export function a2aToMessageStatus(state: TaskState): SessionMessageStatus | null {
   switch (state) {
-    case "submitted": return "pending";
+    case "submitted": return "queued";
     case "working":   return "running";
     case "completed": return "completed";
     case "failed":    return "failed";
@@ -235,6 +235,17 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
     });
   }
 
+  // U4: agent-plane metadata version 2 signals that A2A taskId now maps
+  // to `session_messages.id` (not `runs.id`) and that contextId-based
+  // multi-turn reuses an existing session when the contextId matches a
+  // non-stopped session for this tenant+agent.
+  const agentPlaneMeta = {
+    "agent-plane:taskid_mapping": "session_message_id",
+    "agent-plane:metadata_version": 2,
+    "agent-plane:multi_turn":
+      "Send the same `contextId` on subsequent message/send|stream calls to reuse the existing session (if non-stopped). Each message becomes a distinct task whose taskId equals the session_messages row id.",
+  };
+
   return {
     name: agent.name,
     description: (agent.identity as Record<string, any>)?.disclosure_summary || agent.description || `${agent.name} — powered by ${tenantName}`,
@@ -266,74 +277,99 @@ export async function buildAgentCard(opts: BuildAgentCardOptions): Promise<Agent
     },
     ...(() => {
       const identityV2 = agent.identity;
-      if (!identityV2) return {};
-      const identityCompat = {
-        name: (identityV2 as Record<string, any>)?.identity?.name ?? null,
-        role: (identityV2 as Record<string, any>)?.identity?.role ?? null,
-        description: (identityV2 as Record<string, any>)?.disclosure_summary ?? null,
-      };
+      const identityCompat = identityV2
+        ? {
+            name: (identityV2 as Record<string, any>)?.identity?.name ?? null,
+            role: (identityV2 as Record<string, any>)?.identity?.role ?? null,
+            description: (identityV2 as Record<string, any>)?.disclosure_summary ?? null,
+          }
+        : null;
       return {
         metadata: {
-          [IDENTITY_METADATA_KEY_V2]: identityV2,
-          [IDENTITY_METADATA_KEY]: identityCompat,
+          ...agentPlaneMeta,
+          ...(identityV2 ? { [IDENTITY_METADATA_KEY_V2]: identityV2 } : {}),
+          ...(identityCompat ? { [IDENTITY_METADATA_KEY]: identityCompat } : {}),
         },
       };
     })(),
   } as AgentCard & { metadata?: Record<string, unknown> };
 }
 
-// --- Run → A2A Task Mapper ---
+// --- Message → A2A Task Mapper ---
 
-const RunForTaskRow = z.object({
+const MessageForTaskRow = z.object({
   id: z.string(),
-  status: z.enum(["pending", "running", "completed", "failed", "cancelled", "timed_out"]),
+  session_id: z.string(),
+  status: z.enum(["queued", "running", "completed", "failed", "cancelled", "timed_out"]),
   result_summary: z.string().nullable(),
   duration_ms: z.coerce.number(),
   created_at: z.coerce.string(),
   completed_at: z.coerce.string().nullable(),
 });
 
-export function runToA2aTask(run: z.infer<typeof RunForTaskRow>): Task {
-  const state = runStatusToA2a(run.status as RunStatus);
+/**
+ * Map a session_messages row to an A2A Task. The taskId IS the session_message
+ * id; the contextId comes from the parent session row when available (the
+ * session's `context_id` mirrors the original A2A request's contextId).
+ * Callers may pass `effectiveContextId` to force the wire-level contextId
+ * a client supplied — that takes precedence over the row.
+ */
+export function messageToA2aTask(
+  message: z.infer<typeof MessageForTaskRow>,
+  effectiveContextId?: string,
+): Task {
+  const state = messageStatusToA2a(message.status as SessionMessageStatus);
   const artifacts: Task["artifacts"] = [];
 
-  if (run.result_summary && (state === "completed" || state === "failed")) {
+  if (message.result_summary && (state === "completed" || state === "failed")) {
     artifacts.push({
       artifactId: "result",
       name: "Agent Result",
-      parts: [{ kind: "text", text: run.result_summary } as TextPart],
+      parts: [{ kind: "text", text: message.result_summary } as TextPart],
     });
   }
 
   const metadata: Record<string, unknown> = {};
-  if (run.duration_ms > 0) {
+  if (message.duration_ms > 0) {
     metadata["agent-plane"] = {
-      duration_ms: run.duration_ms,
+      duration_ms: message.duration_ms,
     };
   }
 
   return {
-    id: run.id,
+    id: message.id,
     kind: "task",
-    contextId: run.id, // Default: contextId = taskId. For session-backed runs, callers override via effectiveContextId in events.
+    contextId: effectiveContextId ?? message.session_id,
     status: {
       state,
-      timestamp: run.completed_at || run.created_at,
+      timestamp: message.completed_at || message.created_at,
     },
     artifacts: artifacts.length > 0 ? artifacts : undefined,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
 }
 
-// --- RunBackedTaskStore ---
+// --- MessageBackedTaskStore ---
 
-export class RunBackedTaskStore implements TaskStore {
+/**
+ * A2A `TaskStore` backed by `session_messages`. Each task is one message;
+ * the taskId IS `session_messages.id`. Implementation mirrors the legacy
+ * `RunBackedTaskStore` — same `lastWrittenStatus` dedupe optimization
+ * (saves ~200 DB calls per run) and same sanitized-error pattern (errors
+ * surface to the SDK and into the JSON-RPC response, so we never let raw
+ * SQL or internal text through).
+ */
+export class MessageBackedTaskStore implements TaskStore {
   private lastWrittenStatus: TaskState | null = null;
 
   constructor(
     private readonly tenantId: TenantId,
+    // Retained for parity with the legacy constructor (audit-trail glue
+    // upstream — currently passed through but not used here).
     private readonly createdByKeyId?: string,
-  ) {}
+  ) {
+    void this.createdByKeyId;
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async load(taskId: string, _context?: ServerCallContext): Promise<Task | undefined> {
@@ -342,46 +378,29 @@ export class RunBackedTaskStore implements TaskStore {
     try {
       const sql = getHttpClient();
       const rows = await sql`
-        SELECT id, status, result_summary, duration_ms, created_at, completed_at, transcript
-        FROM runs
-        WHERE id = ${taskId}
-          AND tenant_id = ${this.tenantId}
+        SELECT m.id, m.session_id, m.status, m.result_summary, m.duration_ms,
+               m.created_at, m.completed_at, m.transcript_blob_url,
+               s.context_id AS session_context_id
+        FROM session_messages m
+        JOIN sessions s ON s.id = m.session_id
+        WHERE m.id = ${taskId}
+          AND m.tenant_id = ${this.tenantId}
       `;
 
       if (rows.length === 0) return undefined;
-      const run = RunForTaskRow.parse(rows[0]);
-      const task = runToA2aTask(run);
+      const message = MessageForTaskRow.parse(rows[0]);
+      const sessionContextId = (rows[0] as { session_context_id?: string | null }).session_context_id ?? undefined;
+      const task = messageToA2aTask(message, sessionContextId ?? undefined);
 
-      // If completed and result_summary is just a status code, extract actual output from transcript
-      if (task.status.state === "completed" && rows[0].transcript) {
-        const transcript = typeof rows[0].transcript === "string" ? rows[0].transcript : "";
-        const lines = transcript.split("\n").filter(Boolean);
-        let lastAssistantText = "";
-        for (const line of lines) {
-          try {
-            const event = JSON.parse(line);
-            if (event.type === "assistant" && event.message?.content) {
-              const textBlocks = Array.isArray(event.message.content)
-                ? event.message.content.filter((b: { type?: string }) => b.type === "text")
-                : [];
-              if (textBlocks.length > 0) {
-                lastAssistantText = textBlocks.map((b: { text: string }) => b.text).join("\n");
-              }
-            }
-          } catch { /* skip non-JSON */ }
-        }
-        if (lastAssistantText) {
-          task.artifacts = [{
-            artifactId: "result",
-            name: "Agent Result",
-            parts: [{ kind: "text", text: lastAssistantText } as TextPart],
-          }];
-        }
-      }
-
+      // Note: result_summary already carries the assistant tail when the
+      // dispatcher's finalize path persisted it. We deliberately don't fetch
+      // and parse the transcript blob here — the legacy in-row `transcript`
+      // column is gone, and a Vercel Blob round-trip on every `tasks/get`
+      // would dominate the request budget. Callers needing the full
+      // transcript hit `/api/sessions/:id/messages/:id`.
       return task;
     } catch (err) {
-      logger.error("RunBackedTaskStore.load failed", {
+      logger.error("MessageBackedTaskStore.load failed", {
         task_id: taskId,
         tenant_id: this.tenantId,
         error: err instanceof Error ? err.message : String(err),
@@ -393,16 +412,19 @@ export class RunBackedTaskStore implements TaskStore {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async save(task: Task, _context?: ServerCallContext): Promise<void> {
     // Status-only UPDATE — SDK calls save() on EVERY event (50-200 per run).
-    // Skip if status hasn't changed (reduces ~200 DB calls to ~3 per run).
+    // Skip if status hasn't changed (reduces ~200 DB calls to ~3 per message).
     if (task.status.state === this.lastWrittenStatus) return;
 
     try {
-      const runStatus = a2aToRunStatus(task.status.state);
-      if (!runStatus) return; // Unknown/unhandled state — skip
+      const messageStatus = a2aToMessageStatus(task.status.state);
+      if (!messageStatus) return; // Unknown/unhandled state — skip
 
       const sql = getHttpClient();
+      // Bound to non-terminal rows (terminal status guard) so we never
+      // overwrite the dispatcher's authoritative finalize write with a
+      // stale A2A SDK status update.
       await sql`
-        UPDATE runs SET status = ${runStatus}
+        UPDATE session_messages SET status = ${messageStatus}
         WHERE id = ${task.id} AND tenant_id = ${this.tenantId}
           AND status NOT IN ('completed', 'failed', 'cancelled', 'timed_out')
       `;
@@ -410,7 +432,7 @@ export class RunBackedTaskStore implements TaskStore {
     } catch (err) {
       // CRITICAL: SDK leaks err.message into JSON-RPC responses.
       // Never throw SQL, connection strings, or internal details.
-      logger.error("RunBackedTaskStore.save failed", {
+      logger.error("MessageBackedTaskStore.save failed", {
         task_id: task.id,
         tenant_id: this.tenantId,
         error: err instanceof Error ? err.message : String(err),
@@ -488,36 +510,40 @@ interface ExecutorDeps {
   requestedMaxBudget?: number;
 }
 
+/**
+ * U4: AgentExecutor backed by the unified `dispatchSessionMessage` chokepoint.
+ *
+ * Flow:
+ *  1. Parse the inbound A2A message (text + optional `ac_callback` data part).
+ *  2. If the request supplies a non-trivial `contextId`, look it up. A
+ *     non-stopped match means we reuse the session (`ephemeral: false`).
+ *     Otherwise dispatch with `ephemeral: true` so the sandbox tears down
+ *     after the message completes — and stamp the contextId on the session
+ *     so subsequent calls with the same contextId reuse it.
+ *  3. The dispatcher returns a `messageId` — that becomes the A2A `taskId`
+ *     in every subsequent event. We then drain the dispatcher's NDJSON
+ *     stream, surface assistant text + result artifacts, and read the
+ *     terminal message status to publish the final A2A event.
+ *
+ *  Errors are sanitized at the boundary: anything not already an `A2AError`
+ *  is translated to a generic "Internal execution error" wire message.
+ */
 export class SandboxAgentExecutor implements AgentExecutor {
   constructor(private readonly deps: ExecutorDeps) {}
 
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
-    const taskId = requestContext.taskId;
-    // Preserve client-supplied contextId in all A2A events (Unit 4)
-    const effectiveContextId = requestContext.contextId || taskId;
+    const inboundTaskId = requestContext.taskId;
+    // Wire-level contextId: prefer client-supplied, fall back to inboundTaskId
+    // so SDK contracts (every event carries a contextId) hold even when the
+    // client didn't send one.
+    let effectiveContextId = requestContext.contextId || inboundTaskId;
+    let liveTaskId = inboundTaskId; // Re-bound to the dispatcher's messageId once known.
 
     try {
-      // Validate taskId
-      if (!UUID_V4_REGEX.test(taskId)) {
+      // Validate inbound taskId
+      if (!UUID_V4_REGEX.test(inboundTaskId)) {
         throw A2AError.invalidParams("Invalid task ID format");
       }
-
-      // Publish initial task event — required by SDK to set currentTask
-      eventBus.publish({
-        kind: "task",
-        id: taskId,
-        contextId: effectiveContextId,
-        status: { state: "working", timestamp: new Date().toISOString() },
-      } as unknown as Task);
-
-      // Publish "working" status update
-      eventBus.publish({
-        kind: "status-update",
-        taskId,
-        contextId: effectiveContextId,
-        status: { state: "working", timestamp: new Date().toISOString() },
-        final: false,
-      } as TaskStatusUpdateEvent);
 
       // Extract prompt from user message (text parts + data parts)
       const textParts = requestContext.userMessage.parts.filter(
@@ -534,11 +560,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
       const callbackData = dataParts.find(
         (p) => p.data && typeof p.data === "object" && (p.data as Record<string, unknown>).type === "ac_callback",
       );
-
-      // Parse callback fields once
-      const cb = callbackData
-        ? callbackData.data as Record<string, unknown>
-        : undefined;
+      const cb = callbackData ? callbackData.data as Record<string, unknown> : undefined;
       const callbackUrl = cb?.callback_url as string | undefined;
 
       logger.info("A2A message parts", {
@@ -550,7 +572,6 @@ export class SandboxAgentExecutor implements AgentExecutor {
         context_id: requestContext.contextId,
       });
 
-      // Build prompt from text parts (callback data is handled via MCP bridge, not prompt text)
       const prompt = textParts.map((p) => p.text).join("\n");
 
       // Extract callback hostname for network policy
@@ -561,87 +582,138 @@ export class SandboxAgentExecutor implements AgentExecutor {
         } catch { /* invalid URL, skip */ }
       }
 
-      const agent = this.deps.agent;
-
-      // Compute effective budget
-      const agentBudget = agent.max_budget_usd;
-      const tenantRemaining = this.deps.remainingBudget;
-      const requestedBudget = this.deps.requestedMaxBudget;
-      const effectiveBudget = Math.min(
-        agentBudget,
-        tenantRemaining,
-        ...(requestedBudget !== undefined ? [requestedBudget] : []),
-      );
-
-      // Build callback data for MCP bridge
       const parsedCallbackData: CallbackData | undefined = cb ? {
         url: callbackUrl!,
         token: cb.callback_token as string,
         tools: cb.available_tools as CallbackData["tools"],
       } : undefined;
 
-      // --- Session reuse logic (Unit 3) ---
-      const clientContextId = requestContext.contextId;
+      const agent = this.deps.agent;
+      const tenantId = this.deps.tenantId;
 
-      logger.info("A2A session reuse check", {
-        client_context_id: clientContextId,
-        task_id: taskId,
-        agent_id: agent.id,
-        tenant_id: this.deps.tenantId,
-        context_id_equals_task_id: clientContextId === taskId,
-      });
+      // Compute effective budget (intersection of agent cap, tenant remaining,
+      // and any caller-requested override carried in the A2A metadata).
+      const effectiveBudget = Math.min(
+        agent.max_budget_usd,
+        this.deps.remainingBudget,
+        ...(this.deps.requestedMaxBudget !== undefined ? [this.deps.requestedMaxBudget] : []),
+      );
 
-      if (clientContextId && clientContextId !== taskId) {
-        // Check for existing session (skip if contextId is just the auto-generated taskId)
-        const existingSession = await findSessionByContextId(
-          this.deps.tenantId,
+      // --- Session reuse decision ---
+      // ContextId distinguishes "this is a follow-up turn" from "this is the
+      // first turn / a one-shot". We treat `contextId === inboundTaskId` as
+      // "not really a contextId" because some clients auto-generate that as
+      // a default; the dispatcher then creates a fresh ephemeral session.
+      const clientContextId =
+        requestContext.contextId && requestContext.contextId !== inboundTaskId
+          ? requestContext.contextId
+          : undefined;
+
+      let reuseSessionId: string | undefined;
+      let dispatchEphemeral = true;
+
+      if (clientContextId) {
+        const existing = await findSessionByContextId(
+          tenantId,
           agent.id as AgentId,
           clientContextId,
         );
-
-        logger.info("A2A session lookup result", {
-          client_context_id: clientContextId,
-          session_found: !!existingSession,
-          session_id: existingSession?.id,
-          session_status: existingSession?.status,
-        });
-
-        if (existingSession) {
-          // --- REUSE PATH: session found ---
-          await this.executeSessionReuse(
-            existingSession, requestContext, eventBus, taskId, effectiveContextId,
-            prompt, effectiveBudget, callbackHostname, parsedCallbackData,
-          );
-          return;
+        if (existing && existing.status !== "stopped") {
+          reuseSessionId = existing.id;
+          dispatchEphemeral = false;
+          logger.info("A2A session reuse hit", {
+            session_id: existing.id,
+            context_id: clientContextId,
+            status: existing.status,
+          });
+        } else {
+          // First call with this contextId — dispatcher stamps the session
+          // with `context_id` so the next call reuses it. The session is
+          // PERSISTENT (ephemeral=false) for the first turn so future
+          // contextId-keyed messages can re-attach via findSessionByContextId.
+          // The cleanup cron will stop the session after its per-row idle TTL
+          // if no follow-up arrives.
+          dispatchEphemeral = false;
+          logger.info("A2A first message with contextId", {
+            context_id: clientContextId,
+          });
         }
-
-        // --- FIRST MESSAGE PATH: create session with contextId ---
-        await this.executeFirstSessionMessage(
-          clientContextId, requestContext, eventBus, taskId, effectiveContextId,
-          prompt, effectiveBudget, callbackHostname, parsedCallbackData,
-        );
-        return;
       }
 
-      // --- ONE-SHOT PATH: no contextId (unchanged) ---
-      await this.executeOneShot(
-        requestContext, eventBus, taskId, effectiveContextId,
-        prompt, effectiveBudget, callbackHostname, parsedCallbackData,
-      );
+      // --- Dispatch via the unified chokepoint ---
+      let dispatch;
+      try {
+        dispatch = await dispatchSessionMessage({
+          tenantId,
+          agentId: agent.id as AgentId,
+          sessionId: reuseSessionId,
+          prompt,
+          triggeredBy: "a2a",
+          ephemeral: dispatchEphemeral,
+          callerKeyId: this.deps.createdByKeyId,
+          contextId: clientContextId,
+          callbackData: parsedCallbackData,
+          extraAllowedHostnames: callbackHostname ? [callbackHostname] : undefined,
+          platformApiUrl: this.deps.platformApiUrl,
+          overrides: { maxBudgetUsd: this.deps.requestedMaxBudget },
+        });
+      } catch (err) {
+        if (err instanceof ConcurrencyLimitError) {
+          throw new A2AError(
+            -32000,
+            "Tenant or session is busy — try again in a moment",
+          );
+        }
+        if (err instanceof BudgetExceededError) {
+          throw new A2AError(-32001, "Monthly budget exceeded");
+        }
+        throw err;
+      }
 
+      // From here on, A2A taskId == messageId. Re-bind so all subsequent
+      // events carry the dispatcher's authoritative id.
+      liveTaskId = dispatch.messageId;
+
+      // Publish the canonical "task" + initial "working" event using the
+      // dispatcher's messageId so clients reconciling on `tasks/get` see the
+      // same id we wrote into `session_messages`.
+      eventBus.publish({
+        kind: "task",
+        id: liveTaskId,
+        contextId: effectiveContextId,
+        status: { state: "working", timestamp: new Date().toISOString() },
+      } as unknown as Task);
+
+      eventBus.publish({
+        kind: "status-update",
+        taskId: liveTaskId,
+        contextId: effectiveContextId,
+        status: { state: "working", timestamp: new Date().toISOString() },
+        final: false,
+      } as TaskStatusUpdateEvent);
+
+      // Drain the dispatcher's NDJSON stream — pull events, surface assistant
+      // text + result artifacts on the A2A bus, and let finalize hooks run.
+      const lineIterator = ndjsonLines(dispatch.stream);
+      await consumeA2aLogStream(lineIterator, eventBus, liveTaskId, effectiveContextId);
+
+      // Read the finalized message status to emit the final A2A event with
+      // the correct terminal state.
+      await this.publishFinalStatus(liveTaskId, effectiveContextId, eventBus);
     } catch (err) {
-      // Sanitize errors — never leak internals
+      // Sanitize: only `A2AError` messages are safe to surface. Anything
+      // else collapses to a generic "Internal execution error" string.
       const isA2aError = err instanceof A2AError;
       if (!isA2aError) {
         logger.error("SandboxAgentExecutor.execute failed", {
-          task_id: taskId,
+          task_id: liveTaskId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
 
       eventBus.publish({
         kind: "status-update",
-        taskId,
+        taskId: liveTaskId,
         contextId: effectiveContextId,
         status: {
           state: "failed",
@@ -649,7 +721,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
           message: {
             role: "agent",
             kind: "message",
-            messageId: taskId,
+            messageId: liveTaskId,
             parts: [{ kind: "text", text: isA2aError ? (err as A2AError).message : "Internal execution error" } as TextPart],
           },
         },
@@ -661,414 +733,74 @@ export class SandboxAgentExecutor implements AgentExecutor {
   }
 
   /**
-   * Reuse path: existing session found for contextId.
-   * Reconnect sandbox, create run, runMessage, finalizeSessionMessage.
-   */
-  private async executeSessionReuse(
-    existingSession: Awaited<ReturnType<typeof findSessionByContextId>> & {},
-    requestContext: RequestContext,
-    eventBus: ExecutionEventBus,
-    taskId: string,
-    effectiveContextId: string,
-    prompt: string,
-    effectiveBudget: number,
-    callbackHostname: string | undefined,
-    callbackData: CallbackData | undefined,
-  ): Promise<void> {
-    const agent = this.deps.agent;
-    const tenantId = this.deps.tenantId;
-
-    logger.info("A2A session reuse: transitioning to active", {
-      session_id: existingSession.id,
-      context_id: existingSession.context_id,
-    });
-
-    // Atomically lock session: idle → active
-    const transitioned = await transitionSessionStatus(
-      existingSession.id,
-      tenantId,
-      "idle",
-      "active",
-    );
-
-    if (!transitioned) {
-      // Session is busy (active/creating) or stopped
-      throw new A2AError(
-        -32000,
-        "Session is busy — another message is being processed for this contextId",
-      );
-    }
-
-    // Try to reconnect to existing sandbox
-    let sandbox: SessionSandboxInstance | null = null;
-    try {
-      sandbox = await prepareSessionSandbox(
-        {
-          sessionId: existingSession.id,
-          tenantId,
-          agent,
-          prompt,
-          platformApiUrl: this.deps.platformApiUrl,
-          effectiveBudget,
-          effectiveMaxTurns: agent.max_turns,
-          callbackData,
-          extraAllowedHostnames: callbackHostname ? [callbackHostname] : undefined,
-        },
-        existingSession,
-      );
-    } catch (err) {
-      logger.warn("A2A session reuse: sandbox reconnect failed, falling back to one-shot", {
-        session_id: existingSession.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      // Rollback session to idle so it can be retried or cleaned up
-      await transitionSessionStatus(
-        existingSession.id,
-        tenantId,
-        "active",
-        "idle",
-        { idle_since: new Date().toISOString() },
-      ).catch((rollbackErr) => {
-        logger.error("Failed to rollback session to idle after reconnect failure", {
-          session_id: existingSession.id,
-          error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-        });
-      });
-
-      // Fall through to one-shot path
-      await this.executeOneShot(
-        requestContext, eventBus, taskId, effectiveContextId,
-        prompt, effectiveBudget, callbackHostname, callbackData,
-      );
-      return;
-    }
-
-    // Create run linked to session
-    const { run } = await createRun(
-      tenantId,
-      agent.id as AgentId,
-      prompt,
-      {
-        triggeredBy: "a2a",
-        createdByKeyId: this.deps.createdByKeyId,
-        sessionId: existingSession.id,
-      },
-    );
-
-    const env = getEnv();
-    const runToken = await generateRunToken(run.id as RunId, env.ENCRYPTION_KEY);
-
-    // Transition run to running
-    await transitionRunStatus(run.id as RunId, tenantId, "pending", "running", {
-      sandbox_id: sandbox.id,
-      started_at: new Date().toISOString(),
-    });
-
-    // Send message to existing sandbox
-    const result = await sandbox.runMessage({
-      prompt,
-      sdkSessionId: existingSession.sdk_session_id,
-      runId: run.id as RunId,
-      runToken,
-      maxTurns: agent.max_turns,
-      maxBudgetUsd: effectiveBudget,
-    });
-
-    // Capture transcript with session_info tracking
-    const transcriptChunks: string[] = [];
-    const sdkSessionIdRef = { value: existingSession.sdk_session_id };
-    const logIterator = captureTranscript(
-      result.logs(),
-      transcriptChunks,
-      tenantId,
-      run.id as RunId,
-      (event) => {
-        if (event.type === "session_info" && event.sdk_session_id) {
-          sdkSessionIdRef.value = event.sdk_session_id as string;
-        }
-      },
-    );
-
-    // Inject A2A incoming event
-    const promptPreview = prompt.split("\n").slice(0, 5).join("\n").slice(0, 500);
-    transcriptChunks.unshift(JSON.stringify({
-      type: "a2a_incoming",
-      run_id: run.id,
-      context_id: effectiveContextId,
-      task_id: taskId,
-      agent_name: agent.name,
-      sender: this.deps.createdByKeyId ?? "unknown",
-      prompt_preview: promptPreview,
-      session_reuse: true,
-      timestamp: new Date().toISOString(),
-    }));
-
-    // Consume logs and publish A2A events
-    await consumeA2aLogStream(logIterator, eventBus, taskId, effectiveContextId);
-
-    // Finalize: persist transcript, backup session file, transition session to idle
-    await finalizeSessionMessage(
-      run.id as RunId,
-      tenantId,
-      existingSession.id,
-      transcriptChunks,
-      effectiveBudget,
-      sandbox,
-      sdkSessionIdRef.value,
-    );
-
-    // Read finalized status and publish final A2A event
-    await this.publishFinalStatus(run.id, taskId, effectiveContextId, eventBus);
-  }
-
-  /**
-   * First message path: contextId present but no existing session.
-   * Create session sandbox, create session + run, finalize with session bookkeeping.
-   */
-  private async executeFirstSessionMessage(
-    clientContextId: string,
-    requestContext: RequestContext,
-    eventBus: ExecutionEventBus,
-    taskId: string,
-    effectiveContextId: string,
-    prompt: string,
-    effectiveBudget: number,
-    callbackHostname: string | undefined,
-    callbackData: CallbackData | undefined,
-  ): Promise<void> {
-    const agent = this.deps.agent;
-    const tenantId = this.deps.tenantId;
-
-    logger.info("A2A first session message: creating session", {
-      agent_id: agent.id,
-      context_id: clientContextId,
-    });
-
-    // Create session with contextId
-    const { session } = await createSession(
-      tenantId,
-      agent.id as AgentId,
-      { contextId: clientContextId },
-    );
-
-    // Transition session: creating → active
-    await transitionSessionStatus(session.id, tenantId, "creating", "active");
-
-    // Create run linked to session
-    const { run } = await createRun(
-      tenantId,
-      agent.id as AgentId,
-      prompt,
-      {
-        triggeredBy: "a2a",
-        createdByKeyId: this.deps.createdByKeyId,
-        sessionId: session.id,
-      },
-    );
-
-    // Use prepareSessionSandbox to create sandbox (cold path — no existing sandbox)
-    logger.info("executeFirstSessionMessage: passing callbackData to prepareSessionSandbox", {
-      has_callback: !!callbackData,
-      tool_count: callbackData?.tools?.length ?? 0,
-      url: callbackData?.url ?? "none",
-    });
-    let sandbox: SessionSandboxInstance;
-    try {
-      sandbox = await prepareSessionSandbox(
-        {
-          sessionId: session.id,
-          tenantId,
-          agent,
-          prompt,
-          platformApiUrl: this.deps.platformApiUrl,
-          effectiveBudget,
-          effectiveMaxTurns: agent.max_turns,
-          callbackData,
-          extraAllowedHostnames: callbackHostname ? [callbackHostname] : undefined,
-        },
-        session,
-      );
-    } catch (err) {
-      // Sandbox creation failed — transition session to stopped and re-throw
-      await transitionSessionStatus(session.id, tenantId, "active", "stopped").catch(() => {});
-      throw err;
-    }
-
-    const env = getEnv();
-    const runToken = await generateRunToken(run.id as RunId, env.ENCRYPTION_KEY);
-
-    // Transition run to running
-    await transitionRunStatus(run.id as RunId, tenantId, "pending", "running", {
-      sandbox_id: sandbox.id,
-      started_at: new Date().toISOString(),
-    });
-
-    // Send first message to sandbox
-    const result = await sandbox.runMessage({
-      prompt,
-      sdkSessionId: null, // First message — no existing SDK session
-      runId: run.id as RunId,
-      runToken,
-      maxTurns: agent.max_turns,
-      maxBudgetUsd: effectiveBudget,
-    });
-
-    // Capture transcript with session_info tracking
-    const transcriptChunks: string[] = [];
-    const sdkSessionIdRef = { value: null as string | null };
-    const logIterator = captureTranscript(
-      result.logs(),
-      transcriptChunks,
-      tenantId,
-      run.id as RunId,
-      (event) => {
-        if (event.type === "session_info" && event.sdk_session_id) {
-          sdkSessionIdRef.value = event.sdk_session_id as string;
-        }
-      },
-    );
-
-    // Inject A2A incoming event
-    const promptPreview = prompt.split("\n").slice(0, 5).join("\n").slice(0, 500);
-    transcriptChunks.unshift(JSON.stringify({
-      type: "a2a_incoming",
-      run_id: run.id,
-      context_id: effectiveContextId,
-      task_id: taskId,
-      agent_name: agent.name,
-      sender: this.deps.createdByKeyId ?? "unknown",
-      prompt_preview: promptPreview,
-      session_first: true,
-      timestamp: new Date().toISOString(),
-    }));
-
-    // Consume logs and publish A2A events
-    await consumeA2aLogStream(logIterator, eventBus, taskId, effectiveContextId);
-
-    // Finalize: persist transcript, backup session file, transition session to idle
-    await finalizeSessionMessage(
-      run.id as RunId,
-      tenantId,
-      session.id,
-      transcriptChunks,
-      effectiveBudget,
-      sandbox,
-      sdkSessionIdRef.value,
-    );
-
-    // Read finalized status and publish final A2A event
-    await this.publishFinalStatus(run.id, taskId, effectiveContextId, eventBus);
-  }
-
-  /**
-   * One-shot path: no contextId — existing behavior unchanged.
-   */
-  private async executeOneShot(
-    requestContext: RequestContext,
-    eventBus: ExecutionEventBus,
-    taskId: string,
-    effectiveContextId: string,
-    prompt: string,
-    effectiveBudget: number,
-    callbackHostname: string | undefined,
-    callbackData: CallbackData | undefined,
-  ): Promise<void> {
-    const agent = this.deps.agent;
-    const tenantId = this.deps.tenantId;
-
-    // Create run
-    const { run } = await createRun(
-      tenantId,
-      agent.id as AgentId,
-      prompt,
-      {
-        triggeredBy: "a2a",
-        createdByKeyId: this.deps.createdByKeyId,
-      },
-    );
-
-    // Log incoming A2A message as the first transcript event
-    const promptPreview = prompt.split("\n").slice(0, 5).join("\n").slice(0, 500);
-    const a2aIncomingEvent = JSON.stringify({
-      type: "a2a_incoming",
-      run_id: run.id,
-      context_id: effectiveContextId,
-      task_id: taskId,
-      agent_name: agent.name,
-      sender: this.deps.createdByKeyId ?? "unknown",
-      prompt_preview: promptPreview,
-      has_callback: !!callbackData,
-      callback_url: callbackData?.url,
-      timestamp: new Date().toISOString(),
-    });
-
-    // Prepare and start sandbox execution
-    const { sandbox, logIterator, transcriptChunks } = await prepareRunExecution({
-      agent,
-      tenantId,
-      runId: run.id as RunId,
-      prompt,
-      platformApiUrl: this.deps.platformApiUrl,
-      effectiveBudget,
-      effectiveMaxTurns: agent.max_turns,
-      maxRuntimeSeconds: agent.max_runtime_seconds,
-      extraAllowedHostnames: callbackHostname ? [callbackHostname] : [],
-      callbackData,
-    });
-
-    // Inject the A2A incoming event as the first transcript entry
-    transcriptChunks.unshift(a2aIncomingEvent);
-
-    // Consume log stream, publish A2A events (using shared function)
-    await consumeA2aLogStream(logIterator, eventBus, taskId, effectiveContextId);
-
-    // Finalize run: persist transcript, update billing, stop sandbox
-    await finalizeRun(run.id as RunId, tenantId, transcriptChunks, sandbox, effectiveBudget);
-
-    // Read finalized status and publish final A2A event
-    await this.publishFinalStatus(run.id, taskId, effectiveContextId, eventBus);
-  }
-
-  /**
-   * Read finalized run status and publish final A2A status event.
+   * Read finalized message status and publish a final A2A status event.
    */
   private async publishFinalStatus(
-    runId: string,
-    taskId: string,
+    messageId: string,
     effectiveContextId: string,
     eventBus: ExecutionEventBus,
   ): Promise<void> {
-    const sql = getHttpClient();
-    const finalRows = await sql`
-      SELECT status FROM runs WHERE id = ${runId} AND tenant_id = ${this.deps.tenantId}
-    `;
-    const finalStatus = finalRows[0]?.status as RunStatus | undefined;
-    const finalState = finalStatus ? runStatusToA2a(finalStatus) : "completed";
+    let finalState: TaskState = "completed";
+    try {
+      const sql = getHttpClient();
+      const finalRows = await sql`
+        SELECT status FROM session_messages WHERE id = ${messageId} AND tenant_id = ${this.deps.tenantId}
+      `;
+      const finalStatus = finalRows[0]?.status as SessionMessageStatus | undefined;
+      finalState = finalStatus ? messageStatusToA2a(finalStatus) : "completed";
+    } catch (err) {
+      logger.error("publishFinalStatus failed to read message status", {
+        message_id: messageId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     eventBus.publish({
       kind: "status-update",
-      taskId,
+      taskId: messageId,
       contextId: effectiveContextId,
       status: {
         state: finalState,
         timestamp: new Date().toISOString(),
-        ...(finalState === "failed" ? { message: { role: "agent", kind: "message", messageId: taskId, parts: [{ kind: "text", text: "Agent execution failed" } as TextPart] } } : {}),
+        ...(finalState === "failed"
+          ? {
+              message: {
+                role: "agent",
+                kind: "message",
+                messageId,
+                parts: [{ kind: "text", text: "Agent execution failed" } as TextPart],
+              },
+            }
+          : {}),
       },
       final: true,
     } as TaskStatusUpdateEvent);
   }
 
+  /**
+   * Map taskId → messageId → sessionId, then call `cancelSession`. Errors
+   * are sanitized — the SDK will leak `err.message` onto the wire.
+   */
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
     try {
       if (!UUID_V4_REGEX.test(taskId)) {
         throw A2AError.taskNotFound(taskId);
       }
 
-      // Load the run to check current status and get sandbox_id
-      const run = await getRun(taskId, this.deps.tenantId);
+      const sql = getHttpClient();
+      const rows = await sql`
+        SELECT session_id, status FROM session_messages
+        WHERE id = ${taskId} AND tenant_id = ${this.deps.tenantId}
+      `;
+      if (rows.length === 0) {
+        throw A2AError.taskNotFound(taskId);
+      }
 
-      if (run.status !== "running" && run.status !== "pending") {
-        // Already in terminal state — nothing to cancel
+      const sessionId = rows[0].session_id as string;
+      const messageStatus = rows[0].status as SessionMessageStatus;
+
+      // Already terminal — emit a canceled event for protocol parity, then return.
+      if (messageStatus !== "queued" && messageStatus !== "running") {
         eventBus.publish({
           kind: "status-update",
           taskId,
@@ -1079,25 +811,12 @@ export class SandboxAgentExecutor implements AgentExecutor {
         return;
       }
 
-      // Stop the sandbox if running (mirrors /api/runs/:id/cancel)
-      if (run.sandbox_id) {
-        const sandbox = await reconnectSandbox(run.sandbox_id);
-        if (sandbox) {
-          await sandbox.stop();
-          logger.info("Sandbox stopped for A2A cancellation", {
-            task_id: taskId,
-            sandbox_id: run.sandbox_id,
-          });
-        }
-      }
-
-      await transitionRunStatus(
-        taskId as RunId,
-        this.deps.tenantId,
-        run.status,
-        "cancelled",
-        { completed_at: new Date().toISOString() },
-      );
+      // Stops the sandbox + marks active message cancelled in one shot.
+      await cancelSession(sessionId, this.deps.tenantId);
+      logger.info("A2A cancelTask: session cancelled", {
+        task_id: taskId,
+        session_id: sessionId,
+      });
 
       eventBus.publish({
         kind: "status-update",
@@ -1107,15 +826,52 @@ export class SandboxAgentExecutor implements AgentExecutor {
         final: true,
       } as TaskStatusUpdateEvent);
     } catch (err) {
-      logger.error("SandboxAgentExecutor.cancelTask failed", {
-        task_id: taskId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const isA2aError = err instanceof A2AError;
+      if (!isA2aError) {
+        logger.error("SandboxAgentExecutor.cancelTask failed", {
+          task_id: taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Don't re-throw raw errors onto the wire — the SDK serializes them.
+      } else {
+        // A2AError messages are safe to surface; let the SDK propagate it.
+        throw err;
+      }
     } finally {
       eventBus.finished();
     }
   }
 
+}
+
+/**
+ * Convert a Uint8Array stream of NDJSON bytes into an async iterable of
+ * lines (one JSON event per yield). Drops trailing partial line at EOF.
+ */
+async function* ndjsonLines(stream: ReadableStream<Uint8Array>): AsyncIterable<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.length > 0) yield line;
+      }
+    }
+    if (buffer.length > 0) {
+      yield buffer;
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+  }
 }
 
 // --- Input Validation Helpers ---

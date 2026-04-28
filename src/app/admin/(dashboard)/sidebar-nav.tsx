@@ -2,15 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Bot, Play, Plug, Store, Settings, MessageSquare, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, Bot, Plug, Store, Settings, Activity, type LucideIcon } from "lucide-react";
 
 const navItems = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
   { href: "/admin/agents", label: "Agents", icon: Bot },
   { href: "/admin/mcp-servers", label: "Custom Connectors", icon: Plug },
   { href: "/admin/plugin-marketplaces", label: "Plugins", icon: Store },
-  { href: "/admin/runs", label: "Runs", icon: Play },
-  { href: "/admin/sessions", label: "Sessions", icon: MessageSquare },
+  { href: "/admin/sessions", label: "Runs", icon: Activity },
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 

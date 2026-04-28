@@ -26,7 +26,6 @@ import {
   getSession,
   listSessions,
   transitionSessionStatus,
-  stopSession,
   incrementMessageCount,
   getIdleSessions,
   getStuckSessions,
@@ -35,7 +34,6 @@ import {
 import { execute, queryOne, query, withTenantTransaction } from "@/db";
 import {
   NotFoundError,
-  ConflictError,
   ConcurrencyLimitError,
 } from "@/lib/errors";
 import type { TenantId, AgentId } from "@/lib/types";
@@ -233,38 +231,6 @@ describe("transitionSessionStatus", () => {
   });
 });
 
-describe("stopSession", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("returns session as-is if already stopped", async () => {
-    const stoppedSession = { ...mockSession, status: "stopped" as const };
-    vi.mocked(queryOne).mockResolvedValue(stoppedSession);
-    const result = await stopSession(sessionId, tenantId);
-    expect(result.status).toBe("stopped");
-    expect(execute).not.toHaveBeenCalled();
-  });
-
-  it("transitions to stopped and returns updated session", async () => {
-    const idleSession = { ...mockSession, status: "idle" as const };
-    const stoppedSession = { ...mockSession, status: "stopped" as const };
-    vi.mocked(queryOne)
-      .mockResolvedValueOnce(idleSession) // getSession
-      .mockResolvedValueOnce(stoppedSession); // getSession after stop
-    vi.mocked(execute).mockResolvedValue({ rowCount: 1 });
-    const result = await stopSession(sessionId, tenantId);
-    expect(result.status).toBe("stopped");
-  });
-
-  it("throws ConflictError when transition fails", async () => {
-    const activeSession = { ...mockSession, status: "active" as const };
-    vi.mocked(queryOne).mockResolvedValue(activeSession);
-    vi.mocked(execute).mockResolvedValue({ rowCount: 0 });
-    await expect(stopSession(sessionId, tenantId)).rejects.toThrow(ConflictError);
-  });
-});
-
 describe("incrementMessageCount", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -279,24 +245,41 @@ describe("incrementMessageCount", () => {
 describe("getIdleSessions", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("queries idle sessions past threshold", async () => {
+  it("queries idle sessions past per-session TTL", async () => {
     vi.mocked(query).mockResolvedValue([]);
-    await getIdleSessions(10);
+    await getIdleSessions();
     const sql = vi.mocked(query).mock.calls[0][1] as string;
     expect(sql).toContain("status = 'idle'");
     expect(sql).toContain("idle_since");
+    // Per-session TTL column is now read from the row, not a global parameter.
+    expect(sql).toContain("idle_ttl_seconds");
   });
 });
 
 describe("getStuckSessions", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("queries stuck creating and active sessions", async () => {
+  it("queries stuck creating sessions when called with creating", async () => {
     vi.mocked(query).mockResolvedValue([]);
-    await getStuckSessions();
+    await getStuckSessions("creating", 5);
     const sql = vi.mocked(query).mock.calls[0][1] as string;
-    expect(sql).toContain("creating");
-    expect(sql).toContain("active");
+    expect(sql).toContain("status = $1");
+    const params = vi.mocked(query).mock.calls[0][2] as unknown[];
+    expect(params).toContain("creating");
+    expect(params).toContain(5);
+  });
+
+  it("queries stuck active sessions when called with active", async () => {
+    vi.mocked(query).mockResolvedValue([]);
+    await getStuckSessions("active", 30);
+    // FIX #28: active branch joins on session_messages.started_at, so the
+    // SQL hard-codes status='active' and the only positional param is the
+    // minute threshold. The creating branch still uses ($1=state, $2=mins).
+    const sql = vi.mocked(query).mock.calls[0][1] as string;
+    const params = vi.mocked(query).mock.calls[0][2] as unknown[];
+    expect(sql).toContain("session_messages");
+    expect(sql).toContain("started_at");
+    expect(params).toContain(30);
   });
 });
 

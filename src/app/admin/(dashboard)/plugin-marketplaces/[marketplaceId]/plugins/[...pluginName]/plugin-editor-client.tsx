@@ -82,20 +82,22 @@ export function PluginEditorClient({
       <div className="flex items-end border-b border-border">
         <div className="flex gap-1">
           {tabs.map((tab) => (
-            <button
+            <Button
               key={tab.id}
+              type="button"
+              variant="ghost"
               onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              className={`h-auto rounded-none border-b-2 px-4 py-2 text-sm font-medium hover:bg-transparent ${
                 activeTab === tab.id
                   ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/50"
+                  : "border-transparent text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground"
               }`}
             >
               {tab.label}
               {tab.count > 0 && (
                 <span className="ml-1.5 text-xs text-muted-foreground">({tab.count})</span>
               )}
-            </button>
+            </Button>
           ))}
         </div>
         {!readOnly && (

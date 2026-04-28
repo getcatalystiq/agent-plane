@@ -68,3 +68,15 @@ export class RateLimitError extends AppError {
     }
   }
 }
+
+/**
+ * Thrown by the dispatcher when a public-route caller targets a session that
+ * is no longer available (`stopped`, or non-`idle` when the route demands an
+ * idle target). Public route handlers map this to 410 Gone. Internal callers
+ * may catch this and auto-recreate a fresh session.
+ */
+export class SessionStoppedError extends AppError {
+  constructor(message = "Session is no longer available") {
+    super("session_stopped", 410, message);
+  }
+}

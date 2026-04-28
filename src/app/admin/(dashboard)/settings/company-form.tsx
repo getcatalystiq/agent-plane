@@ -212,14 +212,16 @@ export function CompanyForm({ tenant }: { tenant: Company }) {
       <div className="rounded-lg border border-muted-foreground/25 p-5">
         <div className="flex items-center gap-2 mb-3">
           <h2 className="text-lg font-semibold">Claude Subscription</h2>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-xs"
             onClick={() => setShowTokenHelp(!showTokenHelp)}
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="How to get a token"
             title="How to get a token"
           >
-            <Info className="size-4" />
-          </button>
+            <Info />
+          </Button>
           {hasToken && <Badge variant="default">Configured</Badge>}
           {(() => {
             if (!subscriptionExpiresAt && !tenant.subscription_token_expires_at) return null;

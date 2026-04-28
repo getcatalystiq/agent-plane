@@ -139,10 +139,17 @@ export interface SandboxConfig {
     skills: Array<{ folder: string; files: Array<{ path: string; content: string }> }>;
   };
   tenantId: string;
-  runId: string;
+  /**
+   * The session_message id this runner is executing. Both the upload URL
+   * (`/api/internal/messages/:messageId/transcript`) and the bound HMAC token
+   * key off this value, so a stolen or stale messageId token cannot accept
+   * an upload for a different message.
+   */
+  messageId: string;
   prompt: string;
   platformApiUrl: string;
-  runToken?: string;
+  /** Bearer token minted via generateMessageToken(messageId). */
+  messageToken?: string;
   maxRuntimeSeconds?: number;
   aiGatewayApiKey: string;
   auth?: import("@/lib/tenant-auth").SandboxAuth;
@@ -218,7 +225,7 @@ async function installSdk(sandbox: Sandbox, contextId: string): Promise<void> {
 export async function createSandbox(config: SandboxConfig): Promise<SandboxInstance> {
 
   logger.info("Creating sandbox", {
-    run_id: config.runId,
+    message_id: config.messageId,
     agent_id: config.agent.id,
     tenant_id: config.tenantId,
     has_git_source: !!config.agent.git_repo_url,
@@ -271,7 +278,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
       networkPolicy,
     });
     // Git source sandboxes still need SDK installed
-    await installSdk(sandbox, config.runId);
+    await installSdk(sandbox, config.messageId);
   }
 
   // Build the runner script based on effective runner type
@@ -338,7 +345,11 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
 
   // Build env vars for the runner command
   const env: Record<string, string> = {
-    AGENT_PLANE_RUN_ID: config.runId,
+    AGENT_PLANE_MESSAGE_ID: config.messageId,
+    // AGENT_PLANE_RUN_ID is preserved as an alias for the runner-internal
+    // transcript path naming (transcript-<id>.ndjson), so the in-sandbox
+    // template can stay neutral about which name we emit upstream.
+    AGENT_PLANE_RUN_ID: config.messageId,
     AGENT_PLANE_AGENT_ID: config.agent.id,
     AGENT_PLANE_TENANT_ID: config.tenantId,
     AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
@@ -358,8 +369,8 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   if (braintrustKey) {
     env.BRAINTRUST_API_KEY = braintrustKey;
   }
-  if (config.runToken) {
-    env.AGENT_PLANE_RUN_TOKEN = config.runToken;
+  if (config.messageToken) {
+    env.AGENT_PLANE_MESSAGE_TOKEN = config.messageToken;
   }
   // Build MCP servers config — inject agentco bridge alongside other servers
   const mcpServersForRunner: Record<string, unknown> = { ...config.mcpServers };
@@ -388,7 +399,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   });
 
   logger.info("Sandbox started", {
-    run_id: config.runId,
+    message_id: config.messageId,
     sandbox_id: sandbox.sandboxId,
     has_callback_bridge: bridgeFiles.length > 0,
     callback_url: config.callbackData?.url,
@@ -667,11 +678,25 @@ function emit(event) {
 }
 
 function claudeSdkStreamLoop(): string {
+  // Tracks whether the SDK iterator yielded a terminal `result` message. If
+  // the iterator ends without one (e.g. Anthropic 5-hour subscription bucket
+  // exhausted with overage disabled — the SDK silently exits the iterator
+  // instead of throwing), we synthesize an error event so the platform
+  // finalizer marks the run failed with a clear cause. Without this, the
+  // partial-execution state was being hidden behind a green checkmark.
   return `
+    let __gotResult = false;
+    let __lastRateLimit = null;
     for await (const message of query({ prompt, options })) {
       if (message.type === 'system' && message.subtype === 'init') {
         if (message.mcp_servers) emit({ type: 'mcp_status', servers: message.mcp_servers });
         if (message.session_id) emit({ type: 'session_info', sdk_session_id: message.session_id });
+      }
+      if (message.type === 'rate_limit_event') {
+        __lastRateLimit = message.rate_limit_info || null;
+      }
+      if (message.type === 'result') {
+        __gotResult = true;
       }
       if (message.type === 'stream_event') {
         const ev = message.event;
@@ -683,6 +708,28 @@ function claudeSdkStreamLoop(): string {
       } else {
         emit(message);
       }
+    }
+
+    if (!__gotResult) {
+      let __code = 'sdk_iterator_truncated';
+      let __error = 'Claude Agent SDK iterator ended without emitting a final result event';
+      if (__lastRateLimit) {
+        const __s = __lastRateLimit.status;
+        const __overage = __lastRateLimit.overageStatus;
+        if (__s === 'rejected' || (__s === 'allowed_warning' && __overage === 'rejected')) {
+          __code = 'rate_limit_exhausted';
+          __error = 'Anthropic rate limit reached ('
+            + (__lastRateLimit.rateLimitType || 'unknown') + ', overage=' + __overage
+            + ', resets at epoch ' + __lastRateLimit.resetsAt + ')';
+        }
+      }
+      emit({
+        type: 'error',
+        code: __code,
+        error: __error,
+        timestamp: new Date().toISOString(),
+        rate_limit_info: __lastRateLimit,
+      });
     }
 `;
 }
@@ -698,14 +745,14 @@ function claudeSdkErrorAndCleanup(): string {
     });
   }
 
-  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_RUN_TOKEN) {
+  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_MESSAGE_TOKEN) {
     try {
       const { readFileSync } = await import('fs');
       const transcript = readFileSync(transcriptPath);
-      await fetch(process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/runs/' + process.env.AGENT_PLANE_RUN_ID + '/transcript', {
+      await fetch(process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/messages/' + process.env.AGENT_PLANE_MESSAGE_ID + '/transcript', {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer ' + process.env.AGENT_PLANE_RUN_TOKEN,
+          'Authorization': 'Bearer ' + process.env.AGENT_PLANE_MESSAGE_TOKEN,
           'Content-Type': 'application/x-ndjson',
         },
         body: transcript,
@@ -750,7 +797,7 @@ const prompt = ${JSON.stringify(effectivePrompt)};
 async function main() {
   emit({
     type: 'run_started',
-    run_id: process.env.AGENT_PLANE_RUN_ID,
+    message_id: process.env.AGENT_PLANE_MESSAGE_ID,
     agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
@@ -793,8 +840,10 @@ export interface SessionSandboxInstance extends SandboxInstance {
   runMessage(opts: {
     prompt: string;
     sdkSessionId: string | null;
-    runId: string;
-    runToken: string;
+    /** Per-message id; runner emits this back via run_started.message_id. */
+    messageId: string;
+    /** Bearer token bound to this messageId; runner uses it for transcript upload. */
+    messageToken: string;
     maxTurns: number;
     maxBudgetUsd: number;
   }): Promise<{ logs: () => AsyncIterable<string> }>;
@@ -921,7 +970,19 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     );
   }
 
-  // Inject SoulSpec identity files into .soul/ directory
+  // Inject SoulSpec identity files into .soul/ directory.
+  //
+  // OPTIMIZATION B — identity files are written ONLY on cold create (here).
+  // The reconnect path (`reconnectSessionSandbox` below) intentionally
+  // skips this re-write because the files already live on the sandbox's
+  // disk from the original cold create — the sandbox stays warm across
+  // back-to-back messages and the .soul/ contents don't change mid-session.
+  //
+  // We accept always-injecting on cold start (size is bounded — at most 5
+  // small markdown files + future USER_TEMPLATE / examples). The real hot
+  // path is reconnect, which already pays zero cost for identity. Baking
+  // identity into the SDK snapshot is a future optimization (would require
+  // per-agent snapshots, deferred — too invasive for the win).
   const soulFiles: Array<{ path: string; content: Buffer }> = [];
   const soulFileMap: Array<[string, string | null | undefined]> = [
     ['.soul/SOUL.md', config.agent.soul_md],
@@ -1034,16 +1095,44 @@ function buildSessionSandboxInstance(
       await sandbox.writeFiles([{ path: `${SESSION_FILE_DIR}/${sdkSessionId}.jsonl`, content }]);
     },
     readSessionFile: async (sdkSessionId: string) => {
+      // Try the canonical path first.
       try {
-        return await sandbox.readFileToBuffer({ path: `${SESSION_FILE_DIR}/${sdkSessionId}.jsonl` });
+        const buf = await sandbox.readFileToBuffer({ path: `${SESSION_FILE_DIR}/${sdkSessionId}.jsonl` });
+        if (buf && buf.length > 0) return buf;
+      } catch {
+        // fall through to discovery
+      }
+      // Fallback: discover via `find` — SDK versions / cwd encodings vary
+      // (e.g. ~/.claude/projects/-vercel-sandbox/<sid>.jsonl). Cheaper than
+      // losing the session backup on every message.
+      try {
+        const find = await sandbox.runCommand({
+          cmd: "sh",
+          args: [
+            "-c",
+            `find /vercel/sandbox/.claude $HOME/.claude /root/.claude -name '${sdkSessionId}.jsonl' -type f -print -quit 2>/dev/null`,
+          ],
+        });
+        const stdout = (await find.stdout()).trim();
+        if (find.exitCode === 0 && stdout) {
+          const buf = await sandbox.readFileToBuffer({ path: stdout });
+          if (buf && buf.length > 0) {
+            logger.info("Session file located via fallback discovery", {
+              sandbox_id: sandbox.sandboxId,
+              sdk_session_id: sdkSessionId,
+              discovered_path: stdout,
+            });
+            return buf;
+          }
+        }
       } catch (err) {
-        logger.warn("Failed to read session file from sandbox", {
+        logger.warn("Session file discovery fallback failed", {
           sandbox_id: sandbox.sandboxId,
           sdk_session_id: sdkSessionId,
           error: err instanceof Error ? err.message : String(err),
         });
-        return null;
       }
+      return null;
     },
     updateMcpConfig: (servers, errors) => {
       if (Object.keys(servers).length > 0) {
@@ -1077,15 +1166,17 @@ function buildSessionSandboxInstance(
             mcpErrors: currentMcpErrors,
           });
 
-      const runnerFilename = `runner-${opts.runId}.mjs`;
+      const runnerFilename = `runner-${opts.messageId}.mjs`;
       await sandbox.writeFiles([
         { path: `/vercel/sandbox/${runnerFilename}`, content: Buffer.from(runnerScript) },
       ]);
 
       const env = {
         ...baseEnv,
-        AGENT_PLANE_RUN_ID: opts.runId,
-        AGENT_PLANE_RUN_TOKEN: opts.runToken,
+        AGENT_PLANE_MESSAGE_ID: opts.messageId,
+        // Alias kept for the in-sandbox transcript-<id>.ndjson convention.
+        AGENT_PLANE_RUN_ID: opts.messageId,
+        AGENT_PLANE_MESSAGE_TOKEN: opts.messageToken,
       };
 
       const command = await sandbox.runCommand({
@@ -1136,11 +1227,11 @@ const sdkSessionId = ${JSON.stringify(config.sdkSessionId)};
 async function main() {
   emit({
     type: 'run_started',
-    run_id: process.env.AGENT_PLANE_RUN_ID,
+    message_id: process.env.AGENT_PLANE_MESSAGE_ID,
     agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
-    session_id: sdkSessionId,
+    sdk_session_id: sdkSessionId,
     mcp_server_count: Object.keys(mcpServers).length,
     mcp_errors: ${JSON.stringify(config.mcpErrors)},
   });
@@ -1170,10 +1261,79 @@ export async function reconnectSandbox(sandboxId: string): Promise<SandboxInstan
   }
 }
 
+/**
+ * Read-only reconnect that exposes just enough of SessionSandboxInstance to
+ * back up the SDK session file. Used by the internal transcript route, which
+ * has no agent/auth/MCP context — it just needs to pull the session JSONL
+ * out of the still-running sandbox after the runner subprocess exits.
+ *
+ * The returned instance throws on any non-read methods so misuse fails loudly.
+ */
+export async function reconnectSessionSandboxForBackup(
+  sandboxId: string,
+): Promise<SessionSandboxInstance | null> {
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.get({ sandboxId });
+  } catch {
+    return null;
+  }
+  const notSupported = () => {
+    throw new Error("reconnectSessionSandboxForBackup: write/run methods not available on read-only handle");
+  };
+  return {
+    id: sandbox.sandboxId,
+    sandboxRef: sandbox,
+    stop: () => sandbox.stop(),
+    logs: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: "" }) }) }),
+    extendTimeout: async (ms: number) => {
+      try { await sandbox.extendTimeout(ms); } catch { /* best effort */ }
+    },
+    runMessage: notSupported,
+    writeSessionFile: notSupported,
+    updateMcpConfig: notSupported,
+    readSessionFile: async (sdkSessionId: string) => {
+      try {
+        const buf = await sandbox.readFileToBuffer({
+          path: `/vercel/sandbox/.claude/projects/vercel/sandbox/${sdkSessionId}.jsonl`,
+        });
+        if (buf && buf.length > 0) return buf;
+      } catch {
+        // fall through to discovery
+      }
+      try {
+        const find = await sandbox.runCommand({
+          cmd: "sh",
+          args: [
+            "-c",
+            `find /vercel/sandbox/.claude $HOME/.claude /root/.claude -name '${sdkSessionId}.jsonl' -type f -print -quit 2>/dev/null`,
+          ],
+        });
+        const stdout = (await find.stdout()).trim();
+        if (find.exitCode === 0 && stdout) {
+          const buf = await sandbox.readFileToBuffer({ path: stdout });
+          if (buf && buf.length > 0) return buf;
+        }
+      } catch {
+        /* swallow — caller handles null */
+      }
+      return null;
+    },
+  };
+}
+
 export async function reconnectSessionSandbox(
   sandboxId: string,
   config: SessionSandboxConfig,
 ): Promise<SessionSandboxInstance | null> {
+  // OPTIMIZATION B — by design this path does NOT re-inject skills, plugins,
+  // bridge files, or .soul/ identity files. They were all written by
+  // `createSessionSandbox` on the original cold create and persist on the
+  // sandbox's disk for the lifetime of the sandbox (sessions don't mutate
+  // identity mid-session). The dispatcher (`runMessageStream`) sets
+  // `skipPluginRefresh` when the previous MCP refresh is still fresh, which
+  // mirrors this — only the MCP tokens are rotated on reconnect via
+  // `updateMcpConfig` on the returned handle.
   // Step 1: Try to reconnect — if sandbox is gone, return null
   let sandbox: Sandbox;
   try {

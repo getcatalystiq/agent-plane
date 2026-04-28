@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
+import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { query } from "@/db";
 import { z } from "zod";
 import { AddTenantForm } from "./add-tenant-form";
@@ -14,7 +15,7 @@ const TenantWithStats = z.object({
   current_month_spend: z.coerce.number(),
   created_at: z.coerce.string(),
   agent_count: z.coerce.number(),
-  run_count: z.coerce.number(),
+  message_count: z.coerce.number(),
 });
 
 export const dynamic = "force-dynamic";
@@ -24,10 +25,10 @@ export default async function TenantsPage() {
     TenantWithStats,
     `SELECT t.*,
        COUNT(DISTINCT a.id)::int AS agent_count,
-       COUNT(DISTINCT r.id)::int AS run_count
+       COUNT(DISTINCT m.id)::int AS message_count
      FROM tenants t
      LEFT JOIN agents a ON a.tenant_id = t.id
-     LEFT JOIN runs r ON r.tenant_id = t.id
+     LEFT JOIN session_messages m ON m.tenant_id = t.id
      GROUP BY t.id
      ORDER BY t.created_at DESC`,
     [],
@@ -35,10 +36,7 @@ export default async function TenantsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Companies</h1>
-        <AddTenantForm />
-      </div>
+      <DetailPageHeader title="Companies" actions={<AddTenantForm />} />
       <AdminTable>
         <AdminTableHead>
           <Th>Name</Th>
@@ -47,7 +45,7 @@ export default async function TenantsPage() {
           <Th align="right">Budget</Th>
           <Th align="right">Spend</Th>
           <Th align="right">Agents</Th>
-          <Th align="right">Runs</Th>
+          <Th align="right">Executions</Th>
           <Th>Created</Th>
         </AdminTableHead>
         <tbody>
@@ -67,7 +65,7 @@ export default async function TenantsPage() {
               <td className="p-3 text-right font-mono">${t.monthly_budget_usd.toFixed(2)}</td>
               <td className="p-3 text-right font-mono">${t.current_month_spend.toFixed(2)}</td>
               <td className="p-3 text-right">{t.agent_count}</td>
-              <td className="p-3 text-right">{t.run_count}</td>
+              <td className="p-3 text-right">{t.message_count}</td>
               <td className="p-3 text-muted-foreground text-xs">
                 {new Date(t.created_at).toLocaleDateString()}
               </td>

@@ -70,14 +70,17 @@ export function AddMarketplaceForm({ tenantId }: { tenantId: string }) {
               <div className="space-y-1">
                 <div className="flex items-center gap-1.5">
                   <label className="text-xs font-medium text-muted-foreground">GitHub Token (optional, required for private repos)</label>
-                  <button
+                  <Button
                     type="button"
+                    variant="outline"
+                    size="icon-xs"
                     onClick={() => setShowTokenHelp((v) => !v)}
-                    className="inline-flex items-center justify-center w-4 h-4 rounded-full border border-muted-foreground/40 text-muted-foreground text-[10px] leading-none hover:bg-muted/50 transition-colors"
+                    className="size-4 rounded-full text-[10px] leading-none"
+                    aria-label="How to create a token"
                     title="How to create a token"
                   >
                     ?
-                  </button>
+                  </Button>
                 </div>
                 <Input
                   type="password"

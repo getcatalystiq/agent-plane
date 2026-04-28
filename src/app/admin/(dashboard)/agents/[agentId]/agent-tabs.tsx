@@ -11,6 +11,7 @@ export function AgentTabs({
   skills,
   plugins,
   schedules,
+  webhooks,
 }: {
   general: ReactNode;
   identity: ReactNode;
@@ -19,6 +20,7 @@ export function AgentTabs({
   skills: ReactNode;
   plugins: ReactNode;
   schedules: ReactNode;
+  webhooks: ReactNode;
 }) {
   return (
     <Tabs
@@ -29,6 +31,7 @@ export function AgentTabs({
         { label: "Skills", content: skills },
         { label: "Plugins", content: plugins },
         { label: "Schedules", content: schedules },
+        { label: "Webhooks", content: webhooks },
         { label: "Runs", content: runs },
       ]}
     />

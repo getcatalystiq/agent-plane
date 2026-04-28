@@ -6,6 +6,7 @@ import { resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
 import { deriveIdentity } from "@/lib/identity";
 import { execute } from "@/db";
 import { getAgentForTenant } from "@/lib/agents";
+import { pruneAllowedToolsForToolkits } from "@/lib/composio";
 import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,17 @@ export const PUT = withErrorHandler(async (request: NextRequest, context) => {
       { error: { code: "validation_error", message: "Vercel AI SDK runner does not support permission modes other than 'default' and 'bypassPermissions'" } },
       400,
     );
+  }
+
+  // When toolkits change, prune composio_allowed_tools so orphan entries
+  // (e.g. SLACK_* after swapping `slack` → `slackbot`) don't sit in the DB
+  // and trigger the run-time "Dropped orphaned" log every run.
+  if (input.composio_toolkits !== undefined) {
+    const effectiveTools = input.composio_allowed_tools ?? current.composio_allowed_tools ?? [];
+    const pruned = pruneAllowedToolsForToolkits(effectiveTools, input.composio_toolkits);
+    if (pruned.length !== effectiveTools.length || input.composio_allowed_tools !== undefined) {
+      input.composio_allowed_tools = pruned;
+    }
   }
 
   // Build dynamic SET clause from provided fields

@@ -13,6 +13,7 @@ import { AgentHeaderActions } from "./header-actions";
 import { AgentTabs } from "./agent-tabs";
 import { AgentRuns } from "./agent-runs";
 import { IdentityTab } from "./identity-tab";
+import { WebhooksManager } from "./webhooks-manager";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 
 export const dynamic = "force-dynamic";
@@ -32,13 +33,14 @@ export default async function AgentDetailPage({
   const [countResult, schedules] = await Promise.all([
     queryOne(
       z.object({ total: z.number() }),
-      "SELECT COUNT(*)::int AS total FROM runs WHERE agent_id = $1",
+      `SELECT COUNT(*)::int AS total FROM session_messages
+        WHERE session_id IN (SELECT id FROM sessions WHERE agent_id = $1)`,
       [agentId],
     ),
     query(ScheduleRow, "SELECT * FROM schedules WHERE agent_id = $1 ORDER BY created_at ASC", [agentId]),
   ]);
 
-  const totalRuns = countResult?.total ?? 0;
+  const totalMessages = countResult?.total ?? 0;
 
   return (
     <div className="space-y-6">
@@ -50,7 +52,7 @@ export default async function AgentDetailPage({
         general={
           <div className="space-y-6">
             <div className="grid grid-cols-6 gap-4">
-              <MetricCard label="Runs">{totalRuns}</MetricCard>
+              <MetricCard label="Executions">{totalMessages}</MetricCard>
               <MetricCard label="Max Turns">{agent.max_turns}</MetricCard>
               <MetricCard label="Budget"><span className="font-mono">${agent.max_budget_usd.toFixed(2)}</span></MetricCard>
               <MetricCard label="Max Runtime"><span className="font-mono">{Math.floor(agent.max_runtime_seconds / 60)}m</span></MetricCard>
@@ -90,6 +92,13 @@ export default async function AgentDetailPage({
             agentId={agent.id}
             initialSchedules={schedules}
             timezone={tenant?.timezone ?? "UTC"}
+          />
+        }
+        webhooks={
+          <WebhooksManager
+            agentId={agent.id}
+            tenantId={agent.tenant_id}
+            baseUrl={getCallbackBaseUrl()}
           />
         }
       />

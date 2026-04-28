@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createNdjsonStream, ndjsonHeaders } from "@/lib/streaming";
-import type { RunId } from "@/lib/types";
 
 vi.mock("@/lib/logger", () => ({
   logger: {
@@ -11,7 +10,8 @@ vi.mock("@/lib/logger", () => ({
   },
 }));
 
-const runId = "test-run-id" as RunId;
+const messageId = "test-message-id";
+const sessionId = "test-session-id";
 
 async function collectStream(stream: ReadableStream<Uint8Array>): Promise<string[]> {
   const reader = stream.getReader();
@@ -49,7 +49,8 @@ describe("ndjsonHeaders", () => {
 describe("createNdjsonStream - line relay", () => {
   it("relays lines from iterator, appending newline if missing", async () => {
     const stream = createNdjsonStream({
-      runId,
+      messageId,
+      sessionId,
       logIterator: makeFiniteIterator(["hello", "world"]),
     });
     const chunks = await collectStream(stream);
@@ -59,7 +60,8 @@ describe("createNdjsonStream - line relay", () => {
 
   it("does not double-newline lines that already end with \\n", async () => {
     const stream = createNdjsonStream({
-      runId,
+      messageId,
+      sessionId,
       logIterator: makeFiniteIterator(["hello\n"]),
     });
     const chunks = await collectStream(stream);
@@ -68,7 +70,8 @@ describe("createNdjsonStream - line relay", () => {
 
   it("closes stream when iterator is done", async () => {
     const stream = createNdjsonStream({
-      runId,
+      messageId,
+      sessionId,
       logIterator: makeFiniteIterator([]),
     });
     const chunks = await collectStream(stream);
@@ -77,7 +80,8 @@ describe("createNdjsonStream - line relay", () => {
 
   it("relays multiple lines in order", async () => {
     const stream = createNdjsonStream({
-      runId,
+      messageId,
+      sessionId,
       logIterator: makeFiniteIterator(["a", "b", "c"]),
     });
     const chunks = await collectStream(stream);
@@ -102,7 +106,7 @@ describe("createNdjsonStream - heartbeat", () => {
       }
     }
 
-    const stream = createNdjsonStream({ runId, logIterator: infinite() });
+    const stream = createNdjsonStream({ messageId, sessionId, logIterator: infinite() });
     const reader = stream.getReader();
 
     // Trigger first pull (sets up timers)
@@ -136,7 +140,7 @@ describe("createNdjsonStream - detach", () => {
       }
     }
 
-    const stream = createNdjsonStream({ runId, logIterator: infinite(), onDetach });
+    const stream = createNdjsonStream({ messageId, sessionId, logIterator: infinite(), onDetach });
     const reader = stream.getReader();
 
     // Start reading to trigger timer setup
@@ -171,7 +175,7 @@ describe("createNdjsonStream - cancel", () => {
       [Symbol.asyncIterator]: () => iterator,
     };
 
-    const stream = createNdjsonStream({ runId, logIterator });
+    const stream = createNdjsonStream({ messageId, sessionId, logIterator });
     const reader = stream.getReader();
     reader.read(); // trigger pull
     await reader.cancel();
@@ -186,7 +190,7 @@ describe("createNdjsonStream - iterator error", () => {
       throw new Error("iterator error");
     }
 
-    const stream = createNdjsonStream({ runId, logIterator: errorIterator() });
+    const stream = createNdjsonStream({ messageId, sessionId, logIterator: errorIterator() });
     // Should not throw, stream should close
     const chunks = await collectStream(stream);
     expect(chunks.join("")).toContain("first");

@@ -141,14 +141,17 @@ export function A2aInfoSection({
               {tags.map((tag) => (
                 <span key={tag} className="flex items-center gap-1 rounded bg-indigo-500/20 text-indigo-300 text-xs px-2 py-0.5">
                   {tag}
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="icon-xs"
                     onClick={(e) => { e.stopPropagation(); removeTag(tag); }}
-                    className="hover:text-white leading-none"
+                    className="size-4 rounded-sm text-current hover:bg-white/10 hover:text-white"
                     disabled={savingTags}
+                    aria-label={`Remove tag ${tag}`}
                   >
                     ×
-                  </button>
+                  </Button>
                 </span>
               ))}
               <input
@@ -164,13 +167,15 @@ export function A2aInfoSection({
             </div>
           </div>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={() => setDetailsOpen((v) => !v)}
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          className="h-auto gap-1 px-0 py-0 text-xs text-muted-foreground hover:bg-transparent hover:text-foreground"
         >
-          <span>{detailsOpen ? "▾" : "▸"}</span>
+          <span aria-hidden>{detailsOpen ? "▾" : "▸"}</span>
           <span>Details</span>
-        </button>
+        </Button>
         {detailsOpen && (
           <div className="space-y-3 pl-1">
             <div>

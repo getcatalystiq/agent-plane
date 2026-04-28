@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { queryOne, query, execute, getPool } from "@/db";
-import { AgentRow, RunRow, UpdateAgentSchema } from "@/lib/validation";
-import { removeToolkitConnections } from "@/lib/composio";
+import { AgentRow, SessionMessageRow, UpdateAgentSchema } from "@/lib/validation";
+import { removeToolkitConnections, pruneAllowedToolsForToolkits } from "@/lib/composio";
 import { resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
 import { withErrorHandler } from "@/lib/api";
 import { deriveIdentity } from "@/lib/identity";
@@ -19,13 +19,19 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
     return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
-  const recentRuns = await query(
-    RunRow,
-    "SELECT * FROM runs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 20",
+  const recentMessages = await query(
+    SessionMessageRow,
+    `SELECT m.*, a.name AS agent_name, a.model AS agent_model, s.agent_id
+     FROM session_messages m
+     JOIN sessions s ON s.id = m.session_id
+     JOIN agents a ON a.id = s.agent_id
+     WHERE s.agent_id = $1
+     ORDER BY m.created_at DESC
+     LIMIT 20`,
     [agentId],
   );
 
-  return NextResponse.json({ agent, recent_runs: recentRuns });
+  return NextResponse.json({ agent, recent_messages: recentMessages });
 });
 
 export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
@@ -82,6 +88,17 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
       { error: { code: "validation_error", message: "Cannot change slug while A2A is enabled. Disable A2A first." } },
       { status: 422 },
     );
+  }
+
+  // When toolkits change, prune composio_allowed_tools so orphan entries
+  // (e.g. SLACK_* after swapping `slack` → `slackbot`) don't sit in the DB
+  // and trigger the run-time "Dropped orphaned" log every run.
+  if (input.composio_toolkits !== undefined) {
+    const effectiveTools = input.composio_allowed_tools ?? current.composio_allowed_tools ?? [];
+    const pruned = pruneAllowedToolsForToolkits(effectiveTools, input.composio_toolkits);
+    if (pruned.length !== effectiveTools.length || input.composio_allowed_tools !== undefined) {
+      input.composio_allowed_tools = pruned;
+    }
   }
 
   const fieldMap: Array<[keyof typeof input, string, ((v: unknown) => unknown)?]> = [
@@ -161,7 +178,7 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     const newSet = new Set(input.composio_toolkits.map((t) => t.toLowerCase()));
     const removed = current.composio_toolkits.filter((t) => !newSet.has(t.toLowerCase()));
     if (removed.length > 0) {
-      removeToolkitConnections(current.tenant_id, removed).catch(() => {});
+      removeToolkitConnections(current.id, removed).catch(() => {});
     }
   }
 
@@ -179,27 +196,27 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
     return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
-  const runCount = await queryOne(
+  const activeSessionCount = await queryOne(
     z.object({ count: z.coerce.number() }),
-    "SELECT COUNT(*)::int AS count FROM runs WHERE agent_id = $1 AND status IN ('pending', 'running')",
+    "SELECT COUNT(*)::int AS count FROM sessions WHERE agent_id = $1 AND status IN ('creating', 'active')",
     [agentId],
   );
 
-  if (runCount && runCount.count > 0) {
+  if (activeSessionCount && activeSessionCount.count > 0) {
     return NextResponse.json(
-      { error: { code: "conflict", message: "Cannot delete agent with active runs" } },
+      { error: { code: "conflict", message: "Cannot delete agent with active sessions" } },
       { status: 409 },
     );
   }
 
   // Clean up Composio connections
   if (agent.composio_toolkits.length > 0) {
-    removeToolkitConnections(agent.tenant_id, agent.composio_toolkits).catch(() => {});
+    removeToolkitConnections(agent.id, agent.composio_toolkits).catch(() => {});
   }
 
-  // Delete related data then the agent
+  // Delete related data then the agent. session_messages cascade from sessions.
   await execute("DELETE FROM mcp_connections WHERE agent_id = $1", [agentId]);
-  await execute("DELETE FROM runs WHERE agent_id = $1", [agentId]);
+  await execute("DELETE FROM sessions WHERE agent_id = $1", [agentId]);
   await execute("DELETE FROM agents WHERE id = $1", [agentId]);
 
   return NextResponse.json({ deleted: true });

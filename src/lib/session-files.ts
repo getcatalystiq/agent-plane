@@ -1,10 +1,17 @@
 import { put, del, get } from "@vercel/blob";
 import type { SessionSandboxInstance } from "./sandbox";
 import { logger } from "./logger";
+import { getEnv } from "./env";
 import type { TenantId } from "./types";
 
-// SDK stores session files at this path inside the sandbox
-const SESSION_FILE_DIR = "/vercel/sandbox/.claude/projects/vercel/sandbox";
+// SDK stores session files under HOME, with cwd encoded as a single
+// dash-separated key (verified empirically via fallback discovery on
+// 2026-04-27). The fallback in sandbox.ts still handles other layouts.
+const SESSION_FILE_DIR = "/home/vercel-sandbox/.claude/projects/-vercel-sandbox";
+
+function privateBlobToken(): string | undefined {
+  return getEnv().BLOB_PRIVATE_READ_WRITE_TOKEN ?? getEnv().BLOB_READ_WRITE_TOKEN;
+}
 
 /**
  * Back up the SDK session file from sandbox to Vercel Blob.
@@ -40,6 +47,7 @@ export async function backupSessionFile(
       addRandomSuffix: false,
       allowOverwrite: true,
       multipart: true,
+      token: privateBlobToken(),
     });
 
     logger.info("Session file backed up", {
@@ -71,7 +79,7 @@ export async function restoreSessionFile(
   sdkSessionId: string,
 ): Promise<void> {
   try {
-    const result = await get(blobUrl, { access: "private" });
+    const result = await get(blobUrl, { access: "private", token: privateBlobToken() });
     if (!result) {
       throw new Error("Session file not found in blob storage");
     }
@@ -104,7 +112,7 @@ export async function restoreSessionFile(
  */
 export async function deleteSessionFile(blobUrl: string): Promise<void> {
   try {
-    await del(blobUrl);
+    await del(blobUrl, { token: privateBlobToken() });
     logger.info("Session file deleted", { blob_url: blobUrl });
   } catch (err) {
     logger.warn("Failed to delete session file", {

@@ -18,9 +18,9 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   cutoff.setDate(cutoff.getDate() - TRANSCRIPT_TTL_DAYS);
 
   // Find expired transcripts in batches
-  const expiredRuns = await query(
+  const expiredMessages = await query(
     z.object({ id: z.string(), transcript_blob_url: z.string() }),
-    `SELECT id, transcript_blob_url FROM runs
+    `SELECT id, transcript_blob_url FROM session_messages
      WHERE transcript_blob_url IS NOT NULL
        AND completed_at < $1
      LIMIT $2`,
@@ -28,11 +28,11 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   );
 
   let deleted = 0;
-  for (const run of expiredRuns) {
-    await deleteTranscript(run.transcript_blob_url);
+  for (const message of expiredMessages) {
+    await deleteTranscript(message.transcript_blob_url);
     await execute(
-      "UPDATE runs SET transcript_blob_url = NULL WHERE id = $1",
-      [run.id],
+      "UPDATE session_messages SET transcript_blob_url = NULL WHERE id = $1",
+      [message.id],
     );
     deleted++;
   }
@@ -40,7 +40,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   logger.info("Transcript cleanup completed", {
     deleted,
     cutoff: cutoff.toISOString(),
-    had_more: expiredRuns.length === BATCH_SIZE,
+    had_more: expiredMessages.length === BATCH_SIZE,
   });
 
   return jsonResponse({

@@ -7,6 +7,10 @@ const EnvSchema = z.object({
 
   // Vercel Blob
   BLOB_READ_WRITE_TOKEN: z.string().optional(),
+  // Separate private store for session files (conversation history). Falls
+  // back to BLOB_READ_WRITE_TOKEN when unset (which only works if that
+  // store is configured for private access).
+  BLOB_PRIVATE_READ_WRITE_TOKEN: z.string().optional(),
 
   // Vercel Cron
   CRON_SECRET: z.string().min(1, "CRON_SECRET is required"),

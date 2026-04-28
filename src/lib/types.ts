@@ -4,12 +4,33 @@ export type { RunnerType } from "./models";
 export type TenantId = string & { readonly __brand: "TenantId" };
 export type AgentId = string & { readonly __brand: "AgentId" };
 export type AgentSlug = string & { readonly __brand: "AgentSlug" };
-export type RunId = string & { readonly __brand: "RunId" };
 export type McpServerId = string & { readonly __brand: "McpServerId" };
 export type McpConnectionId = string & { readonly __brand: "McpConnectionId" };
 export type PluginMarketplaceId = string & { readonly __brand: "PluginMarketplaceId" };
 export type ScheduleId = string & { readonly __brand: "ScheduleId" };
 export type SessionId = string & { readonly __brand: "SessionId" };
+export type SessionMessageId = string & { readonly __brand: "SessionMessageId" };
+export type WebhookSourceId = string & { readonly __brand: "WebhookSourceId" };
+export type WebhookDeliveryId = string & { readonly __brand: "WebhookDeliveryId" };
+
+/**
+ * FIX #31 (kt-1): boundary helpers that brand a raw string after a UUID
+ * format check. Use these at request boundaries (URL params, request body)
+ * AFTER any Zod validation has succeeded — DB-derived rows are already
+ * branded by the schema parser. The check is a UUID v1–5 regex; non-UUID
+ * branded ids should add their own helper.
+ */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const requireBranded = <B>(label: string) => (s: string): B => {
+  if (!UUID_REGEX.test(s)) throw new Error(`Invalid ${label} format`);
+  return s as unknown as B;
+};
+
+export const requireSessionId = requireBranded<SessionId>("SessionId");
+export const requireSessionMessageId = requireBranded<SessionMessageId>("SessionMessageId");
+export const requireTenantId = requireBranded<TenantId>("TenantId");
+export const requireAgentId = requireBranded<AgentId>("AgentId");
 
 export interface AgentPlugin {
   marketplace_id: PluginMarketplaceId;
@@ -17,7 +38,7 @@ export interface AgentPlugin {
 }
 
 export type ScheduleFrequency = "manual" | "hourly" | "daily" | "weekdays" | "weekly";
-export type RunTriggeredBy = "api" | "schedule" | "playground" | "chat" | "a2a";
+export type RunTriggeredBy = "api" | "schedule" | "playground" | "chat" | "a2a" | "webhook";
 
 export type SessionStatus = "creating" | "active" | "idle" | "stopped";
 
@@ -36,13 +57,62 @@ export type RunStatus =
   | "cancelled"
   | "timed_out";
 
-export type AuthScheme = "OAUTH2" | "OAUTH1" | "API_KEY" | "NO_AUTH" | "OTHER";
+// Mirrors the SDK's published auth-scheme enum
+// (node_modules/@composio/client/resources/auth-configs.d.ts).
+export type AuthScheme =
+  | "OAUTH2"
+  | "OAUTH1"
+  | "API_KEY"
+  | "BEARER_TOKEN"
+  | "NO_AUTH"
+  | "BASIC"
+  | "BASIC_WITH_JWT"
+  | "BILLCOM_AUTH"
+  | "CALCOM_AUTH"
+  | "GOOGLE_SERVICE_ACCOUNT"
+  | "SERVICE_ACCOUNT"
+  | "SAML"
+  | "DCR_OAUTH"
+  | "OTHER";
+
+// User's chosen connect mode. Independent of AuthScheme: OAUTH2 covers both
+// Composio-managed and bring-your-own-app flows; the distinction lives here.
+export type AuthMethod = "composio_oauth" | "byoa_oauth" | "custom_token";
+
+// The set of methods we render in the picker. Other methods (BASIC, JWT
+// variants, vendor-specific) are detected but hidden from the UI.
+export const SUPPORTED_AUTH_METHODS: readonly AuthMethod[] = [
+  "composio_oauth",
+  "byoa_oauth",
+  "custom_token",
+] as const;
+
+// Per-toolkit connection metadata persisted in agents.composio_connection_metadata.
+export interface ConnectionMetadata {
+  auth_method: AuthMethod;
+  auth_scheme: AuthScheme;
+  bot_user_id: string | null;
+  display_name: string | null;
+  captured_at: string | null;
+  capture_deferred?: boolean;
+}
+
+export interface WhoamiResult {
+  bot_user_id: string;
+  display_name: string;
+}
 
 export interface TenantConnectorInfo {
   slug: string;
   name: string;
   logo: string;
+  /** @deprecated Use `available_schemes` + `selected_method`. Retained one release for SDK consumers. */
   auth_scheme: AuthScheme;
+  available_schemes: AuthScheme[];
+  selected_method: AuthMethod | null;
+  bot_user_id: string | null;
+  display_name: string | null;
+  capture_deferred: boolean;
   connected: boolean;
 }
 

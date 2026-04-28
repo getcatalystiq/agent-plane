@@ -40,11 +40,15 @@ export async function buildMcpConfig(
       // Always call getOrCreateComposioMcpServer so the Composio server is kept
       // in sync with the current toolkit list (e.g. newly added toolkits are
       // picked up on every run rather than only on first-time setup).
+      // Composio user identity is the agent.id (per-agent isolation): each
+      // agent has its own connected_accounts and MCP server in Composio,
+      // independent of other agents on the same tenant.
       const mcpConfig = await getOrCreateComposioMcpServer(
-        tenantId,
+        agent.id,
         agent.composio_toolkits,
         agent.composio_mcp_server_id,
         agent.composio_allowed_tools,
+        agent.id,
       );
       if (mcpConfig) {
         const mcpUrl = mcpConfig.url;

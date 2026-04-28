@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { query, queryOne } from "@/db";
-import { PaginationSchema, SessionStatusSchema, AgentRowInternal } from "@/lib/validation";
-import { withErrorHandler, jsonResponse } from "@/lib/api";
-import { createSession, transitionSessionStatus } from "@/lib/sessions";
-import { prepareSessionSandbox, executeSessionMessage, createSessionStreamResponse } from "@/lib/session-executor";
-import { NotFoundError } from "@/lib/errors";
-import { logger } from "@/lib/logger";
 import { z } from "zod";
+import { query, queryOne } from "@/db";
+import {
+  PaginationSchema,
+  SessionStatusSchema,
+  AgentRowInternal,
+} from "@/lib/validation";
+import { withErrorHandler } from "@/lib/api";
+import { createSession } from "@/lib/sessions";
+import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { deriveTriggeredBy } from "@/lib/trigger";
+import { NotFoundError } from "@/lib/errors";
 import type { AgentId, TenantId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -21,8 +25,8 @@ const SessionWithContext = z.object({
   status: z.string(),
   message_count: z.coerce.number(),
   sandbox_id: z.string().nullable(),
+  ephemeral: z.boolean(),
   idle_since: z.coerce.string().nullable(),
-  last_message_at: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -62,8 +66,8 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   const sessions = await query(
     SessionWithContext,
     `SELECT s.id, s.agent_id, a.name AS agent_name, s.tenant_id, t.name AS tenant_name,
-       s.status, s.message_count, s.sandbox_id, s.idle_since,
-       s.last_message_at, s.created_at, s.updated_at
+       s.status, s.message_count, s.sandbox_id, s.ephemeral, s.idle_since,
+       s.created_at, s.updated_at
      FROM sessions s
      JOIN agents a ON a.id = s.agent_id
      JOIN tenants t ON t.id = s.tenant_id
@@ -79,93 +83,59 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
 const AdminCreateSessionSchema = z.object({
   agent_id: z.string().min(1),
   prompt: z.string().min(1).max(100_000).optional(),
+  ephemeral: z.boolean().optional(),
+  idempotency_key: z.string().min(1).max(200).optional(),
 });
 
 export const POST = withErrorHandler(async (request: NextRequest) => {
   const body = await request.json();
   const input = AdminCreateSessionSchema.parse(body);
 
-  // Look up agent (no RLS) to get tenant_id
-  const agentRow = await queryOne(
+  // Admin path: look up agent without RLS so we can derive tenant_id.
+  const agent = await queryOne(
     AgentRowInternal,
     "SELECT * FROM agents WHERE id = $1",
     [input.agent_id],
   );
-  if (!agentRow) throw new NotFoundError("Agent not found");
-  const agent = agentRow;
+  if (!agent) throw new NotFoundError("Agent not found");
 
   const tenantId = agent.tenant_id as TenantId;
-  const { session, remainingBudget } = await createSession(tenantId, input.agent_id as AgentId);
 
-  const effectiveBudget = Math.min(agent.max_budget_usd, remainingBudget);
-
-  let sandbox: Awaited<ReturnType<typeof prepareSessionSandbox>>;
-  try {
-    sandbox = await prepareSessionSandbox(
-      {
-        sessionId: session.id,
-        tenantId,
-        agent,
-        prompt: input.prompt ?? "",
-        platformApiUrl: new URL(request.url).origin,
-        effectiveBudget,
-        effectiveMaxTurns: agent.max_turns,
-      },
-      session,
-    );
-  } catch (err) {
-    await transitionSessionStatus(session.id, tenantId, "creating", "stopped", {
-      idle_since: null,
-    }).catch((transErr) => {
-      logger.error("Failed to transition session to stopped after sandbox failure", {
-        session_id: session.id,
-        error: transErr instanceof Error ? transErr.message : String(transErr),
-      });
-    });
-    throw err;
-  }
-
-  if (!input.prompt) {
-    await transitionSessionStatus(session.id, tenantId, "creating", "idle", {
-      sandbox_id: sandbox.id,
-      idle_since: new Date().toISOString(),
-    });
-
-    return jsonResponse({
-      id: session.id,
-      agent_id: session.agent_id,
-      tenant_id: tenantId,
-      status: "idle",
-      message_count: 0,
-      created_at: session.created_at,
-    }, 201);
-  }
-
-  // Transition creating → active before executing message
-  await transitionSessionStatus(session.id, tenantId, "creating", "active", {
-    idle_since: null,
+  // First message via admin → playground (per the trigger derivation rule).
+  const triggeredBy = deriveTriggeredBy({
+    authSource: "admin",
+    isFirstMessage: true,
   });
 
-  const result = await executeSessionMessage(
-    {
-      sessionId: session.id,
+  if (!input.prompt) {
+    const ephemeral = input.ephemeral ?? false;
+    const { session } = await createSession(
       tenantId,
-      agent,
-      prompt: input.prompt,
-      platformApiUrl: new URL(request.url).origin,
-      effectiveBudget,
-      effectiveMaxTurns: agent.max_turns,
-    },
-    sandbox,
-    { ...session, sandbox_id: sandbox.id },
-  );
+      input.agent_id as AgentId,
+      { ephemeral, triggeredBy },
+    );
+    return NextResponse.json(session, { status: 201 });
+  }
 
-  return createSessionStreamResponse(result, tenantId, session.id, effectiveBudget, {
-    prelude: [JSON.stringify({
-      type: "session_created",
-      session_id: session.id,
-      agent_id: session.agent_id,
-      timestamp: new Date().toISOString(),
-    })],
+  const ephemeral = input.ephemeral ?? false;
+  const result = await dispatchSessionMessage({
+    tenantId,
+    agentId: input.agent_id as AgentId,
+    prompt: input.prompt,
+    triggeredBy,
+    ephemeral,
+    idempotencyKey: input.idempotency_key,
+    platformApiUrl: new URL(request.url).origin,
+  });
+
+  return new Response(result.stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+      "X-Session-Id": result.sessionId,
+      "X-Message-Id": result.messageId,
+    },
   });
 });

@@ -120,11 +120,28 @@ export function generateId(): string {
   return uuidv4();
 }
 
-// --- Run Token (HMAC-based) ---
-// Derives a run-scoped bearer token from the run ID using HMAC-SHA256.
-// No DB storage needed — verifiable by recomputing the HMAC.
+// --- Message Token (HMAC-based with TTL) ---
+// Derives a message-scoped bearer token from the session_message ID using
+// HMAC-SHA256, embedding an `expiresAt` (unix-millis) so a stolen token cannot
+// be replayed indefinitely. No DB storage needed — verifiable by recomputing
+// the HMAC over `${messageId}.${expiresAt}` and checking the timestamp is in
+// the future. The verifier MUST take the URL's messageId param and confirm the
+// token's bound messageId matches: a token minted for message A must not be
+// accepted on the URL for message B.
+//
+// Format: msgtok_<expiresAtBase36>_<hexSignature>
+//
+// FIX #4 (adv-002): adds 1-hour TTL. Runner uses the token within its
+// execution window (5min request lifetime, plus detached upload window),
+// so 1h is generous.
 
-export async function generateRunToken(runId: string, encryptionKey: string): Promise<string> {
+const MESSAGE_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+async function signMessageToken(
+  messageId: string,
+  expiresAt: number,
+  encryptionKey: string,
+): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     hexToBuffer(encryptionKey),
@@ -132,14 +149,40 @@ export async function generateRunToken(runId: string, encryptionKey: string): Pr
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(runId));
-  return `runtok_${bufferToHex(signature)}`;
+  const payload = `${messageId}.${expiresAt}`;
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return bufferToHex(signature);
 }
 
-export async function verifyRunToken(token: string, runId: string, encryptionKey: string): Promise<boolean> {
-  if (!token.startsWith("runtok_")) return false;
-  const expected = await generateRunToken(runId, encryptionKey);
-  return timingSafeEqual(token, expected);
+export async function generateMessageToken(
+  messageId: string,
+  encryptionKey: string,
+  ttlMs: number = MESSAGE_TOKEN_TTL_MS,
+): Promise<string> {
+  const expiresAt = Date.now() + ttlMs;
+  const sig = await signMessageToken(messageId, expiresAt, encryptionKey);
+  return `msgtok_${expiresAt.toString(36)}_${sig}`;
+}
+
+export async function verifyMessageToken(
+  token: string,
+  messageId: string,
+  encryptionKey: string,
+): Promise<boolean> {
+  if (!token.startsWith("msgtok_")) return false;
+  // Strip prefix and parse `<expiresAtBase36>_<hexSig>`. Rejects malformed.
+  const rest = token.slice("msgtok_".length);
+  const sepIdx = rest.indexOf("_");
+  if (sepIdx <= 0) return false;
+  const expRaw = rest.slice(0, sepIdx);
+  const sig = rest.slice(sepIdx + 1);
+  const expiresAt = parseInt(expRaw, 36);
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return false;
+  // TTL gate (constant-time-ish — same code path either way).
+  const expired = expiresAt <= Date.now();
+  const expectedSig = await signMessageToken(messageId, expiresAt, encryptionKey);
+  const sigOk = timingSafeEqual(sig, expectedSig);
+  return sigOk && !expired;
 }
 
 // --- Timing-safe comparison ---

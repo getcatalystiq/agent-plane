@@ -219,7 +219,7 @@ export const SafePluginFilename = z.string()
 // --- Schedule Validation ---
 
 export const ScheduleFrequencySchema = z.enum(["manual", "hourly", "daily", "weekdays", "weekly"]);
-export const RunTriggeredBySchema = z.enum(["api", "schedule", "playground", "chat", "a2a"]);
+export const RunTriggeredBySchema = z.enum(["api", "schedule", "playground", "chat", "a2a", "webhook"]);
 export const SessionStatusSchema = z.enum(["creating", "active", "idle", "stopped"]);
 export const TimezoneSchema = z.string().min(1).max(100).refine(isValidTimezone, { message: "Invalid IANA timezone" });
 
@@ -531,37 +531,55 @@ export const OAuthMetadataSchema = z.object({
   code_challenge_methods_supported: z.array(z.string()).optional(),
 });
 
-export const RunRow = z.object({
+// --- Session Message status (mirrors legacy RunStatus values; "queued" replaces "pending") ---
+
+export const SessionMessageStatusSchema = z.enum([
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+
+export type SessionMessageStatus = z.infer<typeof SessionMessageStatusSchema>;
+
+// SessionMessageRow — one row per execution. Replaces the legacy RunRow. All
+// billing-grade and audit fields live here at the message grain. Mirrors the
+// columns defined in migration 033_runs_sessions_unify.sql.
+export const SessionMessageRow = z.object({
   id: z.string(),
-  agent_id: z.string(),
+  session_id: z.string(),
   tenant_id: z.string(),
-  status: z.enum(["pending", "running", "completed", "failed", "cancelled", "timed_out"]),
   prompt: z.string(),
-  result_summary: z.string().nullable(),
+  status: SessionMessageStatusSchema,
+  triggered_by: RunTriggeredBySchema.catch("api"),
+  runner: RunnerTypeSchema.nullable().default(null),
+  cost_usd: z.coerce.number(),
   total_input_tokens: z.coerce.number(),
   total_output_tokens: z.coerce.number(),
   cache_read_tokens: z.coerce.number(),
   cache_creation_tokens: z.coerce.number(),
-  cost_usd: z.coerce.number().nullable(),
   num_turns: z.coerce.number(),
   duration_ms: z.coerce.number(),
   duration_api_ms: z.coerce.number(),
   model_usage: z.unknown().nullable(),
-  runner: RunnerTypeSchema.nullable().default("claude-agent-sdk"),
   transcript_blob_url: z.string().nullable(),
+  result_summary: z.string().nullable(),
   error_type: z.string().nullable(),
   error_messages: z.array(z.string()),
-  sandbox_id: z.string().nullable(),
-  triggered_by: RunTriggeredBySchema.default("api"),
+  webhook_source_id: z.string().nullable().default(null),
   created_by_key_id: z.string().nullable().default(null),
-  schedule_id: z.string().nullable().default(null),
-  session_id: z.string().nullable().default(null),
   started_at: z.coerce.string().nullable(),
   completed_at: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
+  // Convenience fields populated by JOINs in list queries; optional/nullable.
+  agent_id: z.string().nullable().optional(),
   agent_name: z.string().nullable().optional(),
   agent_model: z.string().nullable().optional(),
 });
+
+export type SessionMessage = z.infer<typeof SessionMessageRow>;
 
 // --- Schedule DB Row & CRUD Schemas ---
 
@@ -644,6 +662,10 @@ export const SendMessageSchema = z.object({
 
 export type SendMessageInput = z.infer<typeof SendMessageSchema>;
 
+// SessionRow — mirrors the unified `sessions` table from migration 033. Adds
+// `ephemeral`, `idle_ttl_seconds`, and `expires_at` to the legacy session
+// shape. `last_message_at` is removed — the same information is derivable
+// from `session_messages.completed_at` and would otherwise drift.
 export const SessionRow = z.object({
   id: z.string(),
   tenant_id: z.string(),
@@ -651,15 +673,17 @@ export const SessionRow = z.object({
   sandbox_id: z.string().nullable(),
   sdk_session_id: z.string().nullable(),
   session_blob_url: z.string().nullable(),
-  context_id: z.string().nullable().default(null),
   status: SessionStatusSchema,
+  ephemeral: z.boolean().default(false),
+  idle_ttl_seconds: z.coerce.number().int().default(600),
+  expires_at: z.coerce.string(),
+  context_id: z.string().nullable().default(null),
   message_count: z.coerce.number(),
+  idle_since: z.coerce.string().nullable(),
   last_backup_at: z.coerce.string().nullable(),
   mcp_refreshed_at: z.coerce.string().nullable(),
-  idle_since: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
-  last_message_at: z.coerce.string().nullable(),
 });
 
 export type Session = z.infer<typeof SessionRow>;
@@ -673,3 +697,96 @@ export const SessionResponseRow = SessionRow.omit({
 });
 
 export type SessionResponse = z.infer<typeof SessionResponseRow>;
+
+// --- Webhook Dedupe Rules ---
+
+// Dot-path segments must look like JSON identifiers and chain with dots.
+// Allows 1–10 segments, each up to 64 chars. Total length capped at 200.
+const DEDUPE_KEY_PATH_REGEX =
+  /^[a-zA-Z_][a-zA-Z0-9_]{0,63}(\.[a-zA-Z_][a-zA-Z0-9_]{0,63}){0,9}$/;
+
+const DedupeKeyPathSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(
+    DEDUPE_KEY_PATH_REGEX,
+    "key_path must be 1–10 dot-separated segments of letters/digits/underscore (e.g. 'data.url')",
+  );
+
+const DedupeWindowSecondsSchema = z
+  .number()
+  .int()
+  .min(1, "window_seconds must be ≥ 1")
+  .max(3600, "window_seconds must be ≤ 3600");
+
+const DedupeProviderSchema = z
+  .string()
+  .min(1)
+  .max(50)
+  .regex(/^[a-z][a-z0-9_-]*$/, "provider must be lowercase letters/digits/underscore/hyphen");
+
+export const CreateDedupeRuleSchema = z.object({
+  provider: DedupeProviderSchema,
+  key_path: DedupeKeyPathSchema,
+  window_seconds: DedupeWindowSecondsSchema,
+  enabled: z.boolean().optional(),
+});
+export type CreateDedupeRuleInput = z.infer<typeof CreateDedupeRuleSchema>;
+
+export const UpdateDedupeRuleSchema = z
+  .object({
+    key_path: DedupeKeyPathSchema.optional(),
+    window_seconds: DedupeWindowSecondsSchema.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(
+    (patch) =>
+      patch.key_path !== undefined ||
+      patch.window_seconds !== undefined ||
+      patch.enabled !== undefined,
+    { message: "patch must include at least one of key_path, window_seconds, enabled" },
+  );
+export type UpdateDedupeRuleInput = z.infer<typeof UpdateDedupeRuleSchema>;
+
+// --- Webhook Payload Filter Rules ---
+//
+// Per-source boolean expression evaluated against the parsed payload after
+// content-dedupe. Mismatch = drop with audit (200 + filtered: true). Empty
+// conditions or null rules = no filtering. See src/lib/webhook-filter.ts for
+// the evaluator and operator semantics.
+
+export const FilterOperatorSchema = z.enum([
+  "equals",
+  "not_equals",
+  "contains",
+  "not_contains",
+  "exists",
+  "not_exists",
+]);
+export type FilterOperator = z.infer<typeof FilterOperatorSchema>;
+
+const FilterConditionSchema = z
+  .object({
+    keyPath: DedupeKeyPathSchema,
+    operator: FilterOperatorSchema,
+    // Required for non-existence operators; ignored for exists/not_exists.
+    value: z.string().max(500).optional(),
+  })
+  .refine(
+    (cond) =>
+      cond.operator === "exists" ||
+      cond.operator === "not_exists" ||
+      typeof cond.value === "string",
+    {
+      message:
+        "value is required for equals/not_equals/contains/not_contains operators",
+    },
+  );
+export type FilterCondition = z.infer<typeof FilterConditionSchema>;
+
+export const FilterRulesSchema = z.object({
+  combinator: z.enum(["AND", "OR"]),
+  conditions: z.array(FilterConditionSchema).max(50),
+});
+export type FilterRules = z.infer<typeof FilterRulesSchema>;

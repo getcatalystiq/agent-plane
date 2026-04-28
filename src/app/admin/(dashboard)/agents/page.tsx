@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { Building2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
 import { query } from "@/db";
 import { z } from "zod";
 import { AddAgentForm } from "./add-agent-form";
@@ -19,8 +21,8 @@ const AgentRow = z.object({
   max_budget_usd: z.coerce.number(),
   a2a_enabled: z.boolean().default(false),
   created_at: z.coerce.string(),
-  run_count: z.coerce.number(),
-  last_run_at: z.coerce.string().nullable(),
+  message_count: z.coerce.number(),
+  last_message_at: z.coerce.string().nullable(),
   mcp_active_slugs: z.array(z.string()),
   mcp_unhealthy_slugs: z.array(z.string()),
   schedule_count: z.coerce.number(),
@@ -33,9 +35,13 @@ export default async function AgentsPage() {
 
   if (!tenantId) {
     return (
-      <div className="text-muted-foreground text-sm py-12 text-center">
-        Select a company from the sidebar.
-      </div>
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><Building2 /></EmptyMedia>
+          <EmptyTitle>No company selected</EmptyTitle>
+          <EmptyDescription>Pick a company from the switcher in the sidebar to manage its agents.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     );
   }
 
@@ -44,12 +50,11 @@ export default async function AgentsPage() {
     `SELECT a.id, a.tenant_id, a.name, a.description, a.model,
        a.permission_mode, a.composio_toolkits, a.max_turns, a.max_budget_usd, a.a2a_enabled, a.created_at,
        (SELECT COUNT(*)::int FROM schedules s WHERE s.agent_id = a.id AND s.enabled = true) AS schedule_count,
-       COUNT(DISTINCT r.id)::int AS run_count,
-       MAX(r.created_at) AS last_run_at,
+       (SELECT COUNT(*)::int FROM session_messages m WHERE m.session_id IN (SELECT id FROM sessions WHERE agent_id = a.id)) AS message_count,
+       (SELECT MAX(m.created_at) FROM session_messages m WHERE m.session_id IN (SELECT id FROM sessions WHERE agent_id = a.id)) AS last_message_at,
        COALESCE(array_agg(DISTINCT ms.slug) FILTER (WHERE ms.slug IS NOT NULL AND mc.status = 'active'), '{}') AS mcp_active_slugs,
        COALESCE(array_agg(DISTINCT ms.slug) FILTER (WHERE ms.slug IS NOT NULL AND mc.status IN ('expired', 'failed')), '{}') AS mcp_unhealthy_slugs
      FROM agents a
-     LEFT JOIN runs r ON r.agent_id = a.id
      LEFT JOIN mcp_connections mc ON mc.agent_id = a.id
      LEFT JOIN mcp_servers ms ON ms.id = mc.mcp_server_id
      WHERE a.tenant_id = $1
@@ -70,8 +75,8 @@ export default async function AgentsPage() {
           <Th>Model</Th>
           <Th>Connectors</Th>
           <Th>Schedule</Th>
-          <Th align="right">Runs</Th>
-          <Th>Last Run</Th>
+          <Th align="right">Executions</Th>
+          <Th>Last Message</Th>
           <Th align="right" />
         </AdminTableHead>
         <tbody>
@@ -115,9 +120,9 @@ export default async function AgentsPage() {
                   <span className="text-muted-foreground text-xs">—</span>
                 )}
               </td>
-              <td className="p-3 text-right">{a.run_count}</td>
+              <td className="p-3 text-right">{a.message_count}</td>
               <td className="p-3 text-muted-foreground text-xs">
-                {a.last_run_at ? new Date(a.last_run_at).toLocaleString() : "—"}
+                {a.last_message_at ? new Date(a.last_message_at).toLocaleString() : "—"}
               </td>
               <td className="p-3 text-right">
                 <DeleteAgentButton agentId={a.id} agentName={a.name} />

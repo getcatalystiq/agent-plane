@@ -11,6 +11,7 @@ const A2A_AGENT_CARD_RE = /^\/api\/a2a\/[^/]+\/[^/]+\/\.well-known\/agent-card\.
 const A2A_AGENTS_RE = /^\/api\/a2a\/[^/]+\/\.well-known\/agents\.json$/;
 const COMPOSIO_CALLBACK_RE = /^\/api\/agents\/[^/]+\/connectors\/[^/]+\/callback$/;
 const MCP_CALLBACK_RE = /^\/api\/mcp-servers\/[^/]+\/callback$/;
+const WEBHOOK_INGRESS_RE = /^\/api\/webhooks\/[^/]+$/;
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname.startsWith(p));
@@ -73,6 +74,11 @@ export async function middleware(request: NextRequest) {
 
   // OAuth callbacks are unauthenticated (redirect from external provider)
   if (COMPOSIO_CALLBACK_RE.test(pathname) || MCP_CALLBACK_RE.test(pathname)) {
+    return NextResponse.next();
+  }
+
+  // Webhook ingress is unauthenticated; HMAC verification happens in the route handler.
+  if (WEBHOOK_INGRESS_RE.test(pathname)) {
     return NextResponse.next();
   }
 

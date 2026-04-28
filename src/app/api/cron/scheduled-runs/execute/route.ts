@@ -3,12 +3,14 @@ import { queryOne } from "@/db";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { verifyCronSecret } from "@/lib/cron-auth";
 import { AgentRowInternal, TenantRow, ScheduleRow } from "@/lib/validation";
-import { createRun, transitionRunStatus } from "@/lib/runs";
-import { prepareRunExecution } from "@/lib/run-executor";
+import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { findWarmScheduleSession } from "@/lib/sessions";
+import { transitionMessageStatus } from "@/lib/session-messages";
+import { BudgetExceededError, ConcurrencyLimitError } from "@/lib/errors";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
-import type { AgentId, RunId, TenantId, ScheduleId } from "@/lib/types";
+import type { AgentId, TenantId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -55,55 +57,116 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 
   const tenantId = agent.tenant_id as TenantId;
   const agentId = agent.id as AgentId;
-  const scheduleId = schedule.id as ScheduleId;
 
-  let runId: RunId;
-  let remainingBudget: number;
+  // U4: dispatch through the unified chokepoint. Schedule runs are PERSISTENT
+  // (ephemeral=false) so a short follow-up window (idle TTL of 300s, set by
+  // the dispatcher's per-trigger default) lets a follow-up cron tick reuse
+  // the warm sandbox. The cleanup cron stops idle schedule sessions after
+  // the per-row TTL elapses.
+  // FIX #6 (adv-003): try to reuse a warm session created by a previous
+  // schedule tick. The dispatcher's CAS handles the race with the cleanup
+  // cron (and falls back gracefully — for internal triggers a stopped
+  // session does NOT throw, the dispatcher auto-creates).
+  let warmSessionId: string | undefined;
   try {
-    const result = await createRun(tenantId, agentId, schedule.prompt, {
-      triggeredBy: "schedule",
-      scheduleId,
-    });
-    runId = result.run.id as RunId;
-    remainingBudget = result.remainingBudget;
+    const warm = await findWarmScheduleSession(tenantId, agentId);
+    if (warm) warmSessionId = warm.id;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn("Scheduled run creation failed", { schedule_id, agent_id: agent.id, error: msg });
-    return jsonResponse({ status: "skipped", reason: msg });
-  }
-
-  const effectiveBudget = Math.min(agent.max_budget_usd, remainingBudget);
-
-  try {
-    await prepareRunExecution({
-      agent,
-      tenantId,
-      runId,
-      prompt: schedule.prompt,
-      platformApiUrl: getCallbackBaseUrl(),
-      effectiveBudget,
-      effectiveMaxTurns: agent.max_turns,
-      maxRuntimeSeconds: agent.max_runtime_seconds,
-    });
-  } catch (err) {
-    logger.error("Scheduled run sandbox creation failed", {
+    logger.warn("findWarmScheduleSession lookup failed (non-fatal)", {
       schedule_id,
       agent_id: agent.id,
-      run_id: runId,
       error: err instanceof Error ? err.message : String(err),
     });
-    await transitionRunStatus(runId, tenantId, "pending", "failed", {
-      completed_at: new Date().toISOString(),
-      result_summary: "Sandbox creation failed",
-    }).catch((transitionErr) => {
-      logger.error("Failed to transition run to failed status", {
-        run_id: runId,
-        error: transitionErr instanceof Error ? transitionErr.message : String(transitionErr),
-      });
-    });
-    return jsonResponse({ status: "failed", run_id: runId, reason: "sandbox_creation_error" });
   }
 
-  logger.info("Scheduled run started", { schedule_id, agent_id: agent.id, run_id: runId });
-  return jsonResponse({ status: "triggered", run_id: runId });
+  let messageId: string;
+  try {
+    const dispatchResult = await dispatchSessionMessage({
+      tenantId,
+      agentId,
+      sessionId: warmSessionId,
+      prompt: schedule.prompt,
+      triggeredBy: "schedule",
+      ephemeral: false,
+      callerKeyId: null,
+      platformApiUrl: getCallbackBaseUrl(),
+    });
+    messageId = dispatchResult.messageId;
+
+    // Drain the dispatcher stream so finalize hooks fire. The schedule cron
+    // function instance bounds this with its 5-min maxDuration; long-running
+    // schedule prompts detach naturally via the dispatcher's stream-detach
+    // path.
+    //
+    // FIX #20 (reliability MED): wedged streams (sandbox SDK never produces
+    // bytes after spawn) used to pin the function until maxDuration. Each
+    // read is now wrapped in a 30s race; on timeout we mark the message
+    // failed with `error_type: 'drain_timeout'` and break out of the loop.
+    const reader = dispatchResult.stream.getReader();
+    let timedOut = false;
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const READ_TIMEOUT_MS = 30_000;
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const readPromise = reader.read();
+        const timeoutPromise = new Promise<{ timeout: true }>((resolve) => {
+          timeoutHandle = setTimeout(() => resolve({ timeout: true }), READ_TIMEOUT_MS);
+        });
+        const result = await Promise.race([readPromise, timeoutPromise]);
+        if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+        if ("timeout" in result) {
+          timedOut = true;
+          logger.warn("Scheduled run drain loop timed out per-read", {
+            schedule_id,
+            agent_id: agent.id,
+            message_id: messageId,
+            read_timeout_ms: READ_TIMEOUT_MS,
+          });
+          break;
+        }
+        if (result.done) break;
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ignore */ }
+    }
+    if (timedOut) {
+      await transitionMessageStatus(messageId, tenantId, "running", "failed", {
+        completed_at: new Date().toISOString(),
+        error_type: "drain_timeout",
+        error_messages: ["Scheduled run drain loop hit per-read timeout (30s without bytes)."],
+      }).catch(() => {});
+    }
+  } catch (err) {
+    if (err instanceof ConcurrencyLimitError || err instanceof BudgetExceededError) {
+      const reason = err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
+      logger.warn("Scheduled run dispatch skipped", {
+        schedule_id,
+        agent_id: agent.id,
+        reason,
+        error: err.message,
+      });
+      return jsonResponse({ status: "skipped", reason });
+    }
+    logger.error("Scheduled run dispatch failed", {
+      schedule_id,
+      agent_id: agent.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jsonResponse({ status: "failed", reason: "dispatch_error" });
+  }
+
+  // If the dispatcher stream finished but the message status is still
+  // "running" (for example, the runner crashed silently), best-effort
+  // transition to failed so the schedule tick doesn't leave a stuck row.
+  await transitionMessageStatus(messageId, tenantId, "running", "failed", {
+    completed_at: new Date().toISOString(),
+    error_type: "schedule_no_terminal_event",
+    error_messages: ["Scheduled run ended without terminal event"],
+  }).catch(() => {
+    // No-op when the message already finalized — this is the happy path.
+  });
+
+  logger.info("Scheduled run completed", { schedule_id, agent_id: agent.id, message_id: messageId });
+  return jsonResponse({ status: "triggered", message_id: messageId });
 });

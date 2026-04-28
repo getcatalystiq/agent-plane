@@ -13,10 +13,13 @@ vi.mock("@/lib/model-catalog", () => ({
 }));
 
 import { parseResultEvent, captureTranscript } from "@/lib/transcript-utils";
-import type { RunId, TenantId } from "@/lib/types";
+import type { TenantId } from "@/lib/types";
 
 const tenantId = "tenant-1" as TenantId;
-const runId = "run-1" as RunId;
+// captureTranscript's `messageId` param accepts any string (asset path key + log
+// correlation only). Naming it `runId` here preserves the historical test
+// vocabulary while exercising the new signature.
+const runId = "run-1";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 

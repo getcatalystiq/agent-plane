@@ -31,8 +31,9 @@ export default async function TenantDetailPage({
   const tenant = await queryOne(TenantRow, "SELECT * FROM tenants WHERE id = $1", [tenantId]);
   if (!tenant) notFound();
 
-  const RunWithAgent = z.object({
+  const MessageWithAgent = z.object({
     id: z.string(),
+    session_id: z.string(),
     agent_id: z.string(),
     agent_name: z.string(),
     status: z.string(),
@@ -43,16 +44,23 @@ export default async function TenantDetailPage({
     created_at: z.coerce.string(),
   });
 
-  const [agents, runs, countResult, apiKeys] = await Promise.all([
+  const [agents, messages, countResult, apiKeys] = await Promise.all([
     query(AgentRow, "SELECT * FROM agents WHERE tenant_id = $1 ORDER BY created_at DESC", [tenantId]),
     query(
-      RunWithAgent,
-      `SELECT r.id, r.agent_id, a.name AS agent_name, r.status, r.prompt, r.cost_usd, r.num_turns, r.duration_ms, r.created_at
-       FROM runs r JOIN agents a ON a.id = r.agent_id
-       WHERE r.tenant_id = $1 ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
+      MessageWithAgent,
+      `SELECT m.id, m.session_id, s.agent_id, a.name AS agent_name, m.status, m.prompt,
+              m.cost_usd, m.num_turns, m.duration_ms, m.created_at
+       FROM session_messages m
+       JOIN sessions s ON s.id = m.session_id
+       JOIN agents a ON a.id = s.agent_id
+       WHERE m.tenant_id = $1 ORDER BY m.created_at DESC LIMIT $2 OFFSET $3`,
       [tenantId, pageSize, offset],
     ),
-    queryOne(z.object({ total: z.number() }), "SELECT COUNT(*)::int AS total FROM runs WHERE tenant_id = $1", [tenantId]),
+    queryOne(
+      z.object({ total: z.number() }),
+      "SELECT COUNT(*)::int AS total FROM session_messages WHERE tenant_id = $1",
+      [tenantId],
+    ),
     query(
       ApiKeyRow.omit({ key_hash: true }),
       `SELECT id, tenant_id, name, key_prefix, scopes, last_used_at, expires_at, revoked_at, created_at
@@ -61,7 +69,7 @@ export default async function TenantDetailPage({
     ),
   ]);
 
-  const totalRuns = countResult?.total ?? 0;
+  const totalMessages = countResult?.total ?? 0;
 
   return (
     <div className="space-y-6">
@@ -74,7 +82,7 @@ export default async function TenantDetailPage({
         <MetricCard label="Monthly Budget"><span className="font-mono">${tenant.monthly_budget_usd.toFixed(2)}</span></MetricCard>
         <MetricCard label="Current Spend"><span className="font-mono">${tenant.current_month_spend.toFixed(2)}</span></MetricCard>
         <MetricCard label="Agents">{agents.length}</MetricCard>
-        <MetricCard label="Runs">{totalRuns}</MetricCard>
+        <MetricCard label="Executions">{totalMessages}</MetricCard>
       </div>
 
       <TenantEditForm tenant={tenant} />
@@ -115,19 +123,19 @@ export default async function TenantDetailPage({
         </AdminTable>
       </div>
 
-      {/* Runs */}
+      {/* Executions */}
       <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <SectionHeader title="Runs" />
+        <SectionHeader title="Executions" />
         <AdminTable footer={
           <PaginationBar
             page={page}
             pageSize={pageSize}
-            total={totalRuns}
+            total={totalMessages}
             buildHref={(p, ps) => `/admin/tenants/${tenantId}?page=${p}&pageSize=${ps}`}
           />
         }>
           <AdminTableHead>
-            <Th>Run ID</Th>
+            <Th>Run</Th>
             <Th>Agent</Th>
             <Th>Status</Th>
             <Th>Prompt</Th>
@@ -137,31 +145,31 @@ export default async function TenantDetailPage({
             <Th>Created</Th>
           </AdminTableHead>
           <tbody>
-            {runs.map((r) => (
-              <AdminTableRow key={r.id}>
+            {messages.map((m) => (
+              <AdminTableRow key={m.id}>
                 <td className="p-3 font-mono text-xs">
-                  <Link href={`/admin/runs/${r.id}`} className="text-primary hover:underline">
-                    {r.id.slice(0, 8)}...
+                  <Link href={`/admin/sessions/${m.session_id}`} className="text-primary hover:underline">
+                    {m.session_id.slice(0, 8)}...
                   </Link>
                 </td>
                 <td className="p-3 text-xs">
-                  <Link href={`/admin/agents/${r.agent_id}`} className="text-primary hover:underline">
-                    {r.agent_name}
+                  <Link href={`/admin/agents/${m.agent_id}`} className="text-primary hover:underline">
+                    {m.agent_name}
                   </Link>
                 </td>
-                <td className="p-3"><RunStatusBadge status={r.status} /></td>
-                <td className="p-3 max-w-xs text-muted-foreground text-xs truncate" title={r.prompt}>
-                  {r.prompt.slice(0, 60)}{r.prompt.length > 60 ? "…" : ""}
+                <td className="p-3"><RunStatusBadge status={m.status} /></td>
+                <td className="p-3 max-w-xs text-muted-foreground text-xs truncate" title={m.prompt}>
+                  {m.prompt.slice(0, 60)}{m.prompt.length > 60 ? "…" : ""}
                 </td>
-                <td className="p-3 text-right font-mono">${r.cost_usd.toFixed(4)}</td>
-                <td className="p-3 text-right">{r.num_turns}</td>
+                <td className="p-3 text-right font-mono">${m.cost_usd.toFixed(4)}</td>
+                <td className="p-3 text-right">{m.num_turns}</td>
                 <td className="p-3 text-right text-muted-foreground text-xs">
-                  {r.duration_ms > 0 ? `${(r.duration_ms / 1000).toFixed(1)}s` : "—"}
+                  {m.duration_ms > 0 ? `${(m.duration_ms / 1000).toFixed(1)}s` : "—"}
                 </td>
-                <td className="p-3 text-muted-foreground text-xs">{new Date(r.created_at).toLocaleString()}</td>
+                <td className="p-3 text-muted-foreground text-xs">{new Date(m.created_at).toLocaleString()}</td>
               </AdminTableRow>
             ))}
-            {runs.length === 0 && <EmptyRow colSpan={8}>No runs</EmptyRow>}
+            {messages.length === 0 && <EmptyRow colSpan={8}>No executions</EmptyRow>}
           </tbody>
         </AdminTable>
       </div>
