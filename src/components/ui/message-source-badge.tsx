@@ -18,7 +18,7 @@ const LABELS: Record<RunTriggeredBy, string> = {
   webhook: "Webhook",
 };
 
-export function RunSourceBadge({ triggeredBy }: { triggeredBy: RunTriggeredBy }) {
+export function MessageSourceBadge({ triggeredBy }: { triggeredBy: RunTriggeredBy }) {
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STYLES[triggeredBy]}`}>
       {LABELS[triggeredBy]}

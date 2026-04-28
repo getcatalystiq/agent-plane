@@ -14,19 +14,30 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 
-export function CancelRunButton({ runId }: { runId: string }) {
+const ACTIVE_STATUSES = new Set(["creating", "active", "idle"]);
+
+export function CancelSessionButton({
+  sessionId,
+  status,
+}: {
+  sessionId: string;
+  status: string;
+}) {
   const [open, setOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const router = useRouter();
 
+  if (!ACTIVE_STATUSES.has(status)) return null;
+  if (cancelling === false && !ACTIVE_STATUSES.has(status)) return null;
+
   async function handleConfirm() {
     setCancelling(true);
     try {
-      await adminFetch(`/runs/${runId}/cancel`, { method: "POST" });
+      await adminFetch(`/sessions/${sessionId}`, { method: "DELETE" });
       setOpen(false);
       router.refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to cancel run");
+      alert(err instanceof Error ? err.message : "Failed to stop session");
     } finally {
       setCancelling(false);
     }
@@ -38,16 +49,17 @@ export function CancelRunButton({ runId }: { runId: string }) {
         variant="destructive"
         size="sm"
         onClick={() => setOpen(true)}
+        disabled={cancelling}
       >
-        Stop Run
+        {cancelling ? "Stopping..." : "Stop Session"}
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Stop this run?</DialogTitle>
+            <DialogTitle>Stop this session?</DialogTitle>
             <DialogDescription>
-              This will terminate the sandbox immediately.
+              This will cancel the in-flight message (if any) and terminate the sandbox immediately.
             </DialogDescription>
           </DialogHeader>
           <DialogBody />
@@ -56,7 +68,7 @@ export function CancelRunButton({ runId }: { runId: string }) {
               Cancel
             </Button>
             <Button variant="destructive" size="sm" onClick={handleConfirm} disabled={cancelling}>
-              {cancelling ? "Stopping…" : "Stop Run"}
+              {cancelling ? "Stopping…" : "Stop Session"}
             </Button>
           </DialogFooter>
         </DialogContent>

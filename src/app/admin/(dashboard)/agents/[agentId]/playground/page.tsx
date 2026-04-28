@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useState, useRef, useEffect, useCallback, useMemo } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent } from "@/components/ui/card";
@@ -64,18 +65,20 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     };
   }, []);
 
-  async function reconnectToStream(runId: string, eventOffset: number) {
+  async function reconnectToStream(messageId: string, eventOffset: number) {
     setPolling(true);
 
+    const sid = sessionIdRef.current;
     try {
       let res: Response;
       try {
-        res = await adminStream(`/runs/${runId}/stream?offset=${eventOffset}`, {
+        if (!sid) throw new Error("No session id available for reconnect");
+        res = await adminStream(`/sessions/${sid}/messages/${messageId}/stream?offset=${eventOffset}`, {
           signal: abortRef.current?.signal,
         });
       } catch (err) {
         if ((err as Error)?.name === "AbortError") return;
-        await pollForFinalResult(runId);
+        await pollForFinalResult(messageId);
         return;
       }
 
@@ -100,7 +103,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
             if (event.type === "stream_detached") {
               const newOffset = typeof event.offset === "number" ? event.offset : eventOffset;
-              reconnectToStream(runId, newOffset);
+              reconnectToStream(messageId, newOffset);
               return;
             }
 
@@ -117,7 +120,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       }
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
-      await pollForFinalResult(runId);
+      await pollForFinalResult(messageId);
       return;
     } finally {
       setPolling(false);
@@ -127,9 +130,10 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     }
   }
 
-  async function pollForFinalResult(runId: string) {
+  async function pollForFinalResult(messageId: string) {
     let delay = 3000;
     const maxDelay = 10_000;
+    const sid = sessionIdRef.current;
 
     try {
       while (true) {
@@ -140,14 +144,15 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
         let data: Record<string, unknown>;
         try {
-          data = await adminFetch<Record<string, unknown>>(`/runs/${runId}`, {
+          if (!sid) throw new Error("no session id");
+          data = await adminFetch<Record<string, unknown>>(`/sessions/${sid}/messages/${messageId}`, {
             signal: abortRef.current?.signal,
           });
         } catch {
           delay = Math.min(delay * 2, maxDelay);
           continue;
         }
-        const run = data.run as Record<string, unknown> | undefined;
+        const run = (data.message ?? data) as Record<string, unknown> | undefined;
 
         if (run && TERMINAL_STATUSES.has(run.status as string)) {
           const transcript = data.transcript as TranscriptEvent[] | undefined;
@@ -333,13 +338,13 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
 
   async function handleStop() {
     abortRef.current?.abort();
-    const id = runIdRef.current;
-    if (id) {
-      runIdRef.current = null;
-      adminFetch(`/runs/${id}/cancel`, { method: "POST" }).catch((err) => {
-        console.error("Failed to cancel run:", err);
+    const sid = sessionIdRef.current;
+    if (sid) {
+      adminFetch(`/sessions/${sid}/cancel`, { method: "POST" }).catch((err) => {
+        console.error("Failed to cancel session:", err);
       });
     }
+    runIdRef.current = null;
   }
 
   const hasContent = events.length > 0 || running;
@@ -357,6 +362,14 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           <span className="text-xs text-muted-foreground font-mono">
             Session: {sessionId.slice(0, 12)}…
           </span>
+        )}
+        {sessionId && !running && events.some((ev) => ev.type === "result") && (
+          <Link
+            href={`/admin/sessions/${sessionId}`}
+            className="text-xs text-primary hover:underline"
+          >
+            View session →
+          </Link>
         )}
       </div>
 

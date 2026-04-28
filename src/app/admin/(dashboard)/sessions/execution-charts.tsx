@@ -36,7 +36,9 @@ function AgentLineChart({
     return (
       <div className="rounded-lg border border-border p-6">
         <h3 className="text-sm font-semibold mb-4">{title}</h3>
-        <p className="text-sm text-muted-foreground text-center py-8">No data</p>
+        <p className="text-sm text-muted-foreground text-center py-8">
+          No activity in this period
+        </p>
       </div>
     );
   }
@@ -92,12 +94,11 @@ function AgentLineChart({
 export interface DailyAgentStat {
   date: string;
   agent_name: string;
-  run_count: number;
+  execution_count: number;
   cost_usd: number;
 }
 
-function buildChartData(rows: DailyAgentStat[], valueKey: "run_count" | "cost_usd") {
-  // Collect all dates and agents
+function buildChartData(rows: DailyAgentStat[], valueKey: "execution_count" | "cost_usd") {
   const dateSet = new Set<string>();
   const agentSet = new Set<string>();
   for (const r of rows) {
@@ -108,7 +109,6 @@ function buildChartData(rows: DailyAgentStat[], valueKey: "run_count" | "cost_us
   const dates = Array.from(dateSet).sort();
   const agents = Array.from(agentSet).sort();
 
-  // Build lookup: date+agent → value
   const lookup = new Map<string, number>();
   for (const r of rows) lookup.set(`${r.date}|${r.agent_name}`, r[valueKey]);
 
@@ -123,16 +123,16 @@ function buildChartData(rows: DailyAgentStat[], valueKey: "run_count" | "cost_us
   return { data, agents };
 }
 
-export function RunCharts({ stats }: { stats: DailyAgentStat[] }) {
-  const { data: runData, agents: runAgents } = buildChartData(stats, "run_count");
+export function ExecutionCharts({ stats }: { stats: DailyAgentStat[] }) {
+  const { data: execData, agents: execAgents } = buildChartData(stats, "execution_count");
   const { data: costData, agents: costAgents } = buildChartData(stats, "cost_usd");
 
   return (
     <div className="grid grid-cols-2 gap-4">
       <AgentLineChart
-        title="Runs per day"
-        data={runData}
-        agents={runAgents}
+        title="Executions per day"
+        data={execData}
+        agents={execAgents}
         valueFormatter={(v) => String(Math.round(v))}
       />
       <AgentLineChart

@@ -1,10 +1,10 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Select } from "@/components/ui/select";
 
 const SOURCES = [
-  { value: "", label: "All Sources" },
+  { value: "", label: "All Triggers" },
   { value: "api", label: "API" },
   { value: "schedule", label: "Schedule" },
   { value: "playground", label: "Playground" },
@@ -15,12 +15,16 @@ const SOURCES = [
 
 export function SourceFilter({ current }: { current: string | null }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const value = e.target.value;
-    const params = new URLSearchParams();
+    const params = new URLSearchParams(searchParams.toString());
     if (value) params.set("source", value);
-    router.push(`/admin/runs${params.toString() ? `?${params}` : ""}`);
+    else params.delete("source");
+    params.delete("page");
+    const qs = params.toString();
+    router.push(`/admin/sessions${qs ? `?${qs}` : ""}`);
   }
 
   return (

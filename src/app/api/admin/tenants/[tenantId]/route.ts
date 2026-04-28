@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { queryOne, query, execute } from "@/db";
-import { TenantRow, AgentRow, RunRow, TimezoneSchema } from "@/lib/validation";
+import { TenantRow, AgentRow, SessionMessageRow, TimezoneSchema } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
 import { encrypt } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
@@ -33,13 +33,19 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
     [tenantId],
   );
 
-  const recentRuns = await query(
-    RunRow,
-    "SELECT * FROM runs WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20",
+  const recentMessages = await query(
+    SessionMessageRow,
+    `SELECT m.*, a.name AS agent_name, a.model AS agent_model, s.agent_id
+     FROM session_messages m
+     JOIN sessions s ON s.id = m.session_id
+     JOIN agents a ON a.id = s.agent_id
+     WHERE m.tenant_id = $1
+     ORDER BY m.created_at DESC
+     LIMIT 20`,
     [tenantId],
   );
 
-  return NextResponse.json({ tenant, agents, recent_runs: recentRuns });
+  return NextResponse.json({ tenant, agents, recent_messages: recentMessages });
 });
 
 const UpdateTenantSchema = z.object({
@@ -139,9 +145,8 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
     }
   }
 
-  // Cascade delete in FK-safe order
+  // Cascade delete in FK-safe order. session_messages cascade from sessions.
   await execute("DELETE FROM mcp_connections WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)", [tenantId]);
-  await execute("DELETE FROM runs WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM sessions WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM plugin_marketplaces WHERE tenant_id = $1", [tenantId]);
   await execute("DELETE FROM mcp_servers WHERE tenant_id = $1", [tenantId]);

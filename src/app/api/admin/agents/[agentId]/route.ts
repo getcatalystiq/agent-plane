@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { queryOne, query, execute, getPool } from "@/db";
-import { AgentRow, RunRow, UpdateAgentSchema } from "@/lib/validation";
+import { AgentRow, SessionMessageRow, UpdateAgentSchema } from "@/lib/validation";
 import { removeToolkitConnections, pruneAllowedToolsForToolkits } from "@/lib/composio";
 import { resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
 import { withErrorHandler } from "@/lib/api";
@@ -19,13 +19,19 @@ export const GET = withErrorHandler(async (_request: NextRequest, context) => {
     return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
-  const recentRuns = await query(
-    RunRow,
-    "SELECT * FROM runs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 20",
+  const recentMessages = await query(
+    SessionMessageRow,
+    `SELECT m.*, a.name AS agent_name, a.model AS agent_model, s.agent_id
+     FROM session_messages m
+     JOIN sessions s ON s.id = m.session_id
+     JOIN agents a ON a.id = s.agent_id
+     WHERE s.agent_id = $1
+     ORDER BY m.created_at DESC
+     LIMIT 20`,
     [agentId],
   );
 
-  return NextResponse.json({ agent, recent_runs: recentRuns });
+  return NextResponse.json({ agent, recent_messages: recentMessages });
 });
 
 export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
@@ -190,15 +196,15 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
     return NextResponse.json({ error: { code: "not_found", message: "Agent not found" } }, { status: 404 });
   }
 
-  const runCount = await queryOne(
+  const activeSessionCount = await queryOne(
     z.object({ count: z.coerce.number() }),
-    "SELECT COUNT(*)::int AS count FROM runs WHERE agent_id = $1 AND status IN ('pending', 'running')",
+    "SELECT COUNT(*)::int AS count FROM sessions WHERE agent_id = $1 AND status IN ('creating', 'active')",
     [agentId],
   );
 
-  if (runCount && runCount.count > 0) {
+  if (activeSessionCount && activeSessionCount.count > 0) {
     return NextResponse.json(
-      { error: { code: "conflict", message: "Cannot delete agent with active runs" } },
+      { error: { code: "conflict", message: "Cannot delete agent with active sessions" } },
       { status: 409 },
     );
   }
@@ -208,9 +214,9 @@ export const DELETE = withErrorHandler(async (_request: NextRequest, context) =>
     removeToolkitConnections(agent.id, agent.composio_toolkits).catch(() => {});
   }
 
-  // Delete related data then the agent
+  // Delete related data then the agent. session_messages cascade from sessions.
   await execute("DELETE FROM mcp_connections WHERE agent_id = $1", [agentId]);
-  await execute("DELETE FROM runs WHERE agent_id = $1", [agentId]);
+  await execute("DELETE FROM sessions WHERE agent_id = $1", [agentId]);
   await execute("DELETE FROM agents WHERE id = $1", [agentId]);
 
   return NextResponse.json({ deleted: true });
