@@ -99,11 +99,22 @@ function MessageRow({
     fetch(message.transcript_blob_url)
       .then(async (res) => {
         if (!res.ok) throw new Error(`Failed to load transcript: ${res.status}`);
-        return res.json();
+        return res.text();
       })
-      .then((data) => {
+      .then((text) => {
         if (cancelled) return;
-        const arr = Array.isArray(data) ? (data as TranscriptEvent[]) : [];
+        // Transcript blobs are stored as NDJSON (one event per line),
+        // not a JSON array. Split + parse per line; skip lines that fail.
+        const arr: TranscriptEvent[] = [];
+        for (const line of text.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            arr.push(JSON.parse(trimmed) as TranscriptEvent);
+          } catch {
+            // Skip malformed lines rather than failing the whole load.
+          }
+        }
         setTranscriptEvents(arr);
       })
       .catch((err: Error) => {
