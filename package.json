@@ -32,7 +32,8 @@
     "test:watch": "vitest",
     "migrate": "npx tsx src/db/migrate.ts",
     "create-tenant": "npx tsx scripts/create-tenant.ts",
-    "create-api-key": "npx tsx scripts/create-api-key.ts"
+    "create-api-key": "npx tsx scripts/create-api-key.ts",
+    "bench:session": "tsx scripts/bench-session-boot.ts"
   },
   "dependencies": {
     "@a2a-js/sdk": "0.3.12",
@@ -44,6 +45,7 @@
     "@composio/core": "^0.6.3",
     "@neondatabase/serverless": "^1.0.2",
     "@radix-ui/react-popover": "^1.1.15",
+    "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-toast": "^1.2.15",
     "@tailwindcss/postcss": "^4.1.18",
     "@uiw/react-codemirror": "^4.25.4",

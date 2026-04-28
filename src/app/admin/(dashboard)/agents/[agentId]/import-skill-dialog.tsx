@@ -44,15 +44,18 @@ interface ImportSkillDialogProps {
 
 function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <button
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
       onClick={onClick}
-      className={`relative pb-2 text-sm font-medium transition-colors ${
+      className={`relative h-auto rounded-none px-0 pb-2 pt-0 text-sm font-medium hover:bg-transparent ${
         active ? "text-foreground" : "text-muted-foreground hover:text-foreground"
       }`}
     >
       {label}
-      {active && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-foreground rounded-full" />}
-    </button>
+      {active && <span className="pointer-events-none absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-foreground" aria-hidden />}
+    </Button>
   );
 }
 

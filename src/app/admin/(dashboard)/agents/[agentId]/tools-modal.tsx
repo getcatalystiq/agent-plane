@@ -117,9 +117,9 @@ export function ToolsModal({ toolkit, toolkitLogo, allowedTools, open, onOpenCha
             <>
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span>{selected.size === 0 ? "All tools (no filter)" : `${selected.size} / ${tools.length} selected`}</span>
-                <button type="button" className="text-primary hover:underline" onClick={toggleAll}>
+                <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs" onClick={toggleAll}>
                   {allSelected ? "Deselect All" : "Select All"}
-                </button>
+                </Button>
               </div>
               <div className="max-h-72 overflow-y-auto border border-border rounded-lg divide-y divide-border">
                 {filtered.map((t) => (

@@ -73,6 +73,55 @@ const MCP_REFRESH_TTL_MS = 30 * 60 * 1000;
 
 const EMPTY_PLUGINS: PluginFileSet = { skillFiles: [], agentFiles: [], warnings: [] };
 
+// ---------------------------------------------------------------------------
+// OPTIMIZATION A — per-isolate `activeSessions` LRU cache.
+//
+// Same-Lambda-isolate back-to-back messages can skip the `Sandbox.get(...)`
+// RPC by reusing the previously resolved `SessionSandboxInstance`. The cache
+// is process-local (one entry per session per isolate) and bounded in size
+// to avoid unbounded growth across long-lived warm Lambda processes.
+//
+// We only cache "warm" handles — i.e. handles whose `sandboxId` matches the
+// session's recorded `sandbox_id` and whose last touch was within the
+// freshness window. Cold-start sandboxes are NOT cached: the next message
+// will look them up via the DB row and reconnect normally.
+//
+// Insertion order doubles as LRU order: the first key in `Map` iteration is
+// the oldest entry. We touch entries on hit by deleting + re-inserting so
+// they move to the tail.
+// ---------------------------------------------------------------------------
+interface CachedHandle {
+  instance: SessionSandboxInstance;
+  lastTouchedMs: number;
+}
+const activeSessions = new Map<string, CachedHandle>();
+const ACTIVE_SESSIONS_MAX = 256;
+const SANDBOX_HANDLE_FRESHNESS_MS = 30_000;
+
+function cacheSandboxHandle(sessionId: string, instance: SessionSandboxInstance): void {
+  // Delete-then-set keeps insertion order = LRU order on update.
+  activeSessions.delete(sessionId);
+  activeSessions.set(sessionId, { instance, lastTouchedMs: Date.now() });
+  evictOldestIfFull();
+}
+
+function evictOldestIfFull(): void {
+  while (activeSessions.size > ACTIVE_SESSIONS_MAX) {
+    const oldestKey = activeSessions.keys().next().value;
+    if (oldestKey === undefined) break;
+    activeSessions.delete(oldestKey);
+  }
+}
+
+/**
+ * Drop a cached sandbox handle. MUST be called from any path that stops or
+ * may have stopped the underlying sandbox so a killed sandbox handle is
+ * never reused. Safe to call on a session that isn't cached.
+ */
+export function invalidateSandboxHandle(sessionId: string): void {
+  activeSessions.delete(sessionId);
+}
+
 const PUBLIC_TRIGGERS: ReadonlySet<RunTriggeredBy> = new Set([
   "api",
   "playground",
@@ -317,6 +366,10 @@ export async function cancelSession(sessionId: string, tenantId: TenantId): Prom
     }
   }
 
+  // OPTIMIZATION A — drop the cached handle: the sandbox above was just
+  // stopped (or attempted) so any cached instance for this session is dead.
+  invalidateSandboxHandle(sessionId);
+
   return casToStopped(sessionId, tenantId);
 }
 
@@ -518,55 +571,96 @@ async function runMessageStream(
   sessionBootAborts.set(session.id, bootController);
 
   if (session.sandbox_id) {
-    // Reconnect path: race reconnect against MCP/plugin fetch.
-    const auth = await authPromise;
-    const [reconnectResult, mcpResult, pluginResult] = await Promise.all([
-      reconnectSessionSandbox(session.sandbox_id, {
-        agent: { ...agent, max_budget_usd: effectiveBudget, max_turns: effectiveMaxTurns },
-        tenantId: input.tenantId,
-        sessionId: session.id,
-        platformApiUrl: input.platformApiUrl,
-        aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
-        auth,
-        mcpServers: undefined,
-        mcpErrors: [],
-        pluginFiles: [],
-        maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
-        callbackData: input.callbackData,
-      }),
-      mcpPromise,
-      pluginPromise,
-    ]);
+    // OPTIMIZATION A — hot-path cache check. Same-isolate back-to-back
+    // messages skip the `Sandbox.get()` RPC entirely. We still need to wire
+    // fresh MCP servers (tokens may have rotated since the last touch).
+    const cachedHandle = activeSessions.get(session.id);
+    if (
+      cachedHandle &&
+      Date.now() - cachedHandle.lastTouchedMs < SANDBOX_HANDLE_FRESHNESS_MS &&
+      cachedHandle.instance.id === session.sandbox_id
+    ) {
+      const [mcpResult, pluginResult, auth] = await Promise.all([
+        mcpPromise,
+        pluginPromise,
+        authPromise,
+      ]);
+      // pluginResult unused on the cache hit path; reconnect already skipped
+      // plugin refresh via skipPluginRefresh, but we awaited it for the
+      // shared types and to keep promise semantics consistent.
+      void pluginResult;
+      void auth;
 
-    if (reconnectResult) {
       if (Object.keys(mcpResult.servers).length > 0) {
-        reconnectResult.updateMcpConfig(mcpResult.servers, mcpResult.errors);
+        cachedHandle.instance.updateMcpConfig(mcpResult.servers, mcpResult.errors);
       }
-      const idleSinceMs = session.idle_since
-        ? Date.now() - new Date(session.idle_since).getTime()
-        : Infinity;
-      if (idleSinceMs > 5 * 60 * 1000) {
-        await reconnectResult.extendTimeout(DEFAULT_SESSION_TIMEOUT_MS);
-      }
+      cachedHandle.lastTouchedMs = Date.now();
+      // Re-insert to push to LRU tail.
+      activeSessions.delete(session.id);
+      activeSessions.set(session.id, cachedHandle);
       recordMcpRefresh(session.id, input.tenantId);
-      sandbox = reconnectResult;
+      sandbox = cachedHandle.instance;
     } else {
-      // Sandbox went missing — cold path with the resolved MCP/plugin set.
-      sandbox = await coldStartSandbox({
-        agent,
-        tenantId: input.tenantId,
-        sessionId: session.id,
-        sdkSessionId: session.sdk_session_id,
-        sessionBlobUrl: session.session_blob_url,
-        platformApiUrl: input.platformApiUrl,
-        aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
-        auth,
-        mcpResult,
-        pluginResult,
-        callbackData: input.callbackData,
-        effectiveBudget,
-        effectiveMaxTurns,
-      });
+      // Cache miss / stale entry — fall through to DB-backed reconnect.
+      // (Drop stale entries proactively so we never pick them up later.)
+      if (cachedHandle) activeSessions.delete(session.id);
+
+      // Reconnect path: race reconnect against MCP/plugin fetch.
+      const auth = await authPromise;
+      const [reconnectResult, mcpResult, pluginResult] = await Promise.all([
+        reconnectSessionSandbox(session.sandbox_id, {
+          agent: { ...agent, max_budget_usd: effectiveBudget, max_turns: effectiveMaxTurns },
+          tenantId: input.tenantId,
+          sessionId: session.id,
+          platformApiUrl: input.platformApiUrl,
+          aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+          auth,
+          mcpServers: undefined,
+          mcpErrors: [],
+          pluginFiles: [],
+          maxIdleTimeoutMs: DEFAULT_SESSION_TIMEOUT_MS,
+          callbackData: input.callbackData,
+        }),
+        mcpPromise,
+        pluginPromise,
+      ]);
+
+      if (reconnectResult) {
+        if (Object.keys(mcpResult.servers).length > 0) {
+          reconnectResult.updateMcpConfig(mcpResult.servers, mcpResult.errors);
+        }
+        const idleSinceMs = session.idle_since
+          ? Date.now() - new Date(session.idle_since).getTime()
+          : Infinity;
+        if (idleSinceMs > 5 * 60 * 1000) {
+          await reconnectResult.extendTimeout(DEFAULT_SESSION_TIMEOUT_MS);
+        }
+        recordMcpRefresh(session.id, input.tenantId);
+        sandbox = reconnectResult;
+        // Cache the warm handle so subsequent same-isolate messages hit fast.
+        cacheSandboxHandle(session.id, sandbox);
+      } else {
+        // Sandbox went missing — drop any cached handle (it's dead) and cold start.
+        activeSessions.delete(session.id);
+        sandbox = await coldStartSandbox({
+          agent,
+          tenantId: input.tenantId,
+          sessionId: session.id,
+          sdkSessionId: session.sdk_session_id,
+          sessionBlobUrl: session.session_blob_url,
+          platformApiUrl: input.platformApiUrl,
+          aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+          auth,
+          mcpResult,
+          pluginResult,
+          callbackData: input.callbackData,
+          effectiveBudget,
+          effectiveMaxTurns,
+        });
+        // NOTE: do NOT cache cold-start sandboxes here; the DB row will be
+        // updated by coldStartSandbox and the next message will reconnect
+        // through the normal path (which DOES cache after success).
+      }
     }
   } else {
     // Cold path: pure new-sandbox.
@@ -632,6 +726,7 @@ async function runMessageStream(
     });
     if (session.ephemeral) {
       await casToStopped(session.id, input.tenantId).catch(() => {});
+      invalidateSandboxHandle(session.id);
     } else {
       await transitionSessionStatus(
         session.id,
@@ -832,6 +927,7 @@ async function finalizeMessage(args: FinalizeArgs): Promise<void> {
     if (session.ephemeral) {
       await casToStopped(session.id, tenantId).catch(() => {});
       await sandbox.stop().catch(() => {});
+      invalidateSandboxHandle(session.id);
     } else {
       await transitionSessionStatus(
         session.id,
@@ -886,6 +982,7 @@ async function sessionTail(args: SessionTailArgs): Promise<void> {
         error: err instanceof Error ? err.message : String(err),
       });
     });
+    invalidateSandboxHandle(sessionId);
   } else {
     await transitionSessionStatus(
       sessionId,

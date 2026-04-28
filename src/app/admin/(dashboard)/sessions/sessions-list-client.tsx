@@ -2,8 +2,11 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { Inbox } from "lucide-react";
 import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
 import { MessageSourceBadge } from "@/components/ui/message-source-badge";
 import { LocalDate } from "@/components/local-date";
 import type { RunTriggeredBy, SessionStatus } from "@/lib/types";
@@ -71,6 +74,21 @@ export function SessionsListClient({
     return sort === key ? " ↓" : "";
   }
 
+  function SortHeader({ label, sortKey, align }: { label: string; sortKey: typeof sort; align?: "right" }) {
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={() => setSort(sortKey)}
+        className={`h-auto px-0 py-0 text-xs font-semibold uppercase tracking-wide hover:bg-transparent hover:underline ${align === "right" ? "ml-auto" : ""}`}
+      >
+        {label}
+        {arrow(sortKey)}
+      </Button>
+    );
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -79,46 +97,31 @@ export function SessionsListClient({
       </div>
 
       {initialSessions.length === 0 ? (
-        <div className="rounded-lg border border-border bg-muted/10 p-12 text-center">
-          <p className="text-base font-medium text-foreground">No sessions yet</p>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Try the agent playground or wait for a scheduled run.
-          </p>
-        </div>
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><Inbox /></EmptyMedia>
+            <EmptyTitle>No runs yet</EmptyTitle>
+            <EmptyDescription>
+              Try the agent playground or wait for a scheduled run.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : (
         <AdminTable footer={paginationBar}>
           <AdminTableHead>
-            <Th>Session</Th>
+            <Th>Run</Th>
             <Th>Agent</Th>
             <Th>Status</Th>
             <Th>Latest Trigger</Th>
             <Th align="right">Messages</Th>
             <Th align="right">
-              <button
-                type="button"
-                onClick={() => setSort("total_cost")}
-                className="hover:underline"
-              >
-                Cost{arrow("total_cost")}
-              </button>
+              <SortHeader label="Cost" sortKey="total_cost" align="right" />
             </Th>
             <Th>
-              <button
-                type="button"
-                onClick={() => setSort("latest_activity")}
-                className="hover:underline"
-              >
-                Latest Activity{arrow("latest_activity")}
-              </button>
+              <SortHeader label="Latest Activity" sortKey="latest_activity" />
             </Th>
             <Th>
-              <button
-                type="button"
-                onClick={() => setSort("created_at")}
-                className="hover:underline"
-              >
-                Created{arrow("created_at")}
-              </button>
+              <SortHeader label="Created" sortKey="created_at" />
             </Th>
           </AdminTableHead>
           <tbody>
@@ -154,7 +157,7 @@ export function SessionsListClient({
                 </td>
               </AdminTableRow>
             ))}
-            {initialSessions.length === 0 && <EmptyRow colSpan={8}>No sessions found</EmptyRow>}
+            {initialSessions.length === 0 && <EmptyRow colSpan={8}>No runs found</EmptyRow>}
           </tbody>
         </AdminTable>
       )}

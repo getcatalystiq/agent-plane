@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { MetricCard } from "@/components/ui/metric-card";
 import { LocalDate } from "@/components/local-date";
@@ -396,13 +397,14 @@ export function LiveSessionDetail({ session: initialSession, messages: initialMe
         <div className="space-y-3">
           {hasMore && (
             <div className="flex justify-center">
-              <button
+              <Button
                 type="button"
-                className="text-sm text-primary hover:underline"
+                variant="link"
+                size="sm"
                 onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
               >
                 Load older ({totalMessages - visibleCount} more)
-              </button>
+              </Button>
             </div>
           )}
           {displayMessages.map((m, i) => {

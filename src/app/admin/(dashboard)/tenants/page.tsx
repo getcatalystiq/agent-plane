@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { AdminTable, AdminTableHead, AdminTableRow, Th, EmptyRow } from "@/components/ui/admin-table";
+import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { query } from "@/db";
 import { z } from "zod";
 import { AddTenantForm } from "./add-tenant-form";
@@ -35,10 +36,7 @@ export default async function TenantsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Companies</h1>
-        <AddTenantForm />
-      </div>
+      <DetailPageHeader title="Companies" actions={<AddTenantForm />} />
       <AdminTable>
         <AdminTableHead>
           <Th>Name</Th>

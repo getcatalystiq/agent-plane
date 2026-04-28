@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { execute, query } from "@/db";
 import { reconnectSandbox } from "@/lib/sandbox";
+import { invalidateSandboxHandle } from "@/lib/dispatcher";
 import {
   getIdleSessions,
   getStuckSessions,
@@ -37,6 +38,9 @@ async function stopSandboxBestEffort(
   context: { session_id: string; reason: CleanupReason },
 ): Promise<boolean> {
   if (!sandboxId) return true;
+  // OPTIMIZATION A — drop any cached sandbox handle for this session so
+  // subsequent dispatches don't reuse a handle whose sandbox we just stopped.
+  invalidateSandboxHandle(context.session_id);
   try {
     const sandbox = await reconnectSandbox(sandboxId);
     if (sandbox) await sandbox.stop();

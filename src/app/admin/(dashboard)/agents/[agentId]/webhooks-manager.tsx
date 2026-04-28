@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle } from "@/components/ui/dialog";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { SectionHeader } from "@/components/ui/section-header";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
@@ -91,13 +92,15 @@ function FilterEditor({
     return (
       <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
         No filters — every verified event triggers a run.{" "}
-        <button
+        <Button
           type="button"
+          variant="link"
+          size="sm"
           onClick={addCondition}
-          className="text-primary hover:underline"
+          className="h-auto p-0 text-xs"
         >
           Add condition
-        </button>
+        </Button>
       </div>
     );
   }
@@ -284,16 +287,14 @@ export function WebhooksManager({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <SectionHeader title="Webhooks">
-          <p className="text-sm text-muted-foreground">
-            HMAC-signed inbound webhooks that trigger this agent.
-          </p>
-        </SectionHeader>
+      <SectionHeader
+        title="Webhooks"
+        description="HMAC-signed inbound webhooks that trigger this agent."
+      >
         <Button onClick={() => setCreating(true)} variant="default" size="sm">
           New webhook
         </Button>
-      </div>
+      </SectionHeader>
 
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
 
@@ -387,6 +388,7 @@ function WebhookRow({
   onError: (msg: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<"rotate" | "delete" | null>(null);
   const ingressUrl = `${baseUrl}/api/webhooks/${source.id}`;
 
   async function toggle() {
@@ -405,9 +407,6 @@ function WebhookRow({
   }
 
   async function rotate() {
-    if (!confirm(`Rotate the secret for "${source.name}"? The old secret stays valid for 7 days.`)) {
-      return;
-    }
     setBusy(true);
     try {
       const res = await adminFetch<{ secret: string }>(
@@ -415,6 +414,7 @@ function WebhookRow({
         { method: "POST", body: JSON.stringify({ tenant_id: tenantId }) },
       );
       onSecretRevealed(res.secret);
+      setConfirmAction(null);
     } catch (err) {
       onError(err instanceof AdminApiError ? err.message : "Rotation failed");
     } finally {
@@ -423,11 +423,11 @@ function WebhookRow({
   }
 
   async function remove() {
-    if (!confirm(`Delete webhook "${source.name}"? This cannot be undone.`)) return;
     setBusy(true);
     try {
       await adminFetch(`/webhooks/${source.id}?tenant_id=${tenantId}`, { method: "DELETE" });
       onChanged();
+      setConfirmAction(null);
     } catch (err) {
       onError(err instanceof AdminApiError ? err.message : "Delete failed");
     } finally {
@@ -460,13 +460,15 @@ function WebhookRow({
             Filtering: {filterCount} condition{filterCount === 1 ? "" : "s"}{" "}
             ({source.filter_rules.combinator})
             {" · "}
-            <button
+            <Button
               type="button"
+              variant="link"
+              size="sm"
               onClick={() => setEditingFilter(true)}
-              className="text-primary hover:underline"
+              className="h-auto p-0 text-xs"
             >
               Edit →
-            </button>
+            </Button>
           </div>
         ) : null}
       </td>
@@ -490,10 +492,10 @@ function WebhookRow({
           <Button size="sm" variant="ghost" onClick={toggle} disabled={busy}>
             {source.enabled ? "Disable" : "Enable"}
           </Button>
-          <Button size="sm" variant="ghost" onClick={rotate} disabled={busy}>
+          <Button size="sm" variant="ghost" onClick={() => setConfirmAction("rotate")} disabled={busy}>
             Rotate secret
           </Button>
-          <Button size="sm" variant="destructive" onClick={remove} disabled={busy}>
+          <Button size="sm" variant="destructive" onClick={() => setConfirmAction("delete")} disabled={busy}>
             Delete
           </Button>
         </div>
@@ -521,6 +523,30 @@ function WebhookRow({
             onError={onError}
           />
         ) : null}
+        <ConfirmDialog
+          open={confirmAction === "rotate"}
+          onOpenChange={(open) => { if (!open) setConfirmAction(null); }}
+          title={`Rotate secret for "${source.name}"?`}
+          confirmLabel="Rotate secret"
+          loadingLabel="Rotating…"
+          loading={busy}
+          variant="default"
+          onConfirm={rotate}
+        >
+          A fresh secret will be generated and the old one will stay valid for 7 days during the overlap.
+        </ConfirmDialog>
+        <ConfirmDialog
+          open={confirmAction === "delete"}
+          onOpenChange={(open) => { if (!open) setConfirmAction(null); }}
+          title={`Delete webhook "${source.name}"?`}
+          confirmLabel="Delete webhook"
+          loadingLabel="Deleting…"
+          loading={busy}
+          variant="destructive"
+          onConfirm={remove}
+        >
+          This cannot be undone. Inbound calls to this webhook will start returning 404 immediately.
+        </ConfirmDialog>
       </td>
     </tr>
   );
@@ -714,17 +740,19 @@ function EditWebhookDialog({
               />
             </div>
             <div>
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={() => setShowFilter((v) => !v)}
-                className="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary"
+                className="h-auto px-0 py-0 text-xs font-medium hover:bg-transparent hover:text-primary"
               >
-                <span>{showFilter ? "▾" : "▸"}</span>
+                <span aria-hidden>{showFilter ? "▾" : "▸"}</span>
                 Payload filter{" "}
                 <span className="font-normal text-muted-foreground">
                   (optional — only fire the agent when the payload matches)
                 </span>
-              </button>
+              </Button>
               {showFilter ? (
                 <div className="mt-2">
                   <FilterEditor rules={filterRules} onChange={setFilterRules} />
@@ -870,17 +898,19 @@ function CreateWebhookDialog({
               />
             </div>
             <div>
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={() => setShowFilter((v) => !v)}
-                className="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary"
+                className="h-auto px-0 py-0 text-xs font-medium hover:bg-transparent hover:text-primary"
               >
-                <span>{showFilter ? "▾" : "▸"}</span>
+                <span aria-hidden>{showFilter ? "▾" : "▸"}</span>
                 Payload filter{" "}
                 <span className="font-normal text-muted-foreground">
                   (optional — only fire the agent when the payload matches)
                 </span>
-              </button>
+              </Button>
               {showFilter ? (
                 <div className="mt-2">
                   <FilterEditor rules={filterRules} onChange={setFilterRules} />

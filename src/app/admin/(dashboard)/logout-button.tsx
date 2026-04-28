@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { adminFetch } from "@/app/admin/lib/api";
 
 export function LogoutButton() {
@@ -13,12 +14,13 @@ export function LogoutButton() {
   }
 
   return (
-    <button
+    <Button
       onClick={handleLogout}
-      className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+      variant="ghost"
+      className="w-full justify-start gap-3 px-3 text-muted-foreground"
     >
-      <LogOut className="h-4 w-4" />
+      <LogOut />
       Logout
-    </button>
+    </Button>
   );
 }

@@ -4,6 +4,7 @@ import { queryOne } from "@/db";
 import { PluginMarketplaceRow, PluginManifestSchema } from "@/lib/validation";
 import { fetchRepoTree, fetchFileContent } from "@/lib/github";
 import { Badge } from "@/components/ui/badge";
+import { DetailPageHeader } from "@/components/ui/detail-page-header";
 import { getEnv } from "@/lib/env";
 import { decrypt } from "@/lib/crypto";
 import { PluginEditorClient } from "./plugin-editor-client";
@@ -98,18 +99,24 @@ export default async function PluginEditorPage({
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="flex items-center gap-3">
-          <Link href={`/admin/plugin-marketplaces/${marketplaceId}`} className="text-muted-foreground hover:text-foreground text-sm">&larr; {marketplace.name}</Link>
-          <span className="text-muted-foreground">/</span>
-          <h1 className="text-2xl font-semibold">{displayName}</h1>
-          {isOwned ? (
+      <DetailPageHeader
+        title={displayName}
+        eyebrow={
+          <Link
+            href={`/admin/plugin-marketplaces/${marketplaceId}`}
+            className="hover:text-foreground"
+          >
+            ← {marketplace.name}
+          </Link>
+        }
+        actions={
+          isOwned ? (
             <Badge variant="secondary">Editable</Badge>
           ) : (
             <Badge variant="outline">Read-only</Badge>
-          )}
-        </div>
-      </div>
+          )
+        }
+      />
 
       <PluginEditorClient
         marketplaceId={marketplaceId}

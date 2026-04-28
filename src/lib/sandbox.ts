@@ -970,7 +970,19 @@ export async function createSessionSandbox(config: SessionSandboxConfig): Promis
     );
   }
 
-  // Inject SoulSpec identity files into .soul/ directory
+  // Inject SoulSpec identity files into .soul/ directory.
+  //
+  // OPTIMIZATION B — identity files are written ONLY on cold create (here).
+  // The reconnect path (`reconnectSessionSandbox` below) intentionally
+  // skips this re-write because the files already live on the sandbox's
+  // disk from the original cold create — the sandbox stays warm across
+  // back-to-back messages and the .soul/ contents don't change mid-session.
+  //
+  // We accept always-injecting on cold start (size is bounded — at most 5
+  // small markdown files + future USER_TEMPLATE / examples). The real hot
+  // path is reconnect, which already pays zero cost for identity. Baking
+  // identity into the SDK snapshot is a future optimization (would require
+  // per-agent snapshots, deferred — too invasive for the win).
   const soulFiles: Array<{ path: string; content: Buffer }> = [];
   const soulFileMap: Array<[string, string | null | undefined]> = [
     ['.soul/SOUL.md', config.agent.soul_md],
@@ -1314,6 +1326,14 @@ export async function reconnectSessionSandbox(
   sandboxId: string,
   config: SessionSandboxConfig,
 ): Promise<SessionSandboxInstance | null> {
+  // OPTIMIZATION B — by design this path does NOT re-inject skills, plugins,
+  // bridge files, or .soul/ identity files. They were all written by
+  // `createSessionSandbox` on the original cold create and persist on the
+  // sandbox's disk for the lifetime of the sandbox (sessions don't mutate
+  // identity mid-session). The dispatcher (`runMessageStream`) sets
+  // `skipPluginRefresh` when the previous MCP refresh is still fresh, which
+  // mirrors this — only the MCP tokens are rotated on reconnect via
+  // `updateMcpConfig` on the returned handle.
   // Step 1: Try to reconnect — if sandbox is gone, return null
   let sandbox: Sandbox;
   try {
