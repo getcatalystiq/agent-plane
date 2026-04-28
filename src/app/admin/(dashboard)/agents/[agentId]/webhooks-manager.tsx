@@ -436,6 +436,7 @@ function WebhookRow({
   }
 
   const [editingFilter, setEditingFilter] = useState(false);
+  const [editing, setEditing] = useState(false);
   const filterCount = source.filter_rules?.conditions.length ?? 0;
 
   return (
@@ -483,8 +484,8 @@ function WebhookRow({
       </td>
       <td className="p-3 text-right">
         <div className="flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={() => setEditingFilter(true)} disabled={busy}>
-            {filterCount > 0 ? "Filter" : "Add filter"}
+          <Button size="sm" variant="default" onClick={() => setEditing(true)} disabled={busy}>
+            Edit
           </Button>
           <Button size="sm" variant="ghost" onClick={toggle} disabled={busy}>
             {source.enabled ? "Disable" : "Enable"}
@@ -503,6 +504,18 @@ function WebhookRow({
             onClose={() => setEditingFilter(false)}
             onSaved={() => {
               setEditingFilter(false);
+              onChanged();
+            }}
+            onError={onError}
+          />
+        ) : null}
+        {editing ? (
+          <EditWebhookDialog
+            source={source}
+            tenantId={tenantId}
+            onClose={() => setEditing(false)}
+            onSaved={() => {
+              setEditing(false);
               onChanged();
             }}
             onError={onError}
@@ -569,6 +582,165 @@ function EditFilterDialog({
             disabled={saving || !isFilterRulesValid(rules)}
           >
             {saving ? "Saving…" : "Save filter"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditWebhookDialog({
+  source,
+  tenantId,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  source: WebhookSource;
+  tenantId: string;
+  onClose: () => void;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [name, setName] = useState(source.name);
+  const [enabled, setEnabled] = useState(source.enabled);
+  const [provider, setProvider] = useState(detectProvider(source.signature_header));
+  const [signatureHeader, setSignatureHeader] = useState(source.signature_header);
+  const [promptTemplate, setPromptTemplate] = useState(source.prompt_template);
+  const [filterRules, setFilterRules] = useState<FilterRules | null>(source.filter_rules);
+  const [showFilter, setShowFilter] = useState((source.filter_rules?.conditions.length ?? 0) > 0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function handleProviderChange(value: string) {
+    setProvider(value);
+    const preset = PROVIDER_PRESETS[value];
+    if (preset) setSignatureHeader(preset.signatureHeader);
+  }
+
+  function handleSignatureHeaderChange(value: string) {
+    setSignatureHeader(value);
+    setProvider(detectProvider(value));
+  }
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await adminFetch(`/webhooks/${source.id}?tenant_id=${tenantId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          tenant_id: tenantId,
+          name,
+          enabled,
+          signature_header: signatureHeader,
+          prompt_template: promptTemplate,
+          filter_rules: filterRules,
+        }),
+      });
+      onSaved();
+    } catch (err) {
+      const msg = err instanceof AdminApiError ? err.message : "Save failed";
+      setError(msg);
+      onError(msg);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const valid =
+    name.trim().length > 0 &&
+    promptTemplate.trim().length > 0 &&
+    signatureHeader.trim().length > 0 &&
+    isFilterRulesValid(filterRules);
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit webhook — {source.name}</DialogTitle>
+        </DialogHeader>
+        <DialogBody>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-foreground mb-1">Name</label>
+              <Input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="github-pr-events"
+              />
+            </div>
+            <div>
+              <label className="flex items-center gap-2 text-xs font-medium text-foreground">
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={(e) => setEnabled(e.target.checked)}
+                />
+                Enabled
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-foreground mb-1">Provider</label>
+              <select
+                value={provider}
+                onChange={(e) => handleProviderChange(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-border bg-background px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {PROVIDER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-foreground mb-1">Signature header</label>
+              <Input
+                type="text"
+                value={signatureHeader}
+                onChange={(e) => handleSignatureHeaderChange(e.target.value)}
+                className="font-mono text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-foreground mb-1">
+                Prompt template <span className="ml-1 font-normal text-muted-foreground">— supports {"{{payload}}"} and {"{{source.name}}"}</span>
+              </label>
+              <Textarea
+                value={promptTemplate}
+                onChange={(e) => setPromptTemplate(e.target.value)}
+                rows={4}
+                className="font-mono text-xs"
+              />
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowFilter((v) => !v)}
+                className="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary"
+              >
+                <span>{showFilter ? "▾" : "▸"}</span>
+                Payload filter{" "}
+                <span className="font-normal text-muted-foreground">
+                  (optional — only fire the agent when the payload matches)
+                </span>
+              </button>
+              {showFilter ? (
+                <div className="mt-2">
+                  <FilterEditor rules={filterRules} onChange={setFilterRules} />
+                </div>
+              ) : null}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Need to change the signing secret? Use <span className="text-foreground">Rotate secret</span>.
+            </p>
+            {error ? <div className="text-sm text-destructive">{error}</div> : null}
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button variant="default" onClick={save} disabled={saving || !valid}>
+            {saving ? "Saving…" : "Save changes"}
           </Button>
         </DialogFooter>
       </DialogContent>
