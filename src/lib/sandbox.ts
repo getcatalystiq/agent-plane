@@ -667,11 +667,25 @@ function emit(event) {
 }
 
 function claudeSdkStreamLoop(): string {
+  // Tracks whether the SDK iterator yielded a terminal `result` message. If
+  // the iterator ends without one (e.g. Anthropic 5-hour subscription bucket
+  // exhausted with overage disabled — the SDK silently exits the iterator
+  // instead of throwing), we synthesize an error event so the platform
+  // finalizer marks the run failed with a clear cause. Without this, the
+  // partial-execution state was being hidden behind a green checkmark.
   return `
+    let __gotResult = false;
+    let __lastRateLimit = null;
     for await (const message of query({ prompt, options })) {
       if (message.type === 'system' && message.subtype === 'init') {
         if (message.mcp_servers) emit({ type: 'mcp_status', servers: message.mcp_servers });
         if (message.session_id) emit({ type: 'session_info', sdk_session_id: message.session_id });
+      }
+      if (message.type === 'rate_limit_event') {
+        __lastRateLimit = message.rate_limit_info || null;
+      }
+      if (message.type === 'result') {
+        __gotResult = true;
       }
       if (message.type === 'stream_event') {
         const ev = message.event;
@@ -683,6 +697,28 @@ function claudeSdkStreamLoop(): string {
       } else {
         emit(message);
       }
+    }
+
+    if (!__gotResult) {
+      let __code = 'sdk_iterator_truncated';
+      let __error = 'Claude Agent SDK iterator ended without emitting a final result event';
+      if (__lastRateLimit) {
+        const __s = __lastRateLimit.status;
+        const __overage = __lastRateLimit.overageStatus;
+        if (__s === 'rejected' || (__s === 'allowed_warning' && __overage === 'rejected')) {
+          __code = 'rate_limit_exhausted';
+          __error = 'Anthropic rate limit reached ('
+            + (__lastRateLimit.rateLimitType || 'unknown') + ', overage=' + __overage
+            + ', resets at epoch ' + __lastRateLimit.resetsAt + ')';
+        }
+      }
+      emit({
+        type: 'error',
+        code: __code,
+        error: __error,
+        timestamp: new Date().toISOString(),
+        rate_limit_info: __lastRateLimit,
+      });
     }
 `;
 }
