@@ -219,7 +219,8 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 | `AI_GATEWAY_API_KEY` | Yes | Vercel AI Gateway key |
 | `ENCRYPTION_KEY` | Yes | 64 hex chars (32 bytes) for AES-256-GCM encryption (keys, tokens, credentials) |
 | `ENCRYPTION_KEY_PREVIOUS` | No | 64 hex chars; supports seamless key rotation |
-| `BLOB_READ_WRITE_TOKEN` | No | Vercel Blob (transcript + asset storage) |
+| `BLOB_READ_WRITE_TOKEN` | No | Vercel Blob public store (transcript + asset storage) |
+| `BLOB_PRIVATE_READ_WRITE_TOKEN` | No | Vercel Blob **private** store for session files (conversation history). Falls back to `BLOB_READ_WRITE_TOKEN` if unset, but `access: "private"` only works against a store provisioned for it. |
 | `COMPOSIO_API_KEY` | No | Composio MCP tool integration (optional if not using Composio toolkits) |
 | `CRON_SECRET` | No | Vercel Cron authentication (must be manually set; random string ≥16 chars) |
 | `BRAINTRUST_API_KEY` | No | Braintrust observability; when set, sandbox runners auto-trace LLM calls to Braintrust |
