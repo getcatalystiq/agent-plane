@@ -139,10 +139,17 @@ export interface SandboxConfig {
     skills: Array<{ folder: string; files: Array<{ path: string; content: string }> }>;
   };
   tenantId: string;
-  runId: string;
+  /**
+   * The session_message id this runner is executing. Both the upload URL
+   * (`/api/internal/messages/:messageId/transcript`) and the bound HMAC token
+   * key off this value, so a stolen or stale messageId token cannot accept
+   * an upload for a different message.
+   */
+  messageId: string;
   prompt: string;
   platformApiUrl: string;
-  runToken?: string;
+  /** Bearer token minted via generateMessageToken(messageId). */
+  messageToken?: string;
   maxRuntimeSeconds?: number;
   aiGatewayApiKey: string;
   auth?: import("@/lib/tenant-auth").SandboxAuth;
@@ -218,7 +225,7 @@ async function installSdk(sandbox: Sandbox, contextId: string): Promise<void> {
 export async function createSandbox(config: SandboxConfig): Promise<SandboxInstance> {
 
   logger.info("Creating sandbox", {
-    run_id: config.runId,
+    message_id: config.messageId,
     agent_id: config.agent.id,
     tenant_id: config.tenantId,
     has_git_source: !!config.agent.git_repo_url,
@@ -271,7 +278,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
       networkPolicy,
     });
     // Git source sandboxes still need SDK installed
-    await installSdk(sandbox, config.runId);
+    await installSdk(sandbox, config.messageId);
   }
 
   // Build the runner script based on effective runner type
@@ -338,7 +345,11 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
 
   // Build env vars for the runner command
   const env: Record<string, string> = {
-    AGENT_PLANE_RUN_ID: config.runId,
+    AGENT_PLANE_MESSAGE_ID: config.messageId,
+    // AGENT_PLANE_RUN_ID is preserved as an alias for the runner-internal
+    // transcript path naming (transcript-<id>.ndjson), so the in-sandbox
+    // template can stay neutral about which name we emit upstream.
+    AGENT_PLANE_RUN_ID: config.messageId,
     AGENT_PLANE_AGENT_ID: config.agent.id,
     AGENT_PLANE_TENANT_ID: config.tenantId,
     AGENT_PLANE_PLATFORM_URL: config.platformApiUrl,
@@ -358,8 +369,8 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   if (braintrustKey) {
     env.BRAINTRUST_API_KEY = braintrustKey;
   }
-  if (config.runToken) {
-    env.AGENT_PLANE_RUN_TOKEN = config.runToken;
+  if (config.messageToken) {
+    env.AGENT_PLANE_MESSAGE_TOKEN = config.messageToken;
   }
   // Build MCP servers config — inject agentco bridge alongside other servers
   const mcpServersForRunner: Record<string, unknown> = { ...config.mcpServers };
@@ -388,7 +399,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInsta
   });
 
   logger.info("Sandbox started", {
-    run_id: config.runId,
+    message_id: config.messageId,
     sandbox_id: sandbox.sandboxId,
     has_callback_bridge: bridgeFiles.length > 0,
     callback_url: config.callbackData?.url,
@@ -734,14 +745,14 @@ function claudeSdkErrorAndCleanup(): string {
     });
   }
 
-  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_RUN_TOKEN) {
+  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_MESSAGE_TOKEN) {
     try {
       const { readFileSync } = await import('fs');
       const transcript = readFileSync(transcriptPath);
-      await fetch(process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/runs/' + process.env.AGENT_PLANE_RUN_ID + '/transcript', {
+      await fetch(process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/messages/' + process.env.AGENT_PLANE_MESSAGE_ID + '/transcript', {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer ' + process.env.AGENT_PLANE_RUN_TOKEN,
+          'Authorization': 'Bearer ' + process.env.AGENT_PLANE_MESSAGE_TOKEN,
           'Content-Type': 'application/x-ndjson',
         },
         body: transcript,
@@ -786,7 +797,7 @@ const prompt = ${JSON.stringify(effectivePrompt)};
 async function main() {
   emit({
     type: 'run_started',
-    run_id: process.env.AGENT_PLANE_RUN_ID,
+    message_id: process.env.AGENT_PLANE_MESSAGE_ID,
     agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
@@ -829,8 +840,10 @@ export interface SessionSandboxInstance extends SandboxInstance {
   runMessage(opts: {
     prompt: string;
     sdkSessionId: string | null;
-    runId: string;
-    runToken: string;
+    /** Per-message id; runner emits this back via run_started.message_id. */
+    messageId: string;
+    /** Bearer token bound to this messageId; runner uses it for transcript upload. */
+    messageToken: string;
     maxTurns: number;
     maxBudgetUsd: number;
   }): Promise<{ logs: () => AsyncIterable<string> }>;
@@ -1141,15 +1154,17 @@ function buildSessionSandboxInstance(
             mcpErrors: currentMcpErrors,
           });
 
-      const runnerFilename = `runner-${opts.runId}.mjs`;
+      const runnerFilename = `runner-${opts.messageId}.mjs`;
       await sandbox.writeFiles([
         { path: `/vercel/sandbox/${runnerFilename}`, content: Buffer.from(runnerScript) },
       ]);
 
       const env = {
         ...baseEnv,
-        AGENT_PLANE_RUN_ID: opts.runId,
-        AGENT_PLANE_RUN_TOKEN: opts.runToken,
+        AGENT_PLANE_MESSAGE_ID: opts.messageId,
+        // Alias kept for the in-sandbox transcript-<id>.ndjson convention.
+        AGENT_PLANE_RUN_ID: opts.messageId,
+        AGENT_PLANE_MESSAGE_TOKEN: opts.messageToken,
       };
 
       const command = await sandbox.runCommand({
@@ -1200,11 +1215,11 @@ const sdkSessionId = ${JSON.stringify(config.sdkSessionId)};
 async function main() {
   emit({
     type: 'run_started',
-    run_id: process.env.AGENT_PLANE_RUN_ID,
+    message_id: process.env.AGENT_PLANE_MESSAGE_ID,
     agent_id: process.env.AGENT_PLANE_AGENT_ID,
     model: config.model,
     timestamp: new Date().toISOString(),
-    session_id: sdkSessionId,
+    sdk_session_id: sdkSessionId,
     mcp_server_count: Object.keys(mcpServers).length,
     mcp_errors: ${JSON.stringify(config.mcpErrors)},
   });

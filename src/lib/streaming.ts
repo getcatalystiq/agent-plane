@@ -1,18 +1,20 @@
 import { logger } from "./logger";
-import type { RunId } from "./types";
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STREAM_DETACH_MS = 4.5 * 60 * 1000; // 4.5 minutes
 
 interface StreamOptions {
-  runId: RunId;
+  /** Per-message identifier used in stream_detached poll URL + log lines. */
+  messageId: string;
+  /** Parent session id; included in detach event so clients can poll the session. */
+  sessionId: string;
   logIterator: AsyncIterable<string>;
   onDetach?: () => void;
 }
 
 export function createNdjsonStream(options: StreamOptions): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  const { runId, logIterator, onDetach } = options;
+  const { messageId, sessionId, logIterator, onDetach } = options;
 
   let iterator: AsyncIterator<string>;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -39,12 +41,15 @@ export function createNdjsonStream(options: StreamOptions): ReadableStream<Uint8
           }
         }, HEARTBEAT_INTERVAL_MS);
 
-        // Set up detach timer for long runs
+        // Set up detach timer for long-running messages
         detachTimer = setTimeout(() => {
           detached = true;
           const event = JSON.stringify({
             type: "stream_detached",
-            poll_url: `/api/runs/${runId}`,
+            session_id: sessionId,
+            message_id: messageId,
+            poll_url: `/api/sessions/${sessionId}/messages/${messageId}`,
+            stream_url: `/api/sessions/${sessionId}/messages/${messageId}/stream`,
             timestamp: new Date().toISOString(),
           });
           controller.enqueue(encoder.encode(event + "\n"));
@@ -69,7 +74,8 @@ export function createNdjsonStream(options: StreamOptions): ReadableStream<Uint8
         controller.enqueue(encoder.encode(line));
       } catch (err) {
         logger.error("Stream read error", {
-          run_id: runId,
+          message_id: messageId,
+          session_id: sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
         cleanup();

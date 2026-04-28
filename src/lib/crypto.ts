@@ -120,11 +120,14 @@ export function generateId(): string {
   return uuidv4();
 }
 
-// --- Run Token (HMAC-based) ---
-// Derives a run-scoped bearer token from the run ID using HMAC-SHA256.
-// No DB storage needed — verifiable by recomputing the HMAC.
+// --- Message Token (HMAC-based) ---
+// Derives a message-scoped bearer token from the session_message ID using
+// HMAC-SHA256. No DB storage needed — verifiable by recomputing the HMAC.
+// The verifier MUST take the URL's messageId param and confirm the token's
+// bound messageId matches: a token minted for message A must not be accepted
+// on the URL for message B.
 
-export async function generateRunToken(runId: string, encryptionKey: string): Promise<string> {
+export async function generateMessageToken(messageId: string, encryptionKey: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     hexToBuffer(encryptionKey),
@@ -132,13 +135,13 @@ export async function generateRunToken(runId: string, encryptionKey: string): Pr
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(runId));
-  return `runtok_${bufferToHex(signature)}`;
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(messageId));
+  return `msgtok_${bufferToHex(signature)}`;
 }
 
-export async function verifyRunToken(token: string, runId: string, encryptionKey: string): Promise<boolean> {
-  if (!token.startsWith("runtok_")) return false;
-  const expected = await generateRunToken(runId, encryptionKey);
+export async function verifyMessageToken(token: string, messageId: string, encryptionKey: string): Promise<boolean> {
+  if (!token.startsWith("msgtok_")) return false;
+  const expected = await generateMessageToken(messageId, encryptionKey);
   return timingSafeEqual(token, expected);
 }
 

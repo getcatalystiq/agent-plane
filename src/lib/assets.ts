@@ -23,7 +23,7 @@ const MIME_TO_EXT: Record<string, string> = {
 async function downloadAndStoreAsset(
   url: string,
   tenantId: string,
-  runId: string,
+  messageId: string,
 ): Promise<string | null> {
   try {
     const response = await fetch(url);
@@ -38,7 +38,7 @@ async function downloadAndStoreAsset(
     const contentType =
       response.headers.get("content-type") || "application/octet-stream";
     const ext = MIME_TO_EXT[contentType] || "bin";
-    const path = `assets/${tenantId}/${runId}/${randomUUID()}.${ext}`;
+    const path = `assets/${tenantId}/${messageId}/${randomUUID()}.${ext}`;
 
     const buffer = Buffer.from(await response.arrayBuffer());
 
@@ -49,7 +49,7 @@ async function downloadAndStoreAsset(
     });
 
     logger.info("Asset stored", {
-      run_id: runId,
+      message_id: messageId,
       tenant_id: tenantId,
       blob_url: blob.url,
       content_type: contentType,
@@ -74,7 +74,7 @@ async function downloadAndStoreAsset(
 export async function processLineAssets(
   line: string,
   tenantId: string,
-  runId: string,
+  messageId: string,
 ): Promise<string> {
   // Fast path: skip lines that can't contain Composio URLs
   if (!line.includes("r2.cloudflarestorage.com")) {
@@ -86,7 +86,7 @@ export async function processLineAssets(
 
   let result = line;
   for (const url of urls) {
-    const blobUrl = await downloadAndStoreAsset(url, tenantId, runId);
+    const blobUrl = await downloadAndStoreAsset(url, tenantId, messageId);
     if (blobUrl) {
       result = result.replaceAll(url, blobUrl);
     }

@@ -1,21 +1,22 @@
 import { processLineAssets } from "./assets";
 import { logger } from "./logger";
 import { listCatalogModels } from "./model-catalog";
-import type { RunId, RunStatus, TenantId } from "./types";
+import type { TenantId } from "./types";
+import type { SessionMessageStatus } from "./validation";
 
 const MAX_TRANSCRIPT_EVENTS = 10_000;
 
 /**
- * Fallback when a transcript has no terminal `result` or `error` event. A run
- * that uploads a transcript but didn't emit a result was cut off mid-flight
- * — most often by a Claude rate-limit hit (subscription mode with overage
- * disabled silently exits the SDK iterator), sandbox termination, or a
- * Vercel function lifecycle boundary. We must NOT mark these `completed`:
+ * Fallback when a transcript has no terminal `result` or `error` event. A
+ * message that uploads a transcript but didn't emit a result was cut off
+ * mid-flight — most often by a Claude rate-limit hit (subscription mode with
+ * overage disabled silently exits the SDK iterator), sandbox termination, or
+ * a Vercel function lifecycle boundary. We must NOT mark these `completed`:
  * doing so hides the partial-execution state from operators and confuses
  * downstream "did this work" decisions.
  */
 export const NO_TERMINAL_EVENT_FALLBACK: {
-  status: RunStatus;
+  status: SessionMessageStatus;
   updates: Record<string, unknown>;
 } = {
   status: "failed",
@@ -35,17 +36,17 @@ export function scrubSecrets(text: string): string {
 }
 
 /**
- * Parse the last NDJSON line of a transcript to extract run result metadata.
- * Shared between run-executor and session-executor.
+ * Parse the last NDJSON line of a transcript to extract message result
+ * metadata. Used by the dispatcher to finalize a session_message.
  */
 export async function parseResultEvent(line: string): Promise<{
-  status: RunStatus;
+  status: SessionMessageStatus;
   updates: Record<string, unknown>;
 } | null> {
   try {
     const event = JSON.parse(line);
     if (event.type === "result") {
-      const status: RunStatus =
+      const status: SessionMessageStatus =
         event.subtype === "success" ? "completed" : "failed";
 
       // Compute cost from token usage + catalog pricing when runner doesn't provide it
@@ -98,16 +99,25 @@ export async function parseResultEvent(line: string): Promise<{
 
 /**
  * Capture transcript events from a log stream, processing assets and
- * enforcing a max event limit. Shared between run-executor and session-executor.
+ * enforcing a max event limit. Used by the dispatcher.
+ *
+ * Truncation rules (MUST preserve — guards a critical institutional learning,
+ * see docs/solutions/logic-errors/transcript-capture-and-streaming-fixes.md):
+ *   1. result/error events MUST survive the MAX_TRANSCRIPT_EVENTS cap so
+ *      finalize doesn't lose billing/token data.
+ *   2. text_delta events MUST NOT enter the chunks array — they bloat blob
+ *      storage with token-level deltas that are duplicated by the final
+ *      assistant event.
  *
  * @param onEvent - Optional callback invoked for each parsed JSON event before
- *   processing. Used by sessions to capture sdk_session_id from session_info events.
+ *   processing. Used by the dispatcher to capture sdk_session_id from
+ *   session_info events.
  */
 export async function* captureTranscript(
   source: AsyncIterable<string>,
   chunks: string[],
   tenantId: TenantId,
-  runId: RunId,
+  messageId: string,
   onEvent?: (parsed: Record<string, unknown>) => void,
 ): AsyncGenerator<string> {
   let truncated = false;
@@ -131,7 +141,7 @@ export async function* captureTranscript(
       try {
         const parsed = JSON.parse(trimmed);
         if (parsed.type === "result" || parsed.type === "error") {
-          const processed = scrubSecrets(await processLineAssets(trimmed, tenantId, runId));
+          const processed = scrubSecrets(await processLineAssets(trimmed, tenantId, messageId));
           chunks.push(processed);
           yield processed;
           continue;
@@ -141,7 +151,7 @@ export async function* captureTranscript(
       }
       yield scrubSecrets(trimmed);
     } else {
-      const processed = scrubSecrets(await processLineAssets(trimmed, tenantId, runId));
+      const processed = scrubSecrets(await processLineAssets(trimmed, tenantId, messageId));
       const isTextDelta = (() => {
         try { return JSON.parse(processed).type === "text_delta"; } catch { return false; }
       })();
@@ -154,7 +164,7 @@ export async function* captureTranscript(
       } else {
         truncated = true;
         chunks.push(JSON.stringify({ type: "system", message: `Transcript truncated at ${MAX_TRANSCRIPT_EVENTS} events` }));
-        logger.warn("Transcript truncated", { run_id: runId, max: MAX_TRANSCRIPT_EVENTS });
+        logger.warn("Transcript truncated", { message_id: messageId, max: MAX_TRANSCRIPT_EVENTS });
       }
       yield processed;
     }

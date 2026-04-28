@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { query, queryOne, execute, withTenantTransaction } from "@/db";
-import { SessionRow, AgentRowInternal, AgentInternal } from "./validation";
-import { checkTenantBudget } from "./runs";
+import { SessionRow, AgentRowInternal, type AgentInternal } from "./validation";
+import { checkTenantBudget } from "./session-messages";
 import { supportsClaudeRunner } from "./models";
 import { logger } from "./logger";
 import {
@@ -9,18 +9,54 @@ import {
   ConflictError,
   ConcurrencyLimitError,
 } from "./errors";
-import type { SessionStatus, TenantId, AgentId } from "./types";
+import type { SessionStatus, TenantId, AgentId, RunTriggeredBy } from "./types";
 import { SESSION_VALID_TRANSITIONS } from "./types";
 
-const MAX_CONCURRENT_SESSIONS = 50;
+/**
+ * Tenant cap on concurrent active sessions. The cap counts only sessions in
+ * `creating` or `active` — `idle` does NOT count. The check uses a single
+ * SQL statement that both reads count and inserts atomically (TOCTOU-safe),
+ * mirroring the legacy `MAX_CONCURRENT_RUNS` pattern.
+ */
+export const MAX_CONCURRENT_SESSIONS = 50;
+
+/** Hard wall-clock cap on a session's lifetime regardless of idle TTL. */
+const SESSION_EXPIRES_AFTER_INTERVAL = "4 hours";
+
+/** Per-trigger idle TTL mapping (seconds). See R3/R4 in the plan. */
+export function defaultIdleTtlSeconds(triggeredBy: RunTriggeredBy): number {
+  switch (triggeredBy) {
+    case "schedule":
+      return 300; // 5 min — short operator follow-up window
+    case "playground":
+    case "chat":
+      return 600; // 10 min default
+    case "api":
+    case "webhook":
+    case "a2a":
+    default:
+      return 600;
+  }
+}
 
 export type Session = z.infer<typeof SessionRow>;
 
-// Atomic session creation with concurrent session check (prevents TOCTOU)
+/**
+ * Atomic session creation with concurrent-session cap (TOCTOU-safe). The cap
+ * counts only `status IN ('creating', 'active')` — idle sessions are free
+ * until cleanup. Mirrors the legacy `MAX_CONCURRENT_RUNS` pattern.
+ *
+ * Sets `expires_at` to created_at + 4h.
+ */
 export async function createSession(
   tenantId: TenantId,
   agentId: AgentId,
-  options?: { contextId?: string },
+  options?: {
+    contextId?: string;
+    ephemeral?: boolean;
+    idleTtlSeconds?: number;
+    triggeredBy?: RunTriggeredBy;
+  },
 ): Promise<{ session: Session; agent: AgentInternal; remainingBudget: number }> {
   return withTenantTransaction(tenantId, async (tx) => {
     const agent = await tx.queryOne(
@@ -34,27 +70,41 @@ export async function createSession(
     const remainingBudget = await checkTenantBudget(tx, tenantId, { isSubscriptionRun });
 
     const contextId = options?.contextId ?? null;
+    const ephemeral = options?.ephemeral ?? false;
+    const idleTtlSeconds = options?.idleTtlSeconds ?? defaultIdleTtlSeconds(options?.triggeredBy ?? "api");
+
     const result = await tx.queryOne(
       SessionRow,
-      `INSERT INTO sessions (tenant_id, agent_id, status, context_id)
-       SELECT $1, $2, 'creating', $4
-       WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active', 'idle')) < $3
+      `INSERT INTO sessions (tenant_id, agent_id, status, context_id, ephemeral, idle_ttl_seconds, expires_at)
+       SELECT $1, $2, 'creating', $4, $5, $6, NOW() + INTERVAL '${SESSION_EXPIRES_AFTER_INTERVAL}'
+       WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active')) < $3
        RETURNING *`,
-      [tenantId, agentId, MAX_CONCURRENT_SESSIONS, contextId],
+      [tenantId, agentId, MAX_CONCURRENT_SESSIONS, contextId, ephemeral, idleTtlSeconds],
     );
 
     if (!result) {
       throw new ConcurrencyLimitError(
-        `Maximum of ${MAX_CONCURRENT_SESSIONS} concurrent sessions per tenant`,
+        `Maximum of ${MAX_CONCURRENT_SESSIONS} concurrent active sessions per tenant`,
       );
     }
 
-    logger.info("Session created", { session_id: result.id, agent_id: agentId, tenant_id: tenantId, context_id: contextId });
+    logger.info("Session created", {
+      session_id: result.id,
+      agent_id: agentId,
+      tenant_id: tenantId,
+      context_id: contextId,
+      ephemeral,
+      idle_ttl_seconds: idleTtlSeconds,
+    });
     return { session: result, agent, remainingBudget };
   });
 }
 
-// Find an active/idle session by A2A contextId
+/**
+ * Find a non-stopped session by A2A contextId. Preserves the legacy
+ * implementation; the unique partial index in migration 033 enforces at most
+ * one non-stopped row per (tenant, agent, context_id).
+ */
 export async function findSessionByContextId(
   tenantId: TenantId,
   agentId: AgentId,
@@ -109,7 +159,12 @@ export async function listSessions(
   );
 }
 
-// Status state machine transition
+/**
+ * Generic state-machine transition. Validates against
+ * SESSION_VALID_TRANSITIONS, then writes via a CAS UPDATE
+ * (`WHERE status = fromStatus`) so concurrent transitions can't bypass the
+ * machine. Returns false if the row is in the wrong state.
+ */
 export async function transitionSessionStatus(
   sessionId: string,
   tenantId: TenantId,
@@ -123,7 +178,6 @@ export async function transitionSessionStatus(
     last_backup_at?: string;
     mcp_refreshed_at?: string;
     idle_since?: string | null;
-    last_message_at?: string;
   },
 ): Promise<boolean> {
   if (!SESSION_VALID_TRANSITIONS[fromStatus]?.includes(toStatus)) {
@@ -141,7 +195,7 @@ export async function transitionSessionStatus(
 
   const ALLOWED_COLUMNS = new Set([
     "sandbox_id", "sdk_session_id", "session_blob_url",
-    "message_count", "last_backup_at", "mcp_refreshed_at", "idle_since", "last_message_at",
+    "message_count", "last_backup_at", "mcp_refreshed_at", "idle_since",
   ]);
 
   if (updates) {
@@ -177,7 +231,82 @@ export async function transitionSessionStatus(
   return true;
 }
 
-// Stop a session: transition to stopped, clear sandbox_id
+/**
+ * Atomic CAS idle → active. Returns the row when it acquired the lock, or
+ * `null` when the row was not in `idle` state (caller decides whether to
+ * surface 410 Gone or auto-create a fresh session).
+ */
+export async function casIdleToActive(
+  sessionId: string,
+  tenantId: TenantId,
+): Promise<Session | null> {
+  const row = await queryOne(
+    SessionRow,
+    `UPDATE sessions
+     SET status = 'active', idle_since = NULL
+     WHERE id = $1 AND tenant_id = $2 AND status = 'idle'
+     RETURNING *`,
+    [sessionId, tenantId],
+  );
+  return row ?? null;
+}
+
+/**
+ * Atomic CAS creating → active. Used after sandbox boot completes for a
+ * brand-new session.
+ */
+export async function casCreatingToActive(
+  sessionId: string,
+  tenantId: TenantId,
+  updates?: { sandbox_id?: string },
+): Promise<Session | null> {
+  const setClauses = ["status = 'active'"];
+  const params: unknown[] = [sessionId, tenantId];
+  let idx = 3;
+  if (updates?.sandbox_id !== undefined) {
+    setClauses.push(`sandbox_id = $${idx}`);
+    params.push(updates.sandbox_id);
+    idx++;
+  }
+  const row = await queryOne(
+    SessionRow,
+    `UPDATE sessions
+     SET ${setClauses.join(", ")}
+     WHERE id = $1 AND tenant_id = $2 AND status = 'creating'
+     RETURNING *`,
+    params,
+  );
+  return row ?? null;
+}
+
+/**
+ * Atomic CAS to stopped from any non-stopped state. Used by cancel + cleanup
+ * cron. Idempotent: returns the row regardless of whether the transition
+ * actually fired.
+ */
+export async function casToStopped(
+  sessionId: string,
+  tenantId: TenantId,
+): Promise<Session> {
+  const row = await queryOne(
+    SessionRow,
+    `UPDATE sessions
+     SET status = 'stopped', sandbox_id = NULL, idle_since = NULL
+     WHERE id = $1 AND tenant_id = $2 AND status <> 'stopped'
+     RETURNING *`,
+    [sessionId, tenantId],
+  );
+  if (row) return row;
+  // Already stopped — return current row.
+  return getSession(sessionId, tenantId);
+}
+
+/**
+ * Stop a session: transition to stopped, clear sandbox_id. Throws ConflictError
+ * only when the row is in a state with no `stopped` successor — which never
+ * happens with the current state machine (every state lists `stopped`), so
+ * this is essentially the public-route wrapper around `casToStopped`.
+ */
 export async function stopSession(sessionId: string, tenantId: TenantId): Promise<Session> {
   const session = await getSession(sessionId, tenantId);
 
@@ -201,26 +330,36 @@ export async function stopSession(sessionId: string, tenantId: TenantId): Promis
   return getSession(sessionId, tenantId);
 }
 
-// Increment message count and update last_message_at atomically
 export async function incrementMessageCount(sessionId: string, tenantId: TenantId): Promise<void> {
   await execute(
-    `UPDATE sessions SET message_count = message_count + 1, last_message_at = NOW()
+    `UPDATE sessions SET message_count = message_count + 1
      WHERE id = $1 AND tenant_id = $2`,
     [sessionId, tenantId],
   );
 }
 
-// Find idle sessions past threshold — no RLS, used by cleanup cron
-export async function getIdleSessions(maxIdleMinutes: number): Promise<Session[]> {
+/**
+ * Find idle sessions whose per-row idle TTL has elapsed. No RLS — used by
+ * cleanup cron. Signature changed from the legacy `(maxIdleMinutes: number)`
+ * to `()` since each session now carries its own `idle_ttl_seconds` (set by
+ * the dispatcher per the trigger table).
+ */
+export async function getIdleSessions(): Promise<Session[]> {
   return query(
     SessionRow,
     `SELECT * FROM sessions
-     WHERE status = 'idle' AND idle_since < NOW() - INTERVAL '1 minute' * $1`,
-    [maxIdleMinutes],
+     WHERE status = 'idle'
+       AND idle_since IS NOT NULL
+       AND idle_since < NOW() - INTERVAL '1 second' * idle_ttl_seconds`,
+    [],
   );
 }
 
-// Find stuck sessions — no RLS, used by cleanup cron watchdog
+/**
+ * Watchdog: sessions stuck in `creating` (sandbox-boot timed out) for
+ * >5 minutes, or `active` (runner crashed mid-message) for >30 minutes.
+ * No RLS — used by cleanup cron.
+ */
 export async function getStuckSessions(): Promise<Session[]> {
   return query(
     SessionRow,
@@ -231,7 +370,20 @@ export async function getStuckSessions(): Promise<Session[]> {
   );
 }
 
-// Update sandbox_id for a session (used after sandbox creation or reconnection)
+/**
+ * Sessions past their hard `expires_at` cap (4h wall-clock from creation),
+ * regardless of state. No RLS — used by cleanup cron. Caps the
+ * contextId-reuse warm-sandbox attack window.
+ */
+export async function getExpiredSessions(): Promise<Session[]> {
+  return query(
+    SessionRow,
+    `SELECT * FROM sessions
+     WHERE status <> 'stopped' AND expires_at < NOW()`,
+    [],
+  );
+}
+
 export async function updateSessionSandbox(
   sessionId: string,
   tenantId: TenantId,
@@ -246,7 +398,6 @@ export async function updateSessionSandbox(
   }
 }
 
-// Update mcp_refreshed_at timestamp (used after MCP token refresh)
 export async function updateSessionMcpRefreshedAt(
   sessionId: string,
   tenantId: TenantId,
