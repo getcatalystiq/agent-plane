@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query, queryOne } from "@/db";
 import { withErrorHandler } from "@/lib/api";
-import { SessionRow, RunRow } from "@/lib/validation";
-import { stopSession } from "@/lib/sessions";
-import { reconnectSandbox } from "@/lib/sandbox";
+import { SessionRow, SessionMessageRow } from "@/lib/validation";
+import { cancelSession } from "@/lib/dispatcher";
 import { NotFoundError } from "@/lib/errors";
-import { logger } from "@/lib/logger";
 import type { TenantId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +11,7 @@ export const dynamic = "force-dynamic";
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const { sessionId } = await context!.params;
 
-  // Admin: no RLS — query directly
+  // Admin: no RLS — query directly.
   const session = await queryOne(
     SessionRow,
     "SELECT * FROM sessions WHERE id = $1",
@@ -21,14 +19,18 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   );
   if (!session) throw new NotFoundError("Session not found");
 
-  // Get session runs
-  const runs = await query(
-    RunRow,
-    "SELECT * FROM runs WHERE session_id = $1 ORDER BY created_at ASC",
+  const messages = await query(
+    SessionMessageRow,
+    `SELECT m.*, a.name AS agent_name, a.model AS agent_model, s.agent_id
+     FROM session_messages m
+     LEFT JOIN sessions s ON m.session_id = s.id
+     LEFT JOIN agents a ON s.agent_id = a.id
+     WHERE m.session_id = $1
+     ORDER BY m.created_at ASC`,
     [sessionId],
   );
 
-  return NextResponse.json({ ...session, runs });
+  return NextResponse.json({ ...session, messages });
 });
 
 export const DELETE = withErrorHandler(async (request: NextRequest, context) => {
@@ -41,19 +43,6 @@ export const DELETE = withErrorHandler(async (request: NextRequest, context) => 
   );
   if (!session) throw new NotFoundError("Session not found");
 
-  // Stop sandbox if alive
-  if (session.sandbox_id) {
-    try {
-      const sandbox = await reconnectSandbox(session.sandbox_id);
-      if (sandbox) await sandbox.stop();
-    } catch (err) {
-      logger.warn("Failed to stop sandbox during admin session delete", {
-        session_id: sessionId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  const stopped = await stopSession(sessionId, session.tenant_id as TenantId);
-  return NextResponse.json(stopped);
+  await cancelSession(sessionId, session.tenant_id as TenantId);
+  return new Response(null, { status: 204 });
 });

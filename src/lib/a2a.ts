@@ -23,7 +23,7 @@ import { prepareRunExecution, finalizeRun } from "@/lib/run-executor";
 import { prepareSessionSandbox, finalizeSessionMessage } from "@/lib/session-executor";
 import { findSessionByContextId, createSession, transitionSessionStatus } from "@/lib/sessions";
 import { captureTranscript } from "@/lib/transcript-utils";
-import { generateRunToken } from "@/lib/crypto";
+import { generateMessageToken } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 import type { CallbackData } from "@/lib/mcp";
 import { reconnectSandbox, type SessionSandboxInstance } from "@/lib/sandbox";
@@ -756,7 +756,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
     );
 
     const env = getEnv();
-    const runToken = await generateRunToken(run.id as RunId, env.ENCRYPTION_KEY);
+    const runToken = await generateMessageToken(run.id as RunId, env.ENCRYPTION_KEY);
 
     // Transition run to running
     await transitionRunStatus(run.id as RunId, tenantId, "pending", "running", {
@@ -895,7 +895,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
     }
 
     const env = getEnv();
-    const runToken = await generateRunToken(run.id as RunId, env.ENCRYPTION_KEY);
+    const runToken = await generateMessageToken(run.id as RunId, env.ENCRYPTION_KEY);
 
     // Transition run to running
     await transitionRunStatus(run.id as RunId, tenantId, "pending", "running", {

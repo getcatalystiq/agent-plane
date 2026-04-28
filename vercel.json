@@ -9,8 +9,8 @@
     { "path": "/api/cron/refresh-snapshot", "schedule": "0 4 * * *" }
   ],
   "functions": {
-    "app/api/runs/**": { "supportsCancellation": true },
     "app/api/sessions/**": { "supportsCancellation": true },
+    "app/api/admin/sessions/**": { "supportsCancellation": true },
     "app/api/a2a/**": { "supportsCancellation": true }
   }
 }
