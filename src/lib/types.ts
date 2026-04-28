@@ -22,22 +22,15 @@ export type WebhookDeliveryId = string & { readonly __brand: "WebhookDeliveryId"
  */
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function requireSessionId(s: string): SessionId {
-  if (!UUID_REGEX.test(s)) throw new Error("Invalid SessionId format");
-  return s as SessionId;
-}
-export function requireSessionMessageId(s: string): SessionMessageId {
-  if (!UUID_REGEX.test(s)) throw new Error("Invalid SessionMessageId format");
-  return s as SessionMessageId;
-}
-export function requireTenantId(s: string): TenantId {
-  if (!UUID_REGEX.test(s)) throw new Error("Invalid TenantId format");
-  return s as TenantId;
-}
-export function requireAgentId(s: string): AgentId {
-  if (!UUID_REGEX.test(s)) throw new Error("Invalid AgentId format");
-  return s as AgentId;
-}
+const requireBranded = <B>(label: string) => (s: string): B => {
+  if (!UUID_REGEX.test(s)) throw new Error(`Invalid ${label} format`);
+  return s as unknown as B;
+};
+
+export const requireSessionId = requireBranded<SessionId>("SessionId");
+export const requireSessionMessageId = requireBranded<SessionMessageId>("SessionMessageId");
+export const requireTenantId = requireBranded<TenantId>("TenantId");
+export const requireAgentId = requireBranded<AgentId>("AgentId");
 
 export interface AgentPlugin {
   marketplace_id: PluginMarketplaceId;

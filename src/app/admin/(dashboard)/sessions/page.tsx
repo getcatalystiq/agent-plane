@@ -125,8 +125,10 @@ async function SessionsListServer({
 
   const whereSql = whereParts.join(" AND ");
 
-  // FIX #11 (perf-001): collapse 3 correlated subqueries (per row!) into one
-  // LEFT LATERAL aggregate. Reuses idx_session_messages_session_created.
+  // FIX #11 (perf-001): keep the SUM + MAX aggregate inside the LATERAL but
+  // serve `latest_trigger` from a one-row LIMIT 1 subquery. The previous
+  // ARRAY_AGG materialized every triggered_by per session; the LIMIT 1 form
+  // hits idx_session_messages_session_created with a single index fetch.
   const listSql = `
     SELECT
       s.id,
@@ -141,35 +143,41 @@ async function SessionsListServer({
       s.updated_at,
       COALESCE(agg.total_cost, 0) AS total_cost_usd,
       agg.latest_activity AS latest_activity,
-      agg.latest_trigger AS latest_trigger
+      latest.triggered_by AS latest_trigger
     FROM sessions s
     JOIN agents a ON a.id = s.agent_id
     LEFT JOIN LATERAL (
       SELECT
         SUM(m.cost_usd) AS total_cost,
-        MAX(COALESCE(m.completed_at, m.created_at)) AS latest_activity,
-        (ARRAY_AGG(m.triggered_by ORDER BY m.created_at DESC))[1] AS latest_trigger
+        MAX(COALESCE(m.completed_at, m.created_at)) AS latest_activity
       FROM session_messages m
       WHERE m.session_id = s.id
     ) agg ON true
-    WHERE ${whereSql}
+    LEFT JOIN LATERAL (
+      SELECT triggered_by
+      FROM session_messages
+      WHERE session_id = s.id
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) latest ON true
+    WHERE ${whereSql.replace(/agg\.latest_trigger/g, "latest.triggered_by")}
     ORDER BY ${orderBy}
     LIMIT $${p++} OFFSET $${p}`;
 
   const listParams = [...params, pageSize, offset];
 
-  // The count query also needs the LATERAL when sourceFilter is active so the
-  // `agg.latest_trigger` predicate can be evaluated. Without source filtering
-  // we can skip it (cheap aggregate over sessions only).
+  // The count query also needs `latest_trigger` when sourceFilter is active.
+  // Same LIMIT 1 subquery; no full-message aggregation required.
   const countSql = sourceFilter
     ? `
       SELECT COUNT(*)::int AS total
       FROM sessions s
       LEFT JOIN LATERAL (
-        SELECT
-          (ARRAY_AGG(m.triggered_by ORDER BY m.created_at DESC))[1] AS latest_trigger
+        SELECT triggered_by AS latest_trigger
         FROM session_messages m
         WHERE m.session_id = s.id
+        ORDER BY m.created_at DESC
+        LIMIT 1
       ) agg ON true
       WHERE ${whereSql}`
     : `

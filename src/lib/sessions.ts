@@ -18,12 +18,78 @@ import { SESSION_VALID_TRANSITIONS } from "./types";
  * mirroring the legacy `MAX_CONCURRENT_RUNS` pattern.
  */
 export const MAX_CONCURRENT_SESSIONS = 50;
+export const MAX_CONCURRENT_ACTIVE_SESSIONS = MAX_CONCURRENT_SESSIONS;
+
+/** Reasons we record on cleanup-cron sandbox stops (telemetry / log filter). */
+export type CleanupReason =
+  | "expired"
+  | "idle_ttl"
+  | "creating_watchdog"
+  | "active_watchdog"
+  | "orphan_sandbox";
+
+/** Error types written into session_messages.error_type by the cleanup cron. */
+export type CleanupErrorType =
+  | "session_expired"
+  | "watchdog_creating_timeout"
+  | "watchdog_active_timeout";
 
 /**
- * FIX #15: alias re-exported from session-messages.ts callers. Single source
- * of truth lives here; session-messages.ts re-exports for backward-compat.
+ * Per-tenant tx-scoped advisory lock used by every dispatch / session-create
+ * path. Two concurrent dispatches for the same tenant serialize at this line;
+ * the lock auto-releases on commit/rollback. Centralized so the lock-key
+ * string lives in exactly one place — drift would silently break the TOCTOU
+ * guarantee.
  */
-export const MAX_CONCURRENT_ACTIVE_SESSIONS = MAX_CONCURRENT_SESSIONS;
+export async function acquireSessionCapLock(
+  tx: { execute: (sql: string, params?: unknown[]) => Promise<unknown> },
+  tenantId: TenantId,
+): Promise<void> {
+  await tx.execute(
+    `SELECT pg_advisory_xact_lock(hashtext('session_cap:' || $1::text))`,
+    [tenantId],
+  );
+}
+
+/**
+ * Force a session to `stopped` regardless of current state, clearing
+ * sandbox_id and idle_since. Returns the previously-stored sandbox_id (so the
+ * caller can stop the sandbox once and only once); null when the row was
+ * already stopped (or vanished).
+ */
+export async function forceStopSession(sessionId: string): Promise<string | null> {
+  const result = await query(
+    z.object({ sandbox_id: z.string().nullable() }),
+    `UPDATE sessions
+     SET status = 'stopped', sandbox_id = NULL, idle_since = NULL
+     WHERE id = $1 AND status <> 'stopped'
+     RETURNING sandbox_id`,
+    [sessionId],
+  );
+  return result[0]?.sandbox_id ?? null;
+}
+
+/**
+ * CAS variant of forceStopSession that ONLY transitions sessions in
+ * `creating` / `idle` to `stopped`. Used by the expires_at sweep so we never
+ * yank an `active` session out from under a streaming runner mid-message.
+ *
+ * FIX #5 (adv-004): the legacy expires_at sweep called the unconditional
+ * variant, killing active sessions and provoking a 409 race in the runner's
+ * transcript upload. Active sessions that are genuinely stuck are caught by
+ * the active-watchdog (30 min) instead.
+ */
+export async function casExpireToStopped(sessionId: string): Promise<string | null> {
+  const result = await query(
+    z.object({ sandbox_id: z.string().nullable() }),
+    `UPDATE sessions
+     SET status = 'stopped', sandbox_id = NULL, idle_since = NULL
+     WHERE id = $1 AND status IN ('creating', 'idle')
+     RETURNING sandbox_id`,
+    [sessionId],
+  );
+  return result[0]?.sandbox_id ?? null;
+}
 
 /** Hard wall-clock cap on a session's lifetime regardless of idle TTL. */
 export const SESSION_EXPIRES_AFTER_INTERVAL = "4 hours";
@@ -67,10 +133,7 @@ export async function createSession(
     // FIX #3 (adv-001): TOCTOU-safe concurrency cap via tx-scoped advisory
     // lock keyed on tenant_id. Plain INSERT...WHERE (SELECT COUNT) is not
     // serializable under READ COMMITTED. The lock auto-releases on commit.
-    await tx.execute(
-      `SELECT pg_advisory_xact_lock(hashtext('session_cap:' || $1::text))`,
-      [tenantId],
-    );
+    await acquireSessionCapLock(tx, tenantId);
 
     const agent = await tx.queryOne(
       AgentRowInternal,

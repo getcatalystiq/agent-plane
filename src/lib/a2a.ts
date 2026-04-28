@@ -655,7 +655,7 @@ export class SandboxAgentExecutor implements AgentExecutor {
           callbackData: parsedCallbackData,
           extraAllowedHostnames: callbackHostname ? [callbackHostname] : undefined,
           platformApiUrl: this.deps.platformApiUrl,
-          maxBudgetUsdOverride: this.deps.requestedMaxBudget,
+          overrides: { maxBudgetUsd: this.deps.requestedMaxBudget },
         });
       } catch (err) {
         if (err instanceof ConcurrencyLimitError) {

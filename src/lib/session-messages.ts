@@ -8,15 +8,8 @@ import {
 } from "./errors";
 import type { TenantId, RunTriggeredBy } from "./types";
 
-/**
- * Concurrency cap, mirrors the legacy MAX_CONCURRENT_RUNS.
- * The cap counts only sessions in `creating` or `active` — `idle` sessions
- * do NOT count toward this cap, they are free until the cleanup cron stops
- * them per their per-session idle TTL.
- *
- * FIX #15: single source of truth lives in `sessions.ts`; this re-export
- * preserves the existing import surface used by dispatcher / webhook routes.
- */
+// Re-export so callers that historically imported from session-messages keep
+// working. Source of truth is `sessions.ts`.
 export { MAX_CONCURRENT_ACTIVE_SESSIONS } from "./sessions";
 
 const TenantBudgetRow = z.object({
@@ -206,6 +199,22 @@ export async function transitionMessageStatus(
   }
 
   return true;
+}
+
+/**
+ * Look up the parent session_id for a message within a tenant. Returns null
+ * when the message row does not exist (or the tenant scope mismatches).
+ */
+export async function getSessionIdForMessage(
+  messageId: string,
+  tenantId: TenantId,
+): Promise<string | null> {
+  const row = await queryOne(
+    z.object({ session_id: z.string() }),
+    "SELECT session_id FROM session_messages WHERE id = $1 AND tenant_id = $2",
+    [messageId, tenantId],
+  );
+  return row?.session_id ?? null;
 }
 
 /**

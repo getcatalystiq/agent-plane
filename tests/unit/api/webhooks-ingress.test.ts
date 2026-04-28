@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   ),
   dispatchSessionMessage: vi.fn(),
   transitionMessageStatus: vi.fn(),
+  getSessionIdForMessage: vi.fn(async () => "session-original-fixture"),
   getCallbackBaseUrl: vi.fn(() => "https://app.example.com"),
   checkRateLimit: vi.fn(() => ({ allowed: true, remaining: 59, retryAfterMs: 0 })),
   computeDedupeKey: vi.fn(),
@@ -101,6 +102,7 @@ vi.mock("@/lib/dispatcher", () => ({
 
 vi.mock("@/lib/session-messages", () => ({
   transitionMessageStatus: mocks.transitionMessageStatus,
+  getSessionIdForMessage: mocks.getSessionIdForMessage,
 }));
 
 vi.mock("@/lib/mcp-connections", () => ({

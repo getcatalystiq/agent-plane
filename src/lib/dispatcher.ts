@@ -27,6 +27,7 @@ import {
   updateSessionMcpRefreshedAt,
   defaultIdleTtlSeconds,
   incrementMessageCount,
+  acquireSessionCapLock,
   SESSION_EXPIRES_AFTER_INTERVAL,
   MAX_CONCURRENT_ACTIVE_SESSIONS,
   type Session,
@@ -78,12 +79,8 @@ const PUBLIC_TRIGGERS: ReadonlySet<RunTriggeredBy> = new Set([
   "chat",
 ]);
 
-/**
- * FIX #29: Zod schema for idempotency cache reads. The cache is process memory
- * (Map<string, unknown>); without a schema parse a corrupt entry could leak
- * raw `unknown` to callers. Parse-on-read with fall-through on failure keeps
- * the dispatcher honest.
- */
+// Parse-on-read guards the in-memory idempotency cache from leaking raw
+// `unknown` to callers if a corrupt entry slips in.
 const IdempotentResponseSchema = z.object({
   sessionId: z.string().uuid(),
   messageId: z.string().uuid(),
@@ -137,10 +134,15 @@ export interface DispatchInput {
   /** Extra hostnames for the sandbox network policy. */
   extraAllowedHostnames?: string[];
   platformApiUrl: string;
-  /** Override the agent's max_turns for this message. Capped to validation bounds upstream. */
-  maxTurnsOverride?: number;
-  /** Override the agent's max_budget_usd for this message. */
-  maxBudgetUsdOverride?: number;
+  /**
+   * Per-message overrides for the agent's defaults. `maxTurns` is capped to
+   * validation bounds upstream; `maxBudgetUsd` is checked against the
+   * tenant's remaining budget at finalize.
+   */
+  overrides?: {
+    maxTurns?: number;
+    maxBudgetUsd?: number;
+  };
 }
 
 export interface DispatchResult {
@@ -161,69 +163,77 @@ interface PreparedExecution {
 }
 
 /**
+ * Tenant-scoped idempotency lookup. Returns a synthetic `DispatchResult` (with
+ * an empty closed stream) on a verified cache hit, or null to fall through to
+ * a fresh dispatch. Verifies the cached row still exists in DB so a deleted
+ * message can't ghost-replay.
+ */
+async function readIdempotentHit(
+  idempCacheKey: string,
+  input: DispatchInput,
+): Promise<DispatchResult | null> {
+  const raw = getIdempotentResponse(idempCacheKey);
+  if (raw === null) return null;
+
+  const parseResult = IdempotentResponseSchema.safeParse(raw);
+  if (!parseResult.success) {
+    // FIX #29: corrupt cache entry — fall through to fresh dispatch.
+    logger.warn("Idempotency cache entry failed schema parse; dispatching fresh", {
+      idempotency_key: input.idempotencyKey,
+      tenant_id: input.tenantId,
+    });
+    return null;
+  }
+  const cached = parseResult.data;
+
+  // FIX #22: verify the cached message still exists in DB (tenant-scoped row
+  // wasn't deleted out from under us). If not, fall through.
+  const existing = await queryOne(
+    z.object({ id: z.string(), status: z.string() }),
+    "SELECT id, status FROM session_messages WHERE id = $1 AND tenant_id = $2",
+    [cached.messageId, input.tenantId],
+  );
+  if (!existing) {
+    logger.warn("Idempotency cache hit but message row missing; dispatching fresh", {
+      idempotency_key: input.idempotencyKey,
+      tenant_id: input.tenantId,
+      cached_message_id: cached.messageId,
+    });
+    return null;
+  }
+
+  logger.info("Dispatcher idempotency hit", {
+    idempotency_key: input.idempotencyKey,
+    tenant_id: input.tenantId,
+    session_id: cached.sessionId,
+    message_id: cached.messageId,
+    message_status: existing.status,
+  });
+  const empty = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.close();
+    },
+  });
+  return {
+    sessionId: cached.sessionId,
+    messageId: cached.messageId,
+    stream: empty,
+    response: () => new Response(empty, { status: 200, headers: ndjsonHeaders() }),
+  };
+}
+
+/**
  * Single chokepoint. See module docstring for the contract.
  */
 export async function dispatchSessionMessage(input: DispatchInput): Promise<DispatchResult> {
-  // 1. Idempotency short-circuit (process-memory store).
-  // SEC: cache key MUST be tenant-namespaced. Otherwise Tenant A's idempotency
-  // key collides with Tenant B's identical key, leaking message ids/sessionIds
-  // across tenants. Mirrors the A2A pattern in the JSON-RPC route.
+  // 1. Idempotency short-circuit (process-memory store). SEC: cache key MUST
+  // be tenant-namespaced or Tenant A's key collides with Tenant B's, leaking
+  // message_ids across tenants. Mirrors the A2A pattern in the JSON-RPC route.
   const idempCacheKey = input.idempotencyKey
     ? `dispatch:${input.tenantId}:${input.idempotencyKey}`
     : null;
-  if (idempCacheKey) {
-    const raw = getIdempotentResponse(idempCacheKey);
-    let cached: IdempotentResponse | null = null;
-    if (raw !== null) {
-      const parseResult = IdempotentResponseSchema.safeParse(raw);
-      if (parseResult.success) {
-        cached = parseResult.data;
-      } else {
-        // FIX #29: corrupt cache entry — fall through to fresh dispatch.
-        logger.warn("Idempotency cache entry failed schema parse; dispatching fresh", {
-          idempotency_key: input.idempotencyKey,
-          tenant_id: input.tenantId,
-        });
-      }
-    }
-    if (cached) {
-      // FIX #22: verify the cached message still exists in DB and is in a
-      // sane state (i.e. tenant-scoped row was not deleted). If not, fall
-      // through and dispatch fresh.
-      const existing = await queryOne(
-        z.object({ id: z.string(), status: z.string() }),
-        "SELECT id, status FROM session_messages WHERE id = $1 AND tenant_id = $2",
-        [cached.messageId, input.tenantId],
-      );
-      if (!existing) {
-        logger.warn("Idempotency cache hit but message row missing; dispatching fresh", {
-          idempotency_key: input.idempotencyKey,
-          tenant_id: input.tenantId,
-          cached_message_id: cached.messageId,
-        });
-      } else {
-        logger.info("Dispatcher idempotency hit", {
-          idempotency_key: input.idempotencyKey,
-          tenant_id: input.tenantId,
-          session_id: cached.sessionId,
-          message_id: cached.messageId,
-          message_status: existing.status,
-        });
-        // Empty closed stream — caller already has the message_id and can poll.
-        const empty = new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.close();
-          },
-        });
-        return {
-          sessionId: cached.sessionId,
-          messageId: cached.messageId,
-          stream: empty,
-          response: () => new Response(empty, { status: 200, headers: ndjsonHeaders() }),
-        };
-      }
-    }
-  }
+  const cachedHit = idempCacheKey ? await readIdempotentHit(idempCacheKey, input) : null;
+  if (cachedHit) return cachedHit;
 
   // 2. Resolve / create session, claim the active slot, append the message
   //    row, and stamp budget reserve — all inside one tenant-scoped tx.
@@ -316,15 +326,9 @@ export async function cancelSession(sessionId: string, tenantId: TenantId): Prom
 
 async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedExecution> {
   return withTenantTransaction(input.tenantId, async (tx) => {
-    // FIX #3 (adv-001): TOCTOU-safe concurrency cap. Acquire a tx-scoped
-    // advisory lock keyed on tenant_id BEFORE any session count / insert.
-    // Two concurrent dispatches for the same tenant are serialized at this
-    // line; the lock auto-releases on commit/rollback. The previous
-    // INSERT...WHERE (SELECT COUNT) pattern is not safe under READ COMMITTED.
-    await tx.execute(
-      `SELECT pg_advisory_xact_lock(hashtext('session_cap:' || $1::text))`,
-      [input.tenantId],
-    );
+    // FIX #3 (adv-001): TOCTOU-safe concurrency cap via tx-scoped advisory
+    // lock keyed on tenant_id. The lock auto-releases on commit/rollback.
+    await acquireSessionCapLock(tx, input.tenantId);
 
     // Load agent + budget once. Composio MCP cache fields live on the
     // internal row and the dispatcher needs them for buildMcpConfig.
@@ -448,8 +452,8 @@ async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedE
     // d) Append the session_messages row in `running` state. The runner
     //    flips it to a terminal status via finalize.
     const effectiveRunner = resolveEffectiveRunner(agent.model, agent.runner);
-    const effectiveMaxTurns = input.maxTurnsOverride ?? agent.max_turns;
-    const effectiveBudget = input.maxBudgetUsdOverride ?? agent.max_budget_usd;
+    const effectiveMaxTurns = input.overrides?.maxTurns ?? agent.max_turns;
+    const effectiveBudget = input.overrides?.maxBudgetUsd ?? agent.max_budget_usd;
 
     const messageRow = await tx.queryOne(
       SessionMessageRow,

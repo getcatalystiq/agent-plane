@@ -46,8 +46,10 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
       idempotencyKey: input.idempotency_key,
       callerKeyId: auth.apiKeyId,
       platformApiUrl: new URL(request.url).origin,
-      maxTurnsOverride: input.max_turns,
-      maxBudgetUsdOverride: input.max_budget_usd,
+      overrides: {
+        maxTurns: input.max_turns,
+        maxBudgetUsd: input.max_budget_usd,
+      },
     });
 
     return new Response(result.stream, {

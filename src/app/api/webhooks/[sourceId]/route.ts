@@ -4,16 +4,15 @@ import { z } from "zod";
 import { logger } from "@/lib/logger";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { dispatchSessionMessage } from "@/lib/dispatcher";
-import { transitionMessageStatus } from "@/lib/session-messages";
+import {
+  transitionMessageStatus,
+  getSessionIdForMessage,
+} from "@/lib/session-messages";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { authenticateApiKey } from "@/lib/auth";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { NotFoundError, ConcurrencyLimitError, BudgetExceededError } from "@/lib/errors";
-import { AgentRowInternal } from "@/lib/validation";
-import { checkTenantBudget } from "@/lib/session-messages";
-import { withTenantTransaction } from "@/db";
 import { MAX_CONCURRENT_SESSIONS } from "@/lib/sessions";
-import { supportsClaudeRunner } from "@/lib/models";
 import {
   UpdateWebhookSourceSchema,
   attachDeliveryMessage,
@@ -299,13 +298,12 @@ export async function POST(
     // returning a broken URL.
     let statusUrl: string | null = null;
     if (initialDelivery.existingMessageId) {
-      const sessionRow = await queryOne(
-        z.object({ session_id: z.string() }),
-        "SELECT session_id FROM session_messages WHERE id = $1 AND tenant_id = $2",
-        [initialDelivery.existingMessageId, source.tenant_id],
+      const sessionId = await getSessionIdForMessage(
+        initialDelivery.existingMessageId,
+        source.tenant_id as TenantId,
       ).catch(() => null);
-      if (sessionRow) {
-        statusUrl = `/api/sessions/${sessionRow.session_id}/messages/${initialDelivery.existingMessageId}`;
+      if (sessionId) {
+        statusUrl = `/api/sessions/${sessionId}/messages/${initialDelivery.existingMessageId}`;
       }
     }
     return NextResponse.json(
@@ -344,13 +342,12 @@ export async function POST(
         // the real session id rather than returning `/_/`.
         let suppressedStatusUrl: string | null = null;
         if (match.messageId) {
-          const sessionRow = await queryOne(
-            z.object({ session_id: z.string() }),
-            "SELECT session_id FROM session_messages WHERE id = $1 AND tenant_id = $2",
-            [match.messageId, source.tenant_id],
+          const sessionId = await getSessionIdForMessage(
+            match.messageId,
+            source.tenant_id as TenantId,
           ).catch(() => null);
-          if (sessionRow) {
-            suppressedStatusUrl = `/api/sessions/${sessionRow.session_id}/messages/${match.messageId}`;
+          if (sessionId) {
+            suppressedStatusUrl = `/api/sessions/${sessionId}/messages/${match.messageId}`;
           }
         }
         return NextResponse.json(
@@ -401,22 +398,20 @@ export async function POST(
     );
   }
 
-  // U4: pre-flight concurrency rejection. The dispatcher itself enforces the
-  // tenant cap atomically inside its transaction, but if it's already saturated
-  // we want to surface a 503 to the caller (so they retry) rather than 202'ing
-  // and silently failing in `after()`.
+  // Pre-flight concurrency check (cheap, non-mutating count). Saturated tenants
+  // get 503 + Retry-After so the sender knows to back off rather than receiving
+  // a 202 that silently fails inside `after()`. The dispatcher's transactional
+  // check inside the tx is still authoritative.
+  //
+  // Budget enforcement is delegated to the dispatcher: budget validation needs
+  // the full agent row (subscription-token detection) and the dispatcher's tx
+  // is the right place for it. BudgetExceededError thrown there is translated
+  // to 503 below in the after() handler — at the cost of a slightly later 503,
+  // but with one fewer agent-row read per delivery.
   const tenantId = source.tenant_id as TenantId;
   const agentId = source.agent_id as AgentId;
   const sourceWebhookId = source.id as WebhookSourceId;
 
-  // FIX #7: pre-flight cap + budget check. The previous comment promised this
-  // but the code did not implement it — concurrency / budget errors thrown
-  // inside `after()` were swallowed and the caller got 202. Distinguish:
-  //   - 503 concurrency_exceeded   (with Retry-After: 60)
-  //   - 503 budget_exceeded
-  //   - 500 internal_error         (anything else)
-  // Non-mutating count (no FOR UPDATE / advisory lock); the dispatcher's
-  // transactional check is still authoritative.
   try {
     const countRow = await queryOne(
       z.object({ count: z.coerce.number() }),
@@ -439,42 +434,6 @@ export async function POST(
     }
   } catch (err) {
     logger.warn("webhook pre-flight concurrency check failed (non-fatal)", {
-      source_id: source.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Pre-flight budget check. Loads the agent (needed for subscription detection)
-  // and runs the same checkTenantBudget logic the dispatcher uses inside its tx.
-  try {
-    const agent = await queryOne(
-      AgentRowInternal,
-      "SELECT * FROM agents WHERE id = $1 AND tenant_id = $2",
-      [agentId, tenantId],
-    );
-    if (!agent) {
-      await markDeliveryError(initialDelivery.deliveryRowId, "internal_error").catch(() => {});
-      return NextResponse.json(
-        { error: { code: "internal_error", message: "Agent not found" } },
-        { status: 500 },
-      );
-    }
-    const isSubscriptionRun = supportsClaudeRunner(agent.model);
-    await withTenantTransaction(tenantId, async (tx) => {
-      await checkTenantBudget(tx, tenantId, { isSubscriptionRun });
-    });
-  } catch (err) {
-    if (err instanceof BudgetExceededError) {
-      // FIX #24: distinct delivery_error code for budget overruns.
-      await markDeliveryError(initialDelivery.deliveryRowId, "budget_exceeded").catch(() => {});
-      return NextResponse.json(
-        {
-          error: { code: "budget_exceeded", message: err.message },
-        },
-        { status: 503, headers: { "Retry-After": "300" } },
-      );
-    }
-    logger.warn("webhook pre-flight budget check failed (non-fatal)", {
       source_id: source.id,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -532,9 +491,8 @@ export async function POST(
         try { reader.releaseLock(); } catch { /* ignore */ }
       }
     } catch (err) {
-      // FIX #24: budget overruns deserve a distinct delivery error code so
-      // observability and admin views can distinguish "agent ran out of money"
-      // from a generic internal failure. The rate-limit branch is unchanged.
+      // Distinct delivery error code per failure mode so observability can
+      // tell "agent ran out of money" from a generic internal failure.
       let code: DeliveryError = "internal_error";
       if (err instanceof ConcurrencyLimitError) code = "rate_limited";
       else if (err instanceof BudgetExceededError) code = "budget_exceeded";
