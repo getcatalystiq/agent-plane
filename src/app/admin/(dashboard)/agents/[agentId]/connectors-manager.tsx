@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { ToolkitMultiselect } from "@/components/toolkit-multiselect";
 import { SectionHeader } from "@/components/ui/section-header";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { FormError } from "@/components/ui/form-error";
@@ -103,9 +102,10 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
   const [localToolkits, setLocalToolkits] = useState<string[]>(initialToolkits);
   const [connectors, setConnectors] = useState<ConnectorStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showAdd, setShowAdd] = useState(false);
-  const [pendingToolkits, setPendingToolkits] = useState<string[]>(initialToolkits);
-  const [applyingToolkits, setApplyingToolkits] = useState(false);
+  const [composioCatalog, setComposioCatalog] = useState<{ slug: string; name: string; logo: string }[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [adding, setAdding] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ slug: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [allowedTools, setAllowedTools] = useState<string[]>(initialAllowedTools);
@@ -181,10 +181,18 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     }
   }, [toolkitsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function loadMcpServers() {
+  const loadMcpServers = useCallback(async () => {
     const data = await adminFetch<{ data: McpServer[] }>("/mcp-servers");
     setMcpServers(data.data ?? []);
-  }
+  }, []);
+
+  // Load the Composio toolkit catalog and MCP server list once for the inline search.
+  useEffect(() => {
+    adminFetch<{ data: { slug: string; name: string; logo: string }[] }>("/composio/toolkits")
+      .then((d) => setComposioCatalog(d.data ?? []))
+      .catch(() => {});
+    loadMcpServers().catch(() => {});
+  }, [loadMcpServers]);
 
   async function handleToolsSave(toolkit: string, selectedSlugs: string[]) {
     const prefix = toolkit.toUpperCase() + "_";
@@ -208,13 +216,15 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
     router.refresh();
   }
 
-  async function handleApplyAdd() {
-    setApplyingToolkits(true);
+  async function handleAddComposio(slug: string) {
+    if (localToolkits.includes(slug)) return;
+    setAdding(slug);
     try {
-      await patchToolkits(pendingToolkits);
-      setShowAdd(false);
+      await patchToolkits([...localToolkits, slug]);
+      setSearchQuery("");
+      setSearchOpen(false);
     } finally {
-      setApplyingToolkits(false);
+      setAdding(null);
     }
   }
 
@@ -381,7 +391,8 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
             popup?.close();
             window.removeEventListener("message", handler);
             loadMcp();
-            setShowAdd(false);
+            setSearchOpen(false);
+            setSearchQuery("");
             router.refresh();
           }
         };
@@ -455,57 +466,21 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
 
       <div className="rounded-lg border border-muted-foreground/25 p-5">
         <SectionHeader title="Connectors">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => { setPendingToolkits(localToolkits); loadMcpServers(); setShowAdd(true); }}
-          >
-            Add
-          </Button>
+          <ConnectorSearch
+            query={searchQuery}
+            setQuery={setSearchQuery}
+            open={searchOpen}
+            setOpen={setSearchOpen}
+            composioCatalog={composioCatalog}
+            availableMcpServers={availableMcpServers}
+            attachedComposio={new Set(localToolkits)}
+            onAddComposio={handleAddComposio}
+            onAddMcp={handleMcpConnect}
+            adding={adding}
+            mcpConnecting={mcpConnecting}
+          />
         </SectionHeader>
         <div>
-          {showAdd && (
-            <div className="mb-4 space-y-3">
-              <ToolkitMultiselect value={pendingToolkits} onChange={setPendingToolkits} />
-
-              {availableMcpServers.length > 0 && (
-                <div className="grid grid-cols-4 gap-2">
-                  {availableMcpServers.map((s) => (
-                    <div key={s.id} className="flex flex-col gap-2 p-2 rounded border border-border">
-                      <div className="flex items-center gap-2 min-w-0">
-                        {s.logo_url && (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={s.logo_url} alt="" className="w-5 h-5 rounded-sm object-contain flex-shrink-0" />
-                        )}
-                        <span className="text-sm font-medium truncate">{s.name}</span>
-                        <Badge variant="outline" className="text-xs flex-shrink-0 ml-auto">{s.slug}</Badge>
-                      </div>
-                      {s.description && (
-                        <p className="text-xs text-muted-foreground truncate">{s.description}</p>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 text-xs mt-auto"
-                        disabled={mcpConnecting === s.id}
-                        onClick={() => handleMcpConnect(s.id)}
-                      >
-                        {mcpConnecting === s.id ? "Connecting..." : "Connect"}
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex justify-end gap-2">
-                <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancel</Button>
-                <Button size="sm" onClick={handleApplyAdd} disabled={applyingToolkits}>
-                  {applyingToolkits ? "Saving..." : "Apply"}
-                </Button>
-              </div>
-            </div>
-          )}
-
           {isAllLoading ? (
             <p className="text-sm text-muted-foreground">Loading...</p>
           ) : isEmpty ? (
@@ -649,6 +624,119 @@ export function ConnectorsManager({ agentId, toolkits: initialToolkits, composio
         />
       )}
     </>
+  );
+}
+
+// ─── Inline connector search (Composio + custom MCP) ────────────────────────
+
+interface ConnectorSearchProps {
+  query: string;
+  setQuery: (q: string) => void;
+  open: boolean;
+  setOpen: (o: boolean) => void;
+  composioCatalog: { slug: string; name: string; logo: string }[];
+  availableMcpServers: McpServer[];
+  attachedComposio: Set<string>;
+  onAddComposio: (slug: string) => void;
+  onAddMcp: (serverId: string) => void;
+  adding: string | null;
+  mcpConnecting: string | null;
+}
+
+function ConnectorSearch({
+  query,
+  setQuery,
+  open,
+  setOpen,
+  composioCatalog,
+  availableMcpServers,
+  attachedComposio,
+  onAddComposio,
+  onAddMcp,
+  adding,
+  mcpConnecting,
+}: ConnectorSearchProps) {
+  const q = query.trim().toLowerCase();
+  const showResults = open && q.length >= 2;
+
+  const composioResults = q.length >= 2
+    ? composioCatalog
+        .filter((t) => !attachedComposio.has(t.slug))
+        .filter((t) => t.slug.toLowerCase().includes(q) || t.name.toLowerCase().includes(q))
+        .slice(0, 12)
+    : [];
+
+  const mcpResults = q.length >= 2
+    ? availableMcpServers
+        .filter((s) => s.name.toLowerCase().includes(q) || s.slug.toLowerCase().includes(q))
+        .slice(0, 8)
+    : [];
+
+  const empty = composioResults.length === 0 && mcpResults.length === 0;
+
+  return (
+    <div className="relative">
+      <Input
+        placeholder="Search connectors..."
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 200)}
+        className="w-64 text-sm h-8"
+      />
+      {showResults && (
+        <div className="absolute top-full right-0 mt-1 w-80 bg-popover border border-border rounded-lg shadow-lg z-50 max-h-72 overflow-auto">
+          {empty && (
+            <p className="text-xs text-muted-foreground p-3">No connectors found</p>
+          )}
+          {mcpResults.map((s) => (
+            <button
+              key={`mcp-${s.id}`}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onAddMcp(s.id)}
+              disabled={mcpConnecting === s.id}
+              className="flex items-center gap-2.5 w-full px-3 py-2.5 text-left hover:bg-muted/50 transition-colors disabled:opacity-50"
+            >
+              {s.logo_url && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={s.logo_url} alt="" className="w-5 h-5 rounded-sm object-contain flex-shrink-0" />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium truncate">{s.name}</div>
+                <div className="text-xs text-muted-foreground truncate">{s.slug}</div>
+              </div>
+              <Badge variant="outline" className="text-[10px] flex-shrink-0">Custom</Badge>
+              <span className="text-xs text-muted-foreground flex-shrink-0 ml-1">
+                {mcpConnecting === s.id ? "..." : "+"}
+              </span>
+            </button>
+          ))}
+          {composioResults.map((t) => (
+            <button
+              key={`composio-${t.slug}`}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onAddComposio(t.slug)}
+              disabled={adding === t.slug}
+              className="flex items-center gap-2.5 w-full px-3 py-2.5 text-left hover:bg-muted/50 transition-colors disabled:opacity-50"
+            >
+              {t.logo && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={t.logo} alt="" className="w-5 h-5 rounded-sm object-contain flex-shrink-0" />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium truncate">{t.name}</div>
+                <div className="text-xs text-muted-foreground truncate font-mono">{t.slug}</div>
+              </div>
+              <span className="text-xs text-muted-foreground flex-shrink-0">
+                {adding === t.slug ? "..." : "+"}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
