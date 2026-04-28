@@ -5,6 +5,29 @@ import type { RunId, RunStatus, TenantId } from "./types";
 
 const MAX_TRANSCRIPT_EVENTS = 10_000;
 
+/**
+ * Fallback when a transcript has no terminal `result` or `error` event. A run
+ * that uploads a transcript but didn't emit a result was cut off mid-flight
+ * — most often by a Claude rate-limit hit (subscription mode with overage
+ * disabled silently exits the SDK iterator), sandbox termination, or a
+ * Vercel function lifecycle boundary. We must NOT mark these `completed`:
+ * doing so hides the partial-execution state from operators and confuses
+ * downstream "did this work" decisions.
+ */
+export const NO_TERMINAL_EVENT_FALLBACK: {
+  status: RunStatus;
+  updates: Record<string, unknown>;
+} = {
+  status: "failed",
+  updates: {
+    result_summary: "no_terminal_event",
+    error_type: "no_terminal_event",
+    error_messages: [
+      "Runner uploaded a transcript without a final result event — likely cut off mid-flight (rate limit, sandbox shutdown, or SDK iterator ended early).",
+    ],
+  },
+};
+
 // --- Secret Scrubbing ---
 export function scrubSecrets(text: string): string {
   // Broad pattern covers all Anthropic token prefixes (oat01, api03, sid01, future versions)

@@ -5,7 +5,7 @@ import { verifyRunToken } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 import { uploadTranscript } from "@/lib/transcripts";
 import { transitionRunStatus } from "@/lib/runs";
-import { parseResultEvent } from "@/lib/transcript-utils";
+import { parseResultEvent, NO_TERMINAL_EVENT_FALLBACK } from "@/lib/transcript-utils";
 import { processLineAssets } from "@/lib/assets";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
@@ -74,17 +74,17 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     );
     const transcript = processedLines.join("\n") + "\n";
     const blobUrl = await uploadTranscript(tenantId, typedRunId, transcript);
-    const resultData = await parseResultEvent(lines[lines.length - 1]);
+    const resultData = (await parseResultEvent(lines[lines.length - 1])) ?? NO_TERMINAL_EVENT_FALLBACK;
 
     await transitionRunStatus(
       typedRunId,
       tenantId,
       "running",
-      resultData?.status ?? "completed",
+      resultData.status,
       {
         completed_at: new Date().toISOString(),
         transcript_blob_url: blobUrl,
-        ...resultData?.updates,
+        ...resultData.updates,
       },
       { expectedMaxBudgetUsd: run.max_budget_usd },
     );

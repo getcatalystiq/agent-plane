@@ -19,7 +19,7 @@ import {
 import { uploadTranscript } from "@/lib/transcripts";
 import { backupSessionFile, restoreSessionFile } from "@/lib/session-files";
 import { generateRunToken } from "@/lib/crypto";
-import { parseResultEvent, captureTranscript } from "@/lib/transcript-utils";
+import { parseResultEvent, captureTranscript, NO_TERMINAL_EVENT_FALLBACK } from "@/lib/transcript-utils";
 import { createNdjsonStream, ndjsonHeaders } from "@/lib/streaming";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
@@ -342,17 +342,17 @@ export async function finalizeSessionMessage(
         const transcript = transcriptChunks.join("\n") + "\n";
         const blobUrl = await uploadTranscript(tenantId, runId, transcript);
         const lastLine = transcriptChunks[transcriptChunks.length - 1];
-        resultData = await parseResultEvent(lastLine);
+        resultData = (await parseResultEvent(lastLine)) ?? NO_TERMINAL_EVENT_FALLBACK;
 
         await transitionRunStatus(
           runId,
           tenantId,
           "running",
-          resultData?.status ?? "completed",
+          resultData.status,
           {
             completed_at: new Date().toISOString(),
             transcript_blob_url: blobUrl,
-            ...resultData?.updates,
+            ...resultData.updates,
           },
           { expectedMaxBudgetUsd: effectiveBudget },
         );
