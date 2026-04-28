@@ -292,13 +292,27 @@ export async function POST(
   });
 
   if (initialDelivery.kind === "duplicate") {
+    // FIX #33: replace literal `_` placeholder with the real session id when
+    // the original delivery has been attached to a message. If the prior
+    // delivery hasn't attached a message yet (background dispatch lost or
+    // still in-flight), surface message_id without a status_url instead of
+    // returning a broken URL.
+    let statusUrl: string | null = null;
+    if (initialDelivery.existingMessageId) {
+      const sessionRow = await queryOne(
+        z.object({ session_id: z.string() }),
+        "SELECT session_id FROM session_messages WHERE id = $1 AND tenant_id = $2",
+        [initialDelivery.existingMessageId, source.tenant_id],
+      ).catch(() => null);
+      if (sessionRow) {
+        statusUrl = `/api/sessions/${sessionRow.session_id}/messages/${initialDelivery.existingMessageId}`;
+      }
+    }
     return NextResponse.json(
       {
         message_id: initialDelivery.existingMessageId,
         duplicate: true,
-        status_url: initialDelivery.existingMessageId
-          ? `/api/sessions/_/messages/${initialDelivery.existingMessageId}`
-          : null,
+        status_url: statusUrl,
       },
       { status: 200 },
     );
@@ -326,13 +340,24 @@ export async function POST(
           matched_message_id: match.messageId,
           window_seconds: dedupeContext.rule.windowSeconds,
         });
+        // FIX #33: same fix for content-dedupe suppression path — look up
+        // the real session id rather than returning `/_/`.
+        let suppressedStatusUrl: string | null = null;
+        if (match.messageId) {
+          const sessionRow = await queryOne(
+            z.object({ session_id: z.string() }),
+            "SELECT session_id FROM session_messages WHERE id = $1 AND tenant_id = $2",
+            [match.messageId, source.tenant_id],
+          ).catch(() => null);
+          if (sessionRow) {
+            suppressedStatusUrl = `/api/sessions/${sessionRow.session_id}/messages/${match.messageId}`;
+          }
+        }
         return NextResponse.json(
           {
             message_id: match.messageId,
             duplicate: true,
-            status_url: match.messageId
-              ? `/api/sessions/_/messages/${match.messageId}`
-              : null,
+            status_url: suppressedStatusUrl,
           },
           { status: 200 },
         );
@@ -440,7 +465,8 @@ export async function POST(
     });
   } catch (err) {
     if (err instanceof BudgetExceededError) {
-      await markDeliveryError(initialDelivery.deliveryRowId, "internal_error").catch(() => {});
+      // FIX #24: distinct delivery_error code for budget overruns.
+      await markDeliveryError(initialDelivery.deliveryRowId, "budget_exceeded").catch(() => {});
       return NextResponse.json(
         {
           error: { code: "budget_exceeded", message: err.message },
@@ -506,9 +532,12 @@ export async function POST(
         try { reader.releaseLock(); } catch { /* ignore */ }
       }
     } catch (err) {
+      // FIX #24: budget overruns deserve a distinct delivery error code so
+      // observability and admin views can distinguish "agent ran out of money"
+      // from a generic internal failure. The rate-limit branch is unchanged.
       let code: DeliveryError = "internal_error";
       if (err instanceof ConcurrencyLimitError) code = "rate_limited";
-      else if (err instanceof BudgetExceededError) code = "internal_error";
+      else if (err instanceof BudgetExceededError) code = "budget_exceeded";
       await markDeliveryError(initialDelivery.deliveryRowId, code).catch(() => {});
       // If the message was created but execution threw, transition it to
       // failed so it doesn't sit in `running` until the cleanup cron times it

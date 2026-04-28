@@ -162,9 +162,22 @@ export async function* captureTranscript(
       if (chunks.length < MAX_TRANSCRIPT_EVENTS) {
         chunks.push(processed);
       } else {
+        // FIX #26: at the truncation boundary, the original code yielded the
+        // current event but never pushed it. If that event happened to be a
+        // `result` or `error`, finalize lost billing/error data. Preserve the
+        // existing exemption rule (result/error always survive) at the
+        // boundary line as well.
         truncated = true;
         chunks.push(JSON.stringify({ type: "system", message: `Transcript truncated at ${MAX_TRANSCRIPT_EVENTS} events` }));
         logger.warn("Transcript truncated", { message_id: messageId, max: MAX_TRANSCRIPT_EVENTS });
+        try {
+          const parsedBoundary = JSON.parse(processed);
+          if (parsedBoundary.type === "result" || parsedBoundary.type === "error") {
+            chunks.push(processed);
+          }
+        } catch {
+          // Not JSON — drop, mirrors the post-truncation branch.
+        }
       }
       yield processed;
     }

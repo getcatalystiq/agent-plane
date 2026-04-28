@@ -6,7 +6,6 @@ import { supportsClaudeRunner } from "./models";
 import { logger } from "./logger";
 import {
   NotFoundError,
-  ConflictError,
   ConcurrencyLimitError,
 } from "./errors";
 import type { SessionStatus, TenantId, AgentId, RunTriggeredBy } from "./types";
@@ -20,8 +19,14 @@ import { SESSION_VALID_TRANSITIONS } from "./types";
  */
 export const MAX_CONCURRENT_SESSIONS = 50;
 
+/**
+ * FIX #15: alias re-exported from session-messages.ts callers. Single source
+ * of truth lives here; session-messages.ts re-exports for backward-compat.
+ */
+export const MAX_CONCURRENT_ACTIVE_SESSIONS = MAX_CONCURRENT_SESSIONS;
+
 /** Hard wall-clock cap on a session's lifetime regardless of idle TTL. */
-const SESSION_EXPIRES_AFTER_INTERVAL = "4 hours";
+export const SESSION_EXPIRES_AFTER_INTERVAL = "4 hours";
 
 /** Per-trigger idle TTL mapping (seconds). See R3/R4 in the plan. */
 export function defaultIdleTtlSeconds(triggeredBy: RunTriggeredBy): number {
@@ -349,35 +354,6 @@ export async function casToStopped(
   return getSession(sessionId, tenantId);
 }
 
-/**
- * Stop a session: transition to stopped, clear sandbox_id. Throws ConflictError
- * only when the row is in a state with no `stopped` successor — which never
- * happens with the current state machine (every state lists `stopped`), so
- * this is essentially the public-route wrapper around `casToStopped`.
- */
-export async function stopSession(sessionId: string, tenantId: TenantId): Promise<Session> {
-  const session = await getSession(sessionId, tenantId);
-
-  if (session.status === "stopped") {
-    return session;
-  }
-
-  const transitioned = await transitionSessionStatus(
-    sessionId,
-    tenantId,
-    session.status as SessionStatus,
-    "stopped",
-    { sandbox_id: null, idle_since: null },
-  );
-
-  if (!transitioned) {
-    throw new ConflictError(`Cannot stop session in status '${session.status}'`);
-  }
-
-  logger.info("Session stopped", { session_id: sessionId, tenant_id: tenantId });
-  return getSession(sessionId, tenantId);
-}
-
 export async function incrementMessageCount(sessionId: string, tenantId: TenantId): Promise<void> {
   await execute(
     `UPDATE sessions SET message_count = message_count + 1
@@ -391,6 +367,8 @@ export async function incrementMessageCount(sessionId: string, tenantId: TenantI
  * cleanup cron. Signature changed from the legacy `(maxIdleMinutes: number)`
  * to `()` since each session now carries its own `idle_ttl_seconds` (set by
  * the dispatcher per the trigger table).
+ *
+ * FIX #12: bounded by `CLEANUP_SWEEP_LIMIT` so a backlog can't pin the function.
  */
 export async function getIdleSessions(): Promise<Session[]> {
   return query(
@@ -398,7 +376,8 @@ export async function getIdleSessions(): Promise<Session[]> {
     `SELECT * FROM sessions
      WHERE status = 'idle'
        AND idle_since IS NOT NULL
-       AND idle_since < NOW() - INTERVAL '1 second' * idle_ttl_seconds`,
+       AND idle_since < NOW() - INTERVAL '1 second' * idle_ttl_seconds
+     LIMIT 500`,
     [],
   );
 }
@@ -414,12 +393,34 @@ export async function getStuckSessions(
   state: "creating" | "active",
   maxMinutes: number,
 ): Promise<Session[]> {
+  // FIX #28: for the active-watchdog, use the latest running message's
+  // started_at, not sessions.updated_at — every idle→active flip resets
+  // updated_at, so a long chat session where each turn finishes within
+  // updated_at+30min would never trip. Latest running message timestamp
+  // is the true "is the runner stuck" signal.
+  // FIX #12: bounded LIMIT keeps the cron tick small under backlog.
+  if (state === "active") {
+    return query(
+      SessionRow,
+      `SELECT s.* FROM sessions s
+       WHERE s.status = 'active'
+         AND EXISTS (
+           SELECT 1 FROM session_messages m
+           WHERE m.session_id = s.id
+             AND m.status = 'running'
+             AND m.started_at < NOW() - INTERVAL '1 minute' * $1
+         )
+       LIMIT 500`,
+      [maxMinutes],
+    );
+  }
   const tsCol = state === "creating" ? "created_at" : "updated_at";
   return query(
     SessionRow,
     `SELECT * FROM sessions
      WHERE status = $1
-       AND ${tsCol} < NOW() - INTERVAL '1 minute' * $2`,
+       AND ${tsCol} < NOW() - INTERVAL '1 minute' * $2
+     LIMIT 500`,
     [state, maxMinutes],
   );
 }
@@ -435,7 +436,8 @@ export async function getOrphanedSandboxSessions(): Promise<Session[]> {
   return query(
     SessionRow,
     `SELECT * FROM sessions
-     WHERE status = 'stopped' AND sandbox_id IS NOT NULL`,
+     WHERE status = 'stopped' AND sandbox_id IS NOT NULL
+     LIMIT 500`,
     [],
   );
 }
@@ -449,7 +451,8 @@ export async function getExpiredSessions(): Promise<Session[]> {
   return query(
     SessionRow,
     `SELECT * FROM sessions
-     WHERE status <> 'stopped' AND expires_at < NOW()`,
+     WHERE status <> 'stopped' AND expires_at < NOW()
+     LIMIT 500`,
     [],
   );
 }

@@ -196,3 +196,15 @@ Agent Card `metadata` now advertises `agentplane.taskIdMapping = "session_messag
 6. **Document idempotency window** for `A2A-Request-Id` deduplication.
 7. **Track `tasks/list` support** in `@a2a-js/sdk` — implement when available.
 8. **Plan per-agent URL migration** before any tenant has >1 A2A-enabled agent.
+
+---
+
+## Compatibility Note: `session_messages.status` enum rename
+
+FIX #34 (review): the underlying `session_messages.status` enum changed from
+the legacy value `pending` to `queued` as part of the runs→messages
+unification. External A2A clients that read the raw status string from
+`tasks/get` responses (rather than mapping through `getA2AStateFromStatus`)
+will see `queued` where they previously saw `pending`. Update string
+comparisons accordingly. The mapped A2A `TaskState` (`submitted`/`working`/
+`completed`/`failed`/`canceled`) is unchanged.

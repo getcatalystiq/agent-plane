@@ -13,8 +13,11 @@ import type { TenantId, RunTriggeredBy } from "./types";
  * The cap counts only sessions in `creating` or `active` — `idle` sessions
  * do NOT count toward this cap, they are free until the cleanup cron stops
  * them per their per-session idle TTL.
+ *
+ * FIX #15: single source of truth lives in `sessions.ts`; this re-export
+ * preserves the existing import surface used by dispatcher / webhook routes.
  */
-export const MAX_CONCURRENT_ACTIVE_SESSIONS = 50;
+export { MAX_CONCURRENT_ACTIVE_SESSIONS } from "./sessions";
 
 const TenantBudgetRow = z.object({
   status: z.enum(["active", "suspended"]),

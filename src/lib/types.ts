@@ -13,6 +13,32 @@ export type SessionMessageId = string & { readonly __brand: "SessionMessageId" }
 export type WebhookSourceId = string & { readonly __brand: "WebhookSourceId" };
 export type WebhookDeliveryId = string & { readonly __brand: "WebhookDeliveryId" };
 
+/**
+ * FIX #31 (kt-1): boundary helpers that brand a raw string after a UUID
+ * format check. Use these at request boundaries (URL params, request body)
+ * AFTER any Zod validation has succeeded — DB-derived rows are already
+ * branded by the schema parser. The check is a UUID v1–5 regex; non-UUID
+ * branded ids should add their own helper.
+ */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function requireSessionId(s: string): SessionId {
+  if (!UUID_REGEX.test(s)) throw new Error("Invalid SessionId format");
+  return s as SessionId;
+}
+export function requireSessionMessageId(s: string): SessionMessageId {
+  if (!UUID_REGEX.test(s)) throw new Error("Invalid SessionMessageId format");
+  return s as SessionMessageId;
+}
+export function requireTenantId(s: string): TenantId {
+  if (!UUID_REGEX.test(s)) throw new Error("Invalid TenantId format");
+  return s as TenantId;
+}
+export function requireAgentId(s: string): AgentId {
+  if (!UUID_REGEX.test(s)) throw new Error("Invalid AgentId format");
+  return s as AgentId;
+}
+
 export interface AgentPlugin {
   marketplace_id: PluginMarketplaceId;
   plugin_name: string;

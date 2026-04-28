@@ -63,11 +63,14 @@ export default async function SessionsPage({
   const sort: SortKey = (VALID_SORTS as readonly string[]).includes(sp.sort ?? "")
     ? (sp.sort as SortKey)
     : "created_at";
+  // FIX #11: ORDER BY references the LATERAL aggregate columns (single pass)
+  // instead of correlated subqueries. With idx_session_messages_session_created
+  // the planner can drive the lateral via the index.
   const orderBy =
     sort === "latest_activity"
-      ? "COALESCE((SELECT MAX(m.completed_at) FROM session_messages m WHERE m.session_id = s.id), s.updated_at) DESC NULLS LAST"
+      ? "COALESCE(agg.latest_activity, s.updated_at) DESC NULLS LAST"
       : sort === "total_cost"
-        ? "(SELECT COALESCE(SUM(m.cost_usd), 0) FROM session_messages m WHERE m.session_id = s.id) DESC"
+        ? "agg.total_cost DESC NULLS LAST"
         : "s.created_at DESC";
 
   return (
@@ -113,18 +116,17 @@ async function SessionsListServer({
     whereParts.push(`s.status = $${p++}`);
     params.push(statusFilter);
   }
+  // FIX #11: filter-by-source uses the per-session aggregate `latest_trigger`
+  // computed by the LATERAL join below — single pass over session_messages.
   if (sourceFilter) {
-    whereParts.push(
-      `EXISTS (SELECT 1 FROM session_messages m
-                WHERE m.session_id = s.id
-                  AND m.created_at = (SELECT MAX(m2.created_at) FROM session_messages m2 WHERE m2.session_id = s.id)
-                  AND m.triggered_by = $${p++})`,
-    );
+    whereParts.push(`agg.latest_trigger = $${p++}`);
     params.push(sourceFilter);
   }
 
   const whereSql = whereParts.join(" AND ");
 
+  // FIX #11 (perf-001): collapse 3 correlated subqueries (per row!) into one
+  // LEFT LATERAL aggregate. Reuses idx_session_messages_session_created.
   const listSql = `
     SELECT
       s.id,
@@ -137,27 +139,47 @@ async function SessionsListServer({
       s.sandbox_id,
       s.created_at,
       s.updated_at,
-      COALESCE((SELECT SUM(m.cost_usd) FROM session_messages m WHERE m.session_id = s.id), 0) AS total_cost_usd,
-      (SELECT MAX(m.completed_at) FROM session_messages m WHERE m.session_id = s.id) AS latest_activity,
-      (
-        SELECT m.triggered_by FROM session_messages m
-         WHERE m.session_id = s.id
-         ORDER BY m.created_at DESC
-         LIMIT 1
-      ) AS latest_trigger
+      COALESCE(agg.total_cost, 0) AS total_cost_usd,
+      agg.latest_activity AS latest_activity,
+      agg.latest_trigger AS latest_trigger
     FROM sessions s
     JOIN agents a ON a.id = s.agent_id
+    LEFT JOIN LATERAL (
+      SELECT
+        SUM(m.cost_usd) AS total_cost,
+        MAX(COALESCE(m.completed_at, m.created_at)) AS latest_activity,
+        (ARRAY_AGG(m.triggered_by ORDER BY m.created_at DESC))[1] AS latest_trigger
+      FROM session_messages m
+      WHERE m.session_id = s.id
+    ) agg ON true
     WHERE ${whereSql}
     ORDER BY ${orderBy}
     LIMIT $${p++} OFFSET $${p}`;
 
   const listParams = [...params, pageSize, offset];
 
-  const countSql = `
-    SELECT COUNT(*)::int AS total
-    FROM sessions s
-    WHERE ${whereSql}`;
+  // The count query also needs the LATERAL when sourceFilter is active so the
+  // `agg.latest_trigger` predicate can be evaluated. Without source filtering
+  // we can skip it (cheap aggregate over sessions only).
+  const countSql = sourceFilter
+    ? `
+      SELECT COUNT(*)::int AS total
+      FROM sessions s
+      LEFT JOIN LATERAL (
+        SELECT
+          (ARRAY_AGG(m.triggered_by ORDER BY m.created_at DESC))[1] AS latest_trigger
+        FROM session_messages m
+        WHERE m.session_id = s.id
+      ) agg ON true
+      WHERE ${whereSql}`
+    : `
+      SELECT COUNT(*)::int AS total
+      FROM sessions s
+      WHERE ${whereSql}`;
 
+  // FIX #11: countSql only references `agg.latest_trigger` when sourceFilter
+  // is set; otherwise it's a plain COUNT over sessions. Either way `params`
+  // already carries all positional placeholders used by `whereParts`.
   const [sessions, countResult] = await Promise.all([
     query(SessionWithContext, listSql, listParams),
     queryOne(z.object({ total: z.number() }), countSql, params),

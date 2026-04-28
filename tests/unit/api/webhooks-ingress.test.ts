@@ -39,6 +39,42 @@ vi.mock("next/server", async () => {
 
 vi.mock("@/db", () => ({
   execute: vi.fn().mockResolvedValue({ rowCount: 1 }),
+  // FIX #33: route now does a session_id lookup off message_id when building
+  // duplicate-path status_url. The route also pre-flights concurrency (count
+  // sessions) and budget (load agent) before dispatch. Match each SQL shape:
+  queryOne: vi.fn().mockImplementation((_schema, sql) => {
+    if (typeof sql === "string") {
+      if (sql.includes("FROM session_messages WHERE id")) {
+        return Promise.resolve({ session_id: "session-original-fixture" });
+      }
+      if (sql.includes("COUNT(*)") && sql.includes("FROM sessions")) {
+        return Promise.resolve({ count: 0 });
+      }
+      if (sql.includes("FROM agents")) {
+        return Promise.resolve({
+          id: "agent-1",
+          tenant_id: "tenant-1",
+          model: "anthropic/claude-sonnet-4",
+          max_budget_usd: 10,
+          max_turns: 50,
+          plugins: [],
+        });
+      }
+    }
+    return Promise.resolve(null);
+  }),
+  withTenantTransaction: vi.fn().mockImplementation(async (_tenantId, fn) => {
+    const tx = {
+      queryOne: vi.fn().mockResolvedValue({
+        status: "active",
+        monthly_budget_usd: 100,
+        current_month_spend: 0,
+        has_subscription_token: false,
+      }),
+      execute: vi.fn().mockResolvedValue({ rowCount: 0 }),
+    };
+    return fn(tx);
+  }),
 }));
 
 vi.mock("@/lib/rate-limit", () => ({ checkRateLimit: mocks.checkRateLimit }));
@@ -376,7 +412,9 @@ describe("POST /api/webhooks/[sourceId]", () => {
     expect(body).toMatchObject({
       message_id: "message-original-7",
       duplicate: true,
-      status_url: "/api/sessions/_/messages/message-original-7",
+      // FIX #33: status_url now uses the real session id from a queryOne
+      // lookup (mocked to "session-original-fixture" in this suite).
+      status_url: "/api/sessions/session-original-fixture/messages/message-original-7",
     });
 
     expect(recordDelivery).toHaveBeenCalledWith(

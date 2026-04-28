@@ -97,15 +97,45 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     // function instance bounds this with its 5-min maxDuration; long-running
     // schedule prompts detach naturally via the dispatcher's stream-detach
     // path.
+    //
+    // FIX #20 (reliability MED): wedged streams (sandbox SDK never produces
+    // bytes after spawn) used to pin the function until maxDuration. Each
+    // read is now wrapped in a 30s race; on timeout we mark the message
+    // failed with `error_type: 'drain_timeout'` and break out of the loop.
     const reader = dispatchResult.stream.getReader();
+    let timedOut = false;
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const { done } = await reader.read();
-        if (done) break;
+        const READ_TIMEOUT_MS = 30_000;
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const readPromise = reader.read();
+        const timeoutPromise = new Promise<{ timeout: true }>((resolve) => {
+          timeoutHandle = setTimeout(() => resolve({ timeout: true }), READ_TIMEOUT_MS);
+        });
+        const result = await Promise.race([readPromise, timeoutPromise]);
+        if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+        if ("timeout" in result) {
+          timedOut = true;
+          logger.warn("Scheduled run drain loop timed out per-read", {
+            schedule_id,
+            agent_id: agent.id,
+            message_id: messageId,
+            read_timeout_ms: READ_TIMEOUT_MS,
+          });
+          break;
+        }
+        if (result.done) break;
       }
     } finally {
       try { reader.releaseLock(); } catch { /* ignore */ }
+    }
+    if (timedOut) {
+      await transitionMessageStatus(messageId, tenantId, "running", "failed", {
+        completed_at: new Date().toISOString(),
+        error_type: "drain_timeout",
+        error_messages: ["Scheduled run drain loop hit per-read timeout (30s without bytes)."],
+      }).catch(() => {});
     }
   } catch (err) {
     if (err instanceof ConcurrencyLimitError || err instanceof BudgetExceededError) {

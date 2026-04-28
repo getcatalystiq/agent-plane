@@ -628,9 +628,11 @@ export class SandboxAgentExecutor implements AgentExecutor {
           });
         } else {
           // First call with this contextId — dispatcher stamps the session
-          // with `context_id` so the next call reuses it. Still ephemeral
-          // for the first turn (the cleanup cron stops it after idle TTL
-          // unless a follow-up arrives).
+          // with `context_id` so the next call reuses it. The session is
+          // PERSISTENT (ephemeral=false) for the first turn so future
+          // contextId-keyed messages can re-attach via findSessionByContextId.
+          // The cleanup cron will stop the session after its per-row idle TTL
+          // if no follow-up arrives.
           dispatchEphemeral = false;
           logger.info("A2A first message with contextId", {
             context_id: clientContextId,

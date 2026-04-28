@@ -16,6 +16,10 @@ export const maxDuration = 300;
 const SendMessageRequestSchema = z.object({
   prompt: z.string().min(1).max(100_000),
   idempotency_key: z.string().min(1).max(200).optional(),
+  /** Override agent's max_turns for this message. Bounded by validation. */
+  max_turns: z.number().int().min(1).max(200).optional(),
+  /** Override agent's max_budget_usd for this message. */
+  max_budget_usd: z.number().positive().max(1000).optional(),
 });
 
 export const POST = withErrorHandler(async (request: NextRequest, context) => {
@@ -42,6 +46,8 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
       idempotencyKey: input.idempotency_key,
       callerKeyId: auth.apiKeyId,
       platformApiUrl: new URL(request.url).origin,
+      maxTurnsOverride: input.max_turns,
+      maxBudgetUsdOverride: input.max_budget_usd,
     });
 
     return new Response(result.stream, {

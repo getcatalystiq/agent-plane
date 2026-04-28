@@ -19,27 +19,27 @@
 import { z } from "zod";
 import { withTenantTransaction, queryOne, execute } from "@/db";
 import {
-  createSession,
   getSession,
-  casIdleToActive,
   casCreatingToActive,
   casToStopped,
-  findSessionByContextId,
   transitionSessionStatus,
   updateSessionSandbox,
   updateSessionMcpRefreshedAt,
   defaultIdleTtlSeconds,
   incrementMessageCount,
+  SESSION_EXPIRES_AFTER_INTERVAL,
+  MAX_CONCURRENT_ACTIVE_SESSIONS,
   type Session,
 } from "@/lib/sessions";
 import {
   checkTenantBudget,
   transitionMessageStatus,
 } from "@/lib/session-messages";
-import { SessionMessageRow, type AgentInternal } from "@/lib/validation";
+import { SessionMessageRow, SessionRow as SessionRowSchema, AgentRowInternal, type AgentInternal } from "@/lib/validation";
 import {
   createSessionSandbox,
   reconnectSessionSandbox,
+  reconnectSandbox,
   type SessionSandboxInstance,
   type SessionSandboxConfig,
 } from "@/lib/sandbox";
@@ -77,6 +77,18 @@ const PUBLIC_TRIGGERS: ReadonlySet<RunTriggeredBy> = new Set([
   "playground",
   "chat",
 ]);
+
+/**
+ * FIX #29: Zod schema for idempotency cache reads. The cache is process memory
+ * (Map<string, unknown>); without a schema parse a corrupt entry could leak
+ * raw `unknown` to callers. Parse-on-read with fall-through on failure keeps
+ * the dispatcher honest.
+ */
+const IdempotentResponseSchema = z.object({
+  sessionId: z.string().uuid(),
+  messageId: z.string().uuid(),
+});
+type IdempotentResponse = z.infer<typeof IdempotentResponseSchema>;
 
 /**
  * FIX #9 (partial): per-session AbortControllers used to signal in-flight
@@ -160,28 +172,56 @@ export async function dispatchSessionMessage(input: DispatchInput): Promise<Disp
     ? `dispatch:${input.tenantId}:${input.idempotencyKey}`
     : null;
   if (idempCacheKey) {
-    const cached = getIdempotentResponse(idempCacheKey) as
-      | { sessionId: string; messageId: string }
-      | null;
+    const raw = getIdempotentResponse(idempCacheKey);
+    let cached: IdempotentResponse | null = null;
+    if (raw !== null) {
+      const parseResult = IdempotentResponseSchema.safeParse(raw);
+      if (parseResult.success) {
+        cached = parseResult.data;
+      } else {
+        // FIX #29: corrupt cache entry — fall through to fresh dispatch.
+        logger.warn("Idempotency cache entry failed schema parse; dispatching fresh", {
+          idempotency_key: input.idempotencyKey,
+          tenant_id: input.tenantId,
+        });
+      }
+    }
     if (cached) {
-      logger.info("Dispatcher idempotency hit", {
-        idempotency_key: input.idempotencyKey,
-        tenant_id: input.tenantId,
-        session_id: cached.sessionId,
-        message_id: cached.messageId,
-      });
-      // Empty closed stream — caller already has the message_id and can poll.
-      const empty = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.close();
-        },
-      });
-      return {
-        sessionId: cached.sessionId,
-        messageId: cached.messageId,
-        stream: empty,
-        response: () => new Response(empty, { status: 200, headers: ndjsonHeaders() }),
-      };
+      // FIX #22: verify the cached message still exists in DB and is in a
+      // sane state (i.e. tenant-scoped row was not deleted). If not, fall
+      // through and dispatch fresh.
+      const existing = await queryOne(
+        z.object({ id: z.string(), status: z.string() }),
+        "SELECT id, status FROM session_messages WHERE id = $1 AND tenant_id = $2",
+        [cached.messageId, input.tenantId],
+      );
+      if (!existing) {
+        logger.warn("Idempotency cache hit but message row missing; dispatching fresh", {
+          idempotency_key: input.idempotencyKey,
+          tenant_id: input.tenantId,
+          cached_message_id: cached.messageId,
+        });
+      } else {
+        logger.info("Dispatcher idempotency hit", {
+          idempotency_key: input.idempotencyKey,
+          tenant_id: input.tenantId,
+          session_id: cached.sessionId,
+          message_id: cached.messageId,
+          message_status: existing.status,
+        });
+        // Empty closed stream — caller already has the message_id and can poll.
+        const empty = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.close();
+          },
+        });
+        return {
+          sessionId: cached.sessionId,
+          messageId: cached.messageId,
+          stream: empty,
+          response: () => new Response(empty, { status: 200, headers: ndjsonHeaders() }),
+        };
+      }
     }
   }
 
@@ -256,7 +296,6 @@ export async function cancelSession(sessionId: string, tenantId: TenantId): Prom
   // Stop the sandbox if we have one — kill the runner subprocess.
   if (session.sandbox_id) {
     try {
-      const { reconnectSandbox } = await import("@/lib/sandbox");
       const sandbox = await reconnectSandbox(session.sandbox_id);
       if (sandbox) await sandbox.stop();
     } catch (err) {
@@ -290,7 +329,7 @@ async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedE
     // Load agent + budget once. Composio MCP cache fields live on the
     // internal row and the dispatcher needs them for buildMcpConfig.
     const agent = await tx.queryOne(
-      (await import("@/lib/validation")).AgentRowInternal,
+      AgentRowInternal,
       "SELECT * FROM agents WHERE id = $1 AND tenant_id = $2",
       [input.agentId, input.tenantId],
     );
@@ -393,7 +432,7 @@ async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedE
       const created = await tx.queryOne(
         SessionRowSchema,
         `INSERT INTO sessions (tenant_id, agent_id, status, context_id, ephemeral, idle_ttl_seconds, expires_at)
-         SELECT $1, $2, 'creating', $4, $5, $6, NOW() + INTERVAL '4 hours'
+         SELECT $1, $2, 'creating', $4, $5, $6, NOW() + INTERVAL '${SESSION_EXPIRES_AFTER_INTERVAL}'
          WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active')) < $3
          RETURNING *`,
         [input.tenantId, input.agentId, MAX_CONCURRENT_ACTIVE_SESSIONS, input.contextId ?? null, ephemeral, idleTtlSeconds],
@@ -458,7 +497,7 @@ async function runMessageStream(
   const pluginPromise = skipPluginRefresh
     ? Promise.resolve(EMPTY_PLUGINS)
     : fetchPluginContent(agent.plugins ?? []);
-  const authPromise = resolveSandboxAuth(input.tenantId as TenantId, effectiveRunner);
+  const authPromise = resolveSandboxAuth(input.tenantId, effectiveRunner);
 
   let sandbox: SessionSandboxInstance;
 
@@ -605,8 +644,12 @@ async function runMessageStream(
     input.tenantId,
     messageId,
     (event) => {
-      if (event.type === "session_info" && event.sdk_session_id) {
-        sdkSessionIdRef.value = event.sdk_session_id as string;
+      if (
+        event.type === "session_info" &&
+        typeof event.sdk_session_id === "string" &&
+        event.sdk_session_id.length > 0
+      ) {
+        sdkSessionIdRef.value = event.sdk_session_id;
       }
     },
   );
@@ -811,9 +854,16 @@ async function sessionTail(args: SessionTailArgs): Promise<void> {
   if (!ephemeral && sdkSessionId) {
     sessionBlobUrl = await backupSessionFile(sandbox, tenantId, sessionId, sdkSessionId);
     if (!sessionBlobUrl) {
-      logger.error("Session file backup failed — cold start will lose context since last successful backup", {
+      // FIX #21: structured-event surface so backup-retry / observability can
+      // hook in. TODO: add a `last_backup_failed_at` column to sessions so
+      // the cleanup cron can drive a follow-up backup pass; deferred here
+      // because schema migrations are outside this fixer's scope.
+      logger.error("session_blob_backup_failed", {
+        event: "session_blob_backup_failed",
         session_id: sessionId,
+        tenant_id: tenantId,
         sdk_session_id: sdkSessionId,
+        impact: "cold_start_loses_context_since_last_successful_backup",
       });
     }
   }
@@ -857,7 +907,3 @@ function recordMcpRefresh(sessionId: string, tenantId: TenantId): void {
   });
 }
 
-// Re-importable handle on the SessionRow Zod schema for use inside the
-// transaction (avoids a circular import dance with sessions.ts).
-import { SessionRow as SessionRowSchema } from "@/lib/validation";
-import { MAX_CONCURRENT_ACTIVE_SESSIONS } from "@/lib/session-messages";

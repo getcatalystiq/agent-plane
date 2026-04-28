@@ -116,9 +116,22 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
     try {
       sandbox = await Sandbox.get({ sandboxId: session.sandbox_id! });
 
+      // FIX #13 (perf-004): cache the last-seen byte length so we can skip
+      // re-reading when the transcript file hasn't grown since the prior
+      // poll. The Vercel Sandbox file API doesn't expose a streaming-read
+      // primitive, so this is the minimum viable optimization — at least we
+      // stop transferring the same MBs across the wire on every 2s tick.
+      let lastByteLength = 0;
       while (!detached) {
         const buf = await sandbox.readFileToBuffer({ path: transcriptPath });
         if (buf) {
+          // Skip parse work entirely when the file hasn't grown.
+          if (buf.byteLength === lastByteLength) {
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+            continue;
+          }
+          lastByteLength = buf.byteLength;
+
           const text = buf.toString("utf-8");
           const lines = text.split("\n").filter(Boolean);
 

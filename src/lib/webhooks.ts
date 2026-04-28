@@ -108,6 +108,7 @@ export type DeliveryError =
   | "invalid_json"
   | "payload_too_large"
   | "rate_limited"
+  | "budget_exceeded"
   | "internal_error";
 
 export interface VerifyAndPrepareSuccess {

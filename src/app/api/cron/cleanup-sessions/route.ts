@@ -18,25 +18,58 @@ export const dynamic = "force-dynamic";
 
 const CREATING_WATCHDOG_MINUTES = 5;
 const ACTIVE_WATCHDOG_MINUTES = 30;
+const SANDBOX_STOP_CONCURRENCY = 5;
 
 /**
- * Stop a sandbox by id, swallowing errors. Used in every sweep — sandbox API
- * failures must never block the row-level cleanup that keeps state consistent.
+ * FIX #12: bounded-concurrency helper. Runs `fn` for each item with at most
+ * `cap` in flight at a time, and uses Promise.allSettled semantics so a
+ * single failing handler doesn't abort the rest of the sweep.
+ */
+async function withConcurrency<T, R>(
+  items: T[],
+  cap: number,
+  fn: (item: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let i = 0;
+  const workerCount = Math.min(cap, items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      try {
+        results[idx] = { status: "fulfilled", value: await fn(items[idx]) };
+      } catch (err) {
+        results[idx] = { status: "rejected", reason: err };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Stop a sandbox by id. Returns true on success, false on failure (so the
+ * caller can decide whether to clear `sandbox_id` from the DB row).
+ *
+ * FIX #23: callers MUST gate the `sandbox_id` clear on this returning true —
+ * otherwise the orphan sweep cannot retry next tick.
  */
 async function stopSandboxBestEffort(
   sandboxId: string | null,
   context: { session_id: string; reason: string },
-): Promise<void> {
-  if (!sandboxId) return;
+): Promise<boolean> {
+  if (!sandboxId) return true;
   try {
     const sandbox = await reconnectSandbox(sandboxId);
     if (sandbox) await sandbox.stop();
+    return true;
   } catch (err) {
     logger.warn("Failed to stop sandbox during cleanup", {
       ...context,
       sandbox_id: sandboxId,
       error: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
 }
 
@@ -135,44 +168,37 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   //    synthetic timeout. Genuinely stuck active sessions are caught by the
   //    active-watchdog (30 min) at step 4.
   const expired = await getExpiredSessions();
-  for (const session of expired) {
-    try {
-      if (session.status === "active") {
-        // Skip — let the active-watchdog or natural finalize handle it.
-        continue;
-      }
-      const previousSandboxId = await casExpiredStop(session.id);
-      if (previousSandboxId === null) {
-        // Lost race: state changed (e.g. idle → active or creating → active)
-        // between our SELECT and UPDATE. Skip this tick.
-        continue;
-      }
-      if (previousSandboxId) {
-        await stopSandboxBestEffort(previousSandboxId, {
-          session_id: session.id,
-          reason: "expired",
-        });
-      }
-      // Mark any in-flight queued/running message terminal. For creating/idle
-      // states this is rare but defends against a final-millisecond race.
-      await markInFlightMessage(
-        session.id,
-        "timed_out",
-        "session_expired",
-        "Session exceeded 4h wall-clock cap; stopped by cleanup cron.",
-      );
-      await cleanupBlob(session);
-      expiredCleaned++;
-      logger.info("Expired session cleaned up", {
+  // FIX #12: parallelize at SANDBOX_STOP_CONCURRENCY and use allSettled.
+  const expiredResults = await withConcurrency(expired, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    if (session.status === "active") return false;
+    const previousSandboxId = await casExpiredStop(session.id);
+    if (previousSandboxId === null) return false;
+    if (previousSandboxId) {
+      await stopSandboxBestEffort(previousSandboxId, {
         session_id: session.id,
-        tenant_id: session.tenant_id,
-        expires_at: session.expires_at,
-        previous_status: session.status,
+        reason: "expired",
       });
-    } catch (err) {
+    }
+    await markInFlightMessage(
+      session.id,
+      "timed_out",
+      "session_expired",
+      "Session exceeded 4h wall-clock cap; stopped by cleanup cron.",
+    );
+    await cleanupBlob(session);
+    logger.info("Expired session cleaned up", {
+      session_id: session.id,
+      tenant_id: session.tenant_id,
+      expires_at: session.expires_at,
+      previous_status: session.status,
+    });
+    return true;
+  });
+  expiredCleaned = expiredResults.filter((r) => r.status === "fulfilled" && r.value === true).length;
+  for (const r of expiredResults) {
+    if (r.status === "rejected") {
       logger.error("Failed to clean up expired session", {
-        session_id: session.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
       });
     }
   }
@@ -181,103 +207,103 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   //    `idle_ttl_seconds`. Atomic CAS `idle → stopped` so we never race with
   //    a concurrent dispatcher `idle → active`.
   const idleSessions = await getIdleSessions();
-  for (const session of idleSessions) {
-    try {
-      const cas = await query(
-        z.object({ sandbox_id: z.string().nullable() }),
-        `UPDATE sessions
-         SET status = 'stopped', sandbox_id = NULL, idle_since = NULL
-         WHERE id = $1 AND status = 'idle'
-         RETURNING sandbox_id`,
-        [session.id],
-      );
-      if (cas.length === 0) {
-        // Lost the race to a dispatcher idle→active; skip.
-        continue;
-      }
-      const previousSandboxId = cas[0]?.sandbox_id ?? null;
-      if (previousSandboxId) {
-        await stopSandboxBestEffort(previousSandboxId, {
-          session_id: session.id,
-          reason: "idle_ttl",
-        });
-      }
-      await cleanupBlob(session);
-      idleCleaned++;
-      logger.info("Idle session cleaned up", {
+  const idleResults = await withConcurrency(idleSessions, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    const cas = await query(
+      z.object({ sandbox_id: z.string().nullable() }),
+      `UPDATE sessions
+       SET status = 'stopped', sandbox_id = NULL, idle_since = NULL
+       WHERE id = $1 AND status = 'idle'
+       RETURNING sandbox_id`,
+      [session.id],
+    );
+    if (cas.length === 0) return false;
+    const previousSandboxId = cas[0]?.sandbox_id ?? null;
+    if (previousSandboxId) {
+      await stopSandboxBestEffort(previousSandboxId, {
         session_id: session.id,
-        tenant_id: session.tenant_id,
-        idle_since: session.idle_since,
-        idle_ttl_seconds: session.idle_ttl_seconds,
+        reason: "idle_ttl",
       });
-    } catch (err) {
+    }
+    await cleanupBlob(session);
+    logger.info("Idle session cleaned up", {
+      session_id: session.id,
+      tenant_id: session.tenant_id,
+      idle_since: session.idle_since,
+      idle_ttl_seconds: session.idle_ttl_seconds,
+    });
+    return true;
+  });
+  idleCleaned = idleResults.filter((r) => r.status === "fulfilled" && r.value === true).length;
+  for (const r of idleResults) {
+    if (r.status === "rejected") {
       logger.error("Failed to clean up idle session", {
-        session_id: session.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
       });
     }
   }
 
   // 3. Creating watchdog — sandbox boot timed out (>5 min in `creating`).
   const stuckCreating = await getStuckSessions("creating", CREATING_WATCHDOG_MINUTES);
-  for (const session of stuckCreating) {
-    try {
-      const previousSandboxId = await forceStop(session.id);
-      if (previousSandboxId) {
-        await stopSandboxBestEffort(previousSandboxId, {
-          session_id: session.id,
-          reason: "creating_watchdog",
-        });
-      }
-      await markInFlightMessage(
-        session.id,
-        "failed",
-        "watchdog_creating_timeout",
-        `Session stuck in 'creating' for >${CREATING_WATCHDOG_MINUTES} minutes.`,
-      );
-      await cleanupBlob(session);
-      creatingWatchdog++;
-      logger.warn("Creating-watchdog fired", {
+  const creatingResults = await withConcurrency(stuckCreating, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    const previousSandboxId = await forceStop(session.id);
+    if (previousSandboxId) {
+      await stopSandboxBestEffort(previousSandboxId, {
         session_id: session.id,
-        tenant_id: session.tenant_id,
-        created_at: session.created_at,
+        reason: "creating_watchdog",
       });
-    } catch (err) {
+    }
+    await markInFlightMessage(
+      session.id,
+      "failed",
+      "watchdog_creating_timeout",
+      `Session stuck in 'creating' for >${CREATING_WATCHDOG_MINUTES} minutes.`,
+    );
+    await cleanupBlob(session);
+    logger.warn("Creating-watchdog fired", {
+      session_id: session.id,
+      tenant_id: session.tenant_id,
+      created_at: session.created_at,
+    });
+    return true;
+  });
+  creatingWatchdog = creatingResults.filter((r) => r.status === "fulfilled" && r.value === true).length;
+  for (const r of creatingResults) {
+    if (r.status === "rejected") {
       logger.error("Failed creating-watchdog cleanup", {
-        session_id: session.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
       });
     }
   }
 
   // 4. Active watchdog — runner crashed silently (>30 min in `active`).
   const stuckActive = await getStuckSessions("active", ACTIVE_WATCHDOG_MINUTES);
-  for (const session of stuckActive) {
-    try {
-      const previousSandboxId = await forceStop(session.id);
-      if (previousSandboxId) {
-        await stopSandboxBestEffort(previousSandboxId, {
-          session_id: session.id,
-          reason: "active_watchdog",
-        });
-      }
-      await markInFlightMessage(
-        session.id,
-        "timed_out",
-        "watchdog_active_timeout",
-        `Session stuck in 'active' for >${ACTIVE_WATCHDOG_MINUTES} minutes; runner presumed dead.`,
-      );
-      await cleanupBlob(session);
-      activeWatchdog++;
-      logger.warn("Active-watchdog fired", {
+  const activeResults = await withConcurrency(stuckActive, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    const previousSandboxId = await forceStop(session.id);
+    if (previousSandboxId) {
+      await stopSandboxBestEffort(previousSandboxId, {
         session_id: session.id,
-        tenant_id: session.tenant_id,
-        updated_at: session.updated_at,
+        reason: "active_watchdog",
       });
-    } catch (err) {
+    }
+    await markInFlightMessage(
+      session.id,
+      "timed_out",
+      "watchdog_active_timeout",
+      `Session stuck in 'active' for >${ACTIVE_WATCHDOG_MINUTES} minutes; runner presumed dead.`,
+    );
+    await cleanupBlob(session);
+    logger.warn("Active-watchdog fired", {
+      session_id: session.id,
+      tenant_id: session.tenant_id,
+      updated_at: session.updated_at,
+    });
+    return true;
+  });
+  activeWatchdog = activeResults.filter((r) => r.status === "fulfilled" && r.value === true).length;
+  for (const r of activeResults) {
+    if (r.status === "rejected") {
       logger.error("Failed active-watchdog cleanup", {
-        session_id: session.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
       });
     }
   }
@@ -290,27 +316,33 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   //    does not expose a global enumeration API — sandboxes that lost their
   //    DB row entirely will be reaped by the platform's own idle TTL.
   const orphaned = await getOrphanedSandboxSessions();
-  for (const session of orphaned) {
-    try {
-      await stopSandboxBestEffort(session.sandbox_id, {
-        session_id: session.id,
-        reason: "orphan_sandbox",
-      });
-      await execute(
-        `UPDATE sessions SET sandbox_id = NULL
-         WHERE id = $1 AND status = 'stopped'`,
-        [session.id],
-      );
-      orphansCleaned++;
-      logger.info("Orphan sandbox stopped", {
-        session_id: session.id,
-        tenant_id: session.tenant_id,
-        sandbox_id: session.sandbox_id,
-      });
-    } catch (err) {
+  // FIX #23: only clear `sandbox_id` after the sandbox-stop call succeeds.
+  // On failure leave the row alone so the next tick can retry; otherwise the
+  // orphan is "lost" — the platform's idle TTL eventually reaps it but until
+  // then we've leaked the sandbox.
+  const orphanResults = await withConcurrency(orphaned, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    const stopped = await stopSandboxBestEffort(session.sandbox_id, {
+      session_id: session.id,
+      reason: "orphan_sandbox",
+    });
+    if (!stopped) return false;
+    await execute(
+      `UPDATE sessions SET sandbox_id = NULL
+       WHERE id = $1 AND status = 'stopped'`,
+      [session.id],
+    );
+    logger.info("Orphan sandbox stopped", {
+      session_id: session.id,
+      tenant_id: session.tenant_id,
+      sandbox_id: session.sandbox_id,
+    });
+    return true;
+  });
+  orphansCleaned = orphanResults.filter((r) => r.status === "fulfilled" && r.value === true).length;
+  for (const r of orphanResults) {
+    if (r.status === "rejected") {
       logger.error("Failed orphan-sandbox cleanup", {
-        session_id: session.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
       });
     }
   }

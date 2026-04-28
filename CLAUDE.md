@@ -107,7 +107,7 @@ src/
         cleanup-sessions/ # every 5 min: idle TTL stop + stuck watchdog (creating>5min, active>30min) + orphan-sandbox sweep + expires_at cap
         cleanup-transcripts/  # daily transcript cleanup
         refresh-snapshot/  # daily SDK snapshot refresh (Vercel Sandbox snapshot)
-        scheduled-runs/   # per-minute scheduled agent dispatcher (calls dispatchSessionMessage with triggeredBy='schedule', ephemeral=true)
+        scheduled-runs/   # per-minute scheduled agent dispatcher (calls dispatchSessionMessage with triggeredBy='schedule', ephemeral=false, idle_ttl=300s — see trigger table)
       health/             # health check (no auth)
       keys/               # tenant-scoped API key management
       mcp-servers/        # MCP OAuth callback + server listing
@@ -302,7 +302,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Transcript viewer renders markdown via `react-markdown` + `remark-gfm`; HTML sanitized with `dompurify`
 - JSONB array mutations use atomic SQL guards (`NOT EXISTS` for uniqueness, `jsonb_array_length` for limits) to prevent TOCTOU races
 - Composio discovery helpers (`listComposioToolkits`, `listComposioTools`) are shared between admin and tenant routes via `src/lib/composio.ts`; tool pagination capped at 10 pages
-- Scheduled runs: cron dispatcher runs every minute, claims due agents (`FOR UPDATE SKIP LOCKED`), computes next run time, and dispatches via `dispatchSessionMessage({ triggeredBy: 'schedule', ephemeral: true })`
+- Scheduled runs: cron dispatcher runs every minute, claims due agents (`FOR UPDATE SKIP LOCKED`), computes next run time, and dispatches via `dispatchSessionMessage({ triggeredBy: 'schedule', ephemeral: false, idle_ttl_seconds: 300 })`. The session stays warm across cron ticks within the 300s idle window so a follow-up tick can reuse the same sandbox; the cleanup cron stops it once the per-row TTL elapses. Matches the trigger table at the top of this file.
 - Webhook ingress: HMAC verify → `webhook_deliveries` idempotent insert → optional content-dedupe + filter → `dispatchSessionMessage({ triggeredBy: 'webhook', ephemeral: true, webhookSourceId })` in `after()`. Duplicate `delivery_id` returns 200 with the original `message_id`.
 - A2A executor: looks up `findSessionByContextId(tenantId, contextId)` first; if a non-stopped session is found, reuses it (`ephemeral: false`, append message). Otherwise creates a fresh ephemeral session. The returned `messageId` becomes the A2A `taskId`. `tasks/cancel` maps `taskId` → `messageId` → `sessionId` → `cancelSession()`.
 - Transcript capture preserves critical events (`result` and `error`) even after `MAX_TRANSCRIPT_EVENTS` truncation, and excludes `text_delta` events from the chunks array (per the institutional learning in `docs/solutions/logic-errors/transcript-capture-and-streaming-fixes.md`).
