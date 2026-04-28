@@ -189,11 +189,12 @@ export function TranscriptViewer({ transcript, prompt, isStreaming = false }: { 
     setUserHasScrolledUp(!atBottom);
   }, []);
 
+  // Track scroll position unconditionally — the ref must be up-to-date the
+  // moment a new event arrives, even if streaming just flipped on.
   useEffect(() => {
-    if (!isStreaming) return;
     window.addEventListener("scroll", checkScrollPosition, { passive: true });
     return () => window.removeEventListener("scroll", checkScrollPosition);
-  }, [isStreaming, checkScrollPosition]);
+  }, [checkScrollPosition]);
 
   useEffect(() => {
     if (isStreaming && !userHasScrolledUpRef.current) {
@@ -209,7 +210,7 @@ export function TranscriptViewer({ transcript, prompt, isStreaming = false }: { 
       <CardContent className="p-0">
         <div
           ref={scrollContainerRef}
-          onScroll={isStreaming ? checkScrollPosition : undefined}
+          onScroll={checkScrollPosition}
           className="space-y-3 overflow-y-auto px-6 pb-6"
         >
           {prompt && (
