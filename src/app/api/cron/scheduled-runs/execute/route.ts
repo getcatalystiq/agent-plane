@@ -81,6 +81,7 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 
   let messageId: string;
   let sessionId: string;
+  let streamDetached = false;
   try {
     const dispatchResult = await dispatchSessionMessage({
       tenantId,
@@ -105,6 +106,8 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     // read is now wrapped in a 30s race; on timeout we mark the message
     // failed with `error_type: 'drain_timeout'` and break out of the loop.
     const reader = dispatchResult.stream.getReader();
+    const decoder = new TextDecoder();
+    let lineBuffer = "";
     let timedOut = false;
     try {
       // eslint-disable-next-line no-constant-condition
@@ -128,6 +131,20 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
           break;
         }
         if (result.done) break;
+        // Scan the chunk for the dispatcher's `stream_detached` event. After
+        // detach the runner is still running and will finalize via the
+        // internal-upload route — racing it with the post-drain fallback
+        // prematurely flips a long-running schedule run to `failed`. Decode
+        // line-by-line (4.5min runs may emit dozens of events) and look for
+        // the marker; we don't need full JSON parsing, just substring match.
+        lineBuffer += decoder.decode(result.value, { stream: true });
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.includes('"type":"stream_detached"')) {
+            streamDetached = true;
+          }
+        }
       }
     } finally {
       try { reader.releaseLock(); } catch { /* ignore */ }
@@ -163,6 +180,21 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse({ status: "failed", reason: "dispatch_error" });
+  }
+
+  // If the dispatcher's stream-detach fired during drain (long-running job),
+  // the runner is still executing and owns finalization via the internal
+  // upload route. Skip the post-drain fallback — racing it with the runner
+  // prematurely stamps `schedule_no_terminal_event` on jobs that succeed
+  // moments later. The cleanup cron's 30-min active-watchdog is the real
+  // backstop if the runner never uploads.
+  if (streamDetached) {
+    logger.info("Scheduled run detached — runner will finalize via internal upload", {
+      schedule_id,
+      agent_id: agent.id,
+      message_id: messageId,
+    });
+    return jsonResponse({ status: "detached", message_id: messageId });
   }
 
   // If the dispatcher stream finished but the message status is still
