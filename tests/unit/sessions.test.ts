@@ -28,7 +28,8 @@ import {
   transitionSessionStatus,
   incrementMessageCount,
   getIdleSessions,
-  getStuckSessions,
+  getStuckCreatingSessions,
+  getStuckActiveSessions,
   getActiveSessionsWithoutRunningMessage,
   updateSessionSandbox,
 } from "@/lib/sessions";
@@ -257,30 +258,37 @@ describe("getIdleSessions", () => {
   });
 });
 
-describe("getStuckSessions", () => {
+describe("getStuckCreatingSessions", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("queries stuck creating sessions when called with creating", async () => {
+  it("queries `creating` sessions past the minute threshold using created_at", async () => {
     vi.mocked(query).mockResolvedValue([]);
-    await getStuckSessions("creating", 5);
+    await getStuckCreatingSessions(5);
     const sql = vi.mocked(query).mock.calls[0][1] as string;
-    expect(sql).toContain("status = $1");
     const params = vi.mocked(query).mock.calls[0][2] as unknown[];
-    expect(params).toContain("creating");
+    expect(sql).toContain("status = 'creating'");
+    expect(sql).toContain("created_at");
     expect(params).toContain(5);
   });
+});
 
-  it("queries stuck active sessions when called with active", async () => {
+describe("getStuckActiveSessions", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("uses per-agent max_runtime_seconds + grace as the threshold", async () => {
     vi.mocked(query).mockResolvedValue([]);
-    await getStuckSessions("active", 30);
-    // FIX #28: active branch joins on session_messages.started_at, so the
-    // SQL hard-codes status='active' and the only positional param is the
-    // minute threshold. The creating branch still uses ($1=state, $2=mins).
+    await getStuckActiveSessions(120);
+    // FIX #28 + per-agent: joins session_messages with agents, threshold is
+    // (max_runtime_seconds + grace) seconds with a 600s default fallback for
+    // missing agents.
     const sql = vi.mocked(query).mock.calls[0][1] as string;
     const params = vi.mocked(query).mock.calls[0][2] as unknown[];
     expect(sql).toContain("session_messages");
     expect(sql).toContain("started_at");
-    expect(params).toContain(30);
+    expect(sql).toContain("agents");
+    expect(sql).toContain("max_runtime_seconds");
+    expect(sql).toContain("COALESCE");
+    expect(params).toContain(120);
   });
 });
 

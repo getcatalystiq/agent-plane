@@ -1,11 +1,12 @@
 import { NextRequest } from "next/server";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { execute, query } from "@/db";
-import { reconnectSandbox } from "@/lib/sandbox";
+import { reconnectSandbox, salvageRunnerTranscript } from "@/lib/sandbox";
 import { invalidateSandboxHandle } from "@/lib/dispatcher";
 import {
   getIdleSessions,
-  getStuckSessions,
+  getStuckCreatingSessions,
+  getStuckActiveSessions,
   getExpiredSessions,
   getOrphanedSandboxSessions,
   getActiveSessionsWithoutRunningMessage,
@@ -16,6 +17,7 @@ import {
   type CleanupErrorType,
 } from "@/lib/sessions";
 import { deleteSessionFile } from "@/lib/session-files";
+import { uploadTranscript } from "@/lib/transcripts";
 import { logger } from "@/lib/logger";
 import { verifyCronSecret } from "@/lib/cron-auth";
 import { withConcurrency } from "@/lib/utils";
@@ -24,7 +26,12 @@ import { z } from "zod";
 export const dynamic = "force-dynamic";
 
 const CREATING_WATCHDOG_MINUTES = 5;
-const ACTIVE_WATCHDOG_MINUTES = 30;
+// The active-watchdog uses each agent's `max_runtime_seconds` plus this grace
+// (covers post-termination upload latency + the 5-min cron cadence). An agent
+// configured for 600s (default) gets caught at ~600+grace; an agent configured
+// for 3600s gets caught at ~3600+grace. Agents with very short runtimes still
+// see the cron's 5-min tick floor in practice.
+const ACTIVE_WATCHDOG_GRACE_SECONDS = 120;
 const ACTIVE_NO_RUNNING_MESSAGE_MINUTES = 5;
 const SANDBOX_STOP_CONCURRENCY = 5;
 
@@ -59,14 +66,30 @@ async function stopSandboxBestEffort(
 
 /**
  * Mark the in-flight `running` message for a session as a watchdog terminal
- * status. Used by both creating-timeout and active-timeout watchdogs.
+ * status. Used by both creating-timeout and active-timeout watchdogs. When a
+ * salvaged transcript URL is supplied we attach it so the user can still see
+ * what the runner executed before the watchdog fired.
  */
 async function markInFlightMessage(
   sessionId: string,
   toStatus: "failed" | "timed_out",
   errorType: CleanupErrorType,
   errorMessage: string,
+  transcriptBlobUrl: string | null = null,
 ): Promise<void> {
+  if (transcriptBlobUrl) {
+    await execute(
+      `UPDATE session_messages
+       SET status = $2,
+           completed_at = NOW(),
+           error_type = $3,
+           error_messages = ARRAY[$4]::text[],
+           transcript_blob_url = $5
+       WHERE session_id = $1 AND status = 'running'`,
+      [sessionId, toStatus, errorType, errorMessage, transcriptBlobUrl],
+    );
+    return;
+  }
   await execute(
     `UPDATE session_messages
      SET status = $2,
@@ -76,6 +99,60 @@ async function markInFlightMessage(
      WHERE session_id = $1 AND status = 'running'`,
     [sessionId, toStatus, errorType, errorMessage],
   );
+}
+
+/**
+ * Find the in-flight `running` message id for a session, if any. The
+ * watchdog sweeps use this to address the salvage upload to the right blob
+ * path. Returns null when no running message exists (e.g. a `creating`
+ * session whose runner hasn't started yet).
+ */
+async function findRunningMessageId(sessionId: string): Promise<string | null> {
+  const rows = await query(
+    z.object({ id: z.string() }),
+    `SELECT id FROM session_messages
+     WHERE session_id = $1 AND status = 'running'
+     ORDER BY started_at DESC
+     LIMIT 1`,
+    [sessionId],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Best-effort transcript salvage from a still-alive sandbox. Reads the
+ * runner's NDJSON transcript file and uploads it to blob storage. Returns
+ * the blob URL on success; null on any failure (sandbox gone, file missing,
+ * upload error). Always non-fatal — callers proceed to stop the sandbox
+ * regardless.
+ */
+async function salvageAndUpload(
+  sandboxId: string,
+  tenantId: string,
+  messageId: string,
+  context: { session_id: string; reason: CleanupReason },
+): Promise<string | null> {
+  try {
+    const content = await salvageRunnerTranscript(sandboxId, messageId);
+    if (!content) return null;
+    const blobUrl = await uploadTranscript(tenantId, messageId, content);
+    logger.info("Watchdog salvaged transcript", {
+      ...context,
+      sandbox_id: sandboxId,
+      message_id: messageId,
+      transcript_size: content.length,
+      transcript_blob_url: blobUrl,
+    });
+    return blobUrl;
+  } catch (err) {
+    logger.warn("Watchdog transcript salvage failed (non-fatal)", {
+      ...context,
+      sandbox_id: sandboxId,
+      message_id: messageId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /**
@@ -113,11 +190,24 @@ function countSweepResults<T>(
 
 // Expires_at sweep — ONLY transitions `creating` / `idle` sessions, never
 // `active` (FIX #5 adv-004). Genuinely stuck active sessions are caught by
-// the active-watchdog (30 min) below.
+// the active-watchdog below (per-agent threshold).
 async function sweepExpired(): Promise<number> {
   const expired = await getExpiredSessions();
   const results = await withConcurrency(expired, SANDBOX_STOP_CONCURRENCY, async (session) => {
     if (session.status === "active") return false;
+    // Salvage anything the runner managed to emit before the 4h cap. For
+    // expired sessions the sandbox is usually long gone, but try anyway —
+    // the helper is null-on-failure.
+    const messageId = await findRunningMessageId(session.id);
+    let salvagedBlobUrl: string | null = null;
+    if (session.sandbox_id && messageId) {
+      salvagedBlobUrl = await salvageAndUpload(
+        session.sandbox_id,
+        session.tenant_id,
+        messageId,
+        { session_id: session.id, reason: "expired" },
+      );
+    }
     const previousSandboxId = await casExpireToStopped(session.id);
     if (previousSandboxId === null) return false;
     if (previousSandboxId) {
@@ -128,6 +218,7 @@ async function sweepExpired(): Promise<number> {
       "timed_out",
       "session_expired",
       "Session exceeded 4h wall-clock cap; stopped by cleanup cron.",
+      salvagedBlobUrl,
     );
     await cleanupBlob(session);
     logger.info("Expired session cleaned up", {
@@ -173,8 +264,20 @@ async function sweepIdle(): Promise<number> {
 }
 
 async function sweepCreatingWatchdog(): Promise<number> {
-  const stuckCreating = await getStuckSessions("creating", CREATING_WATCHDOG_MINUTES);
+  const stuckCreating = await getStuckCreatingSessions(CREATING_WATCHDOG_MINUTES);
   const results = await withConcurrency(stuckCreating, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    // Boot may have completed enough for the runner to start emitting before
+    // the CAS-to-active raced; try salvage. Most often returns null.
+    const messageId = await findRunningMessageId(session.id);
+    let salvagedBlobUrl: string | null = null;
+    if (session.sandbox_id && messageId) {
+      salvagedBlobUrl = await salvageAndUpload(
+        session.sandbox_id,
+        session.tenant_id,
+        messageId,
+        { session_id: session.id, reason: "creating_watchdog" },
+      );
+    }
     const previousSandboxId = await forceStopSession(session.id);
     if (previousSandboxId) {
       await stopSandboxBestEffort(previousSandboxId, { session_id: session.id, reason: "creating_watchdog" });
@@ -184,12 +287,14 @@ async function sweepCreatingWatchdog(): Promise<number> {
       "failed",
       "watchdog_creating_timeout",
       `Session stuck in 'creating' for >${CREATING_WATCHDOG_MINUTES} minutes.`,
+      salvagedBlobUrl,
     );
     await cleanupBlob(session);
     logger.warn("Creating-watchdog fired", {
       session_id: session.id,
       tenant_id: session.tenant_id,
       created_at: session.created_at,
+      transcript_salvaged: salvagedBlobUrl !== null,
     });
     return true;
   });
@@ -197,8 +302,22 @@ async function sweepCreatingWatchdog(): Promise<number> {
 }
 
 async function sweepActiveWatchdog(): Promise<number> {
-  const stuckActive = await getStuckSessions("active", ACTIVE_WATCHDOG_MINUTES);
+  const stuckActive = await getStuckActiveSessions(ACTIVE_WATCHDOG_GRACE_SECONDS);
   const results = await withConcurrency(stuckActive, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    // Salvage the runner's NDJSON transcript BEFORE killing the sandbox, so
+    // tool calls, partial outputs, and errors emitted up to the watchdog cut
+    // survive on the message row. Without this the message row carries only
+    // a "presumed dead" stub and users have no view into what executed.
+    const messageId = await findRunningMessageId(session.id);
+    let salvagedBlobUrl: string | null = null;
+    if (session.sandbox_id && messageId) {
+      salvagedBlobUrl = await salvageAndUpload(
+        session.sandbox_id,
+        session.tenant_id,
+        messageId,
+        { session_id: session.id, reason: "active_watchdog" },
+      );
+    }
     const previousSandboxId = await forceStopSession(session.id);
     if (previousSandboxId) {
       await stopSandboxBestEffort(previousSandboxId, { session_id: session.id, reason: "active_watchdog" });
@@ -207,13 +326,15 @@ async function sweepActiveWatchdog(): Promise<number> {
       session.id,
       "timed_out",
       "watchdog_active_timeout",
-      `Session stuck in 'active' for >${ACTIVE_WATCHDOG_MINUTES} minutes; runner presumed dead.`,
+      `Session exceeded agent max_runtime_seconds + ${ACTIVE_WATCHDOG_GRACE_SECONDS}s grace; runner presumed dead.`,
+      salvagedBlobUrl,
     );
     await cleanupBlob(session);
     logger.warn("Active-watchdog fired", {
       session_id: session.id,
       tenant_id: session.tenant_id,
       updated_at: session.updated_at,
+      transcript_salvaged: salvagedBlobUrl !== null,
     });
     return true;
   });

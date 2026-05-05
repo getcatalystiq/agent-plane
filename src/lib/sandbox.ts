@@ -1262,6 +1262,46 @@ export async function reconnectSandbox(sandboxId: string): Promise<SandboxInstan
 }
 
 /**
+ * Best-effort transcript salvage from a still-alive sandbox before the
+ * cleanup cron kills it. Used by the watchdog sweeps so users can see what
+ * the runner actually executed — tool calls, partial outputs, errors —
+ * instead of just a "watchdog timed out" stub. Returns the file contents
+ * (NDJSON) or null if the sandbox is gone or the file doesn't exist.
+ *
+ * The Claude SDK runner emits to a fixed `/vercel/sandbox/transcript.ndjson`
+ * (it gets overwritten on each new message); the Vercel AI SDK runner emits
+ * to a per-message `/vercel/sandbox/transcript-<messageId>.ndjson`. We try
+ * both since the cleanup cron typically doesn't have the runner type wired
+ * through.
+ */
+export async function salvageRunnerTranscript(
+  sandboxId: string,
+  messageId: string,
+): Promise<string | null> {
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.get({ sandboxId });
+  } catch {
+    return null;
+  }
+  const candidatePaths = [
+    `/vercel/sandbox/transcript-${messageId}.ndjson`,
+    `/vercel/sandbox/transcript.ndjson`,
+  ];
+  for (const filePath of candidatePaths) {
+    try {
+      const buf = await sandbox.readFileToBuffer({ path: filePath });
+      if (!buf) continue;
+      const content = buf.toString("utf-8");
+      if (content.trim().length > 0) return content;
+    } catch {
+      // file not present — try next candidate
+    }
+  }
+  return null;
+}
+
+/**
  * Read-only reconnect that exposes just enough of SessionSandboxInstance to
  * back up the SDK session file. Used by the internal transcript route, which
  * has no agent/auth/MCP context — it just needs to pull the session JSONL

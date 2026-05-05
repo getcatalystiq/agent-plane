@@ -104,7 +104,7 @@ src/
         tenants/          # tenant CRUD + API key management
       cron/               # scheduled jobs
         budget-reset/     # daily budget reset
-        cleanup-sessions/ # every 5 min: idle TTL stop + stuck watchdog (creating>5min, active>30min) + orphan-sandbox sweep + expires_at cap
+        cleanup-sessions/ # every 5 min: idle TTL stop + stuck watchdog (creating>5min, active>agent.max_runtime_seconds+120s grace) + pre-kill transcript salvage + orphan-sandbox sweep + expires_at cap
         cleanup-transcripts/  # daily transcript cleanup
         refresh-snapshot/  # daily SDK snapshot refresh (Vercel Sandbox snapshot)
         scheduled-runs/   # per-minute scheduled agent dispatcher (calls dispatchSessionMessage with triggeredBy='schedule', ephemeral=false, idle_ttl=300s — see trigger table)
@@ -317,7 +317,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Session file backup (to Vercel Blob) is synchronous and skipped for ephemeral sessions — completes BEFORE response stream closes for persistent sessions to prevent TOCTOU race with cleanup cron
 - Session file uploads use `multipart: true` for Blob put() to handle >4.5MB server upload limit
 - MCP token refresh in `buildMcpConfig()` is parallelized with `Promise.allSettled()` for faster cold starts
-- Cleanup cron `/api/cron/cleanup-sessions` (every 5 min) consolidates all sweeps: per-session idle TTL stops; watchdog catches stuck `creating` (>5 min) and `active` (>30 min); orphan-sandbox sweep (any `sessions` row with non-null `sandbox_id` past terminal state); `expires_at` hard cap (4h wall-clock) regardless of state. The legacy `cleanup-sandboxes` cron was removed.
+- Cleanup cron `/api/cron/cleanup-sessions` (every 5 min) consolidates all sweeps: per-session idle TTL stops; watchdog catches stuck `creating` (>5 min) and `active` (per-agent `max_runtime_seconds + 120s` grace, defaults to 720s when an agent is missing); orphan-sandbox sweep (any `sessions` row with non-null `sandbox_id` past terminal state); `expires_at` hard cap (4h wall-clock) regardless of state. Watchdog and expiry sweeps salvage the runner's `/vercel/sandbox/transcript[-<messageId>].ndjson` from the still-alive sandbox before stopping it and attach the resulting blob URL to the timed-out message so users can see what executed. The legacy `cleanup-sandboxes` cron was removed.
 - Cleanup-vs-dispatch race on `idle→stopped`: public `/api/sessions/:id/messages` returns 410 Gone with `{error: 'session_stopped'}` when the named session is gone — clients must `POST /api/sessions` to start a new one. Internal callers (schedule cron, webhook handler, A2A executor) pass `sessionId?` optionally and the dispatcher transparently creates a fresh session for the same agent.
 - Vercel Blob uploads use `allowOverwrite: true` to handle race between runner transcript upload and `finalizeMessage` (both write to the same blob path)
 - Session file backup also uses `allowOverwrite: true` since the same session file path is rewritten after each message

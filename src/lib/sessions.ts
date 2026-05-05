@@ -361,8 +361,9 @@ export async function casCreatingToActive(
  * message on the session AND already in a terminal status. Used by the
  * internal transcript-upload endpoint when the dispatcher stream detached at
  * 4.5min for a PERSISTENT session (ephemeral=false): finalize is skipped on
- * the dispatcher side, leaving the session stuck in 'active' until the 30min
- * watchdog. This helper unsticks it without racing the (rare) live
+ * the dispatcher side, leaving the session stuck in 'active' until the
+ * active-watchdog (per-agent max_runtime_seconds + grace) fires. This helper
+ * unsticks it without racing the (rare) live
  * dispatcher path.
  *
  * FIX #2: detached persistent sessions previously sat in 'active' for 30min.
@@ -447,45 +448,55 @@ export async function getIdleSessions(): Promise<Session[]> {
 }
 
 /**
- * Watchdog: sessions stuck in a single non-terminal state past `maxMinutes`.
- * `creating` watchdog should pass 5 (sandbox-boot timed out); `active`
- * watchdog should pass 30 (runner crashed mid-message). Threshold reference:
- * `creating` uses `created_at` (boot started then), `active` uses
- * `updated_at` (last status touch). No RLS — used by cleanup cron.
+ * Creating-watchdog: sessions stuck in `creating` past `maxMinutes` from
+ * `created_at` (boot started then). Independent of agent config — sandbox
+ * boot is platform-side and uniformly bounded. No RLS — used by cleanup cron.
  */
-export async function getStuckSessions(
-  state: "creating" | "active",
-  maxMinutes: number,
-): Promise<Session[]> {
-  // FIX #28: for the active-watchdog, use the latest running message's
-  // started_at, not sessions.updated_at — every idle→active flip resets
-  // updated_at, so a long chat session where each turn finishes within
-  // updated_at+30min would never trip. Latest running message timestamp
-  // is the true "is the runner stuck" signal.
-  // FIX #12: bounded LIMIT keeps the cron tick small under backlog.
-  if (state === "active") {
-    return query(
-      SessionRow,
-      `SELECT s.* FROM sessions s
-       WHERE s.status = 'active'
-         AND EXISTS (
-           SELECT 1 FROM session_messages m
-           WHERE m.session_id = s.id
-             AND m.status = 'running'
-             AND m.started_at < NOW() - INTERVAL '1 minute' * $1
-         )
-       LIMIT 500`,
-      [maxMinutes],
-    );
-  }
-  const tsCol = state === "creating" ? "created_at" : "updated_at";
+export async function getStuckCreatingSessions(maxMinutes: number): Promise<Session[]> {
   return query(
     SessionRow,
     `SELECT * FROM sessions
-     WHERE status = $1
-       AND ${tsCol} < NOW() - INTERVAL '1 minute' * $2
+     WHERE status = 'creating'
+       AND created_at < NOW() - INTERVAL '1 minute' * $1
      LIMIT 500`,
-    [state, maxMinutes],
+    [maxMinutes],
+  );
+}
+
+/**
+ * Active-watchdog: sessions whose latest running message exceeded the agent's
+ * configured `max_runtime_seconds` plus a fixed `graceSeconds` upload window.
+ * Per-agent threshold respects the runtime contract callers signed up for —
+ * an agent configured for 60s gets caught at ~60+grace, while one configured
+ * for 3600s gets caught at ~3600+grace. The grace covers post-termination
+ * upload latency + cron cadence drift.
+ *
+ * FIX #28: started_at on the running message is the true "runner is stuck"
+ * signal (every idle→active flip resets sessions.updated_at, so a chat
+ * session of multiple short turns would never trip a session-level threshold).
+ * FIX #12: bounded LIMIT keeps the cron tick small under backlog. No RLS —
+ * used by cleanup cron.
+ *
+ * Scalar subquery + COALESCE to a 600s default so a deleted/missing agent
+ * row still gets caught instead of silently lingering forever.
+ */
+export async function getStuckActiveSessions(graceSeconds: number): Promise<Session[]> {
+  return query(
+    SessionRow,
+    `SELECT s.* FROM sessions s
+     WHERE s.status = 'active'
+       AND EXISTS (
+         SELECT 1 FROM session_messages m
+         WHERE m.session_id = s.id
+           AND m.status = 'running'
+           AND m.started_at < NOW() - INTERVAL '1 second' *
+                 (COALESCE(
+                    (SELECT a.max_runtime_seconds FROM agents a WHERE a.id = s.agent_id),
+                    600
+                  ) + $1)
+       )
+     LIMIT 500`,
+    [graceSeconds],
   );
 }
 
