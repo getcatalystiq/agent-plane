@@ -11,11 +11,29 @@ import { processLineAssets } from "@/lib/assets";
 import { reconnectSandbox } from "@/lib/sandbox";
 import { casActiveToIdle } from "@/lib/sessions";
 import { logger } from "@/lib/logger";
+import {
+  checkBatchDedup,
+  markBatchSeen,
+  reserveLines,
+  resumeHookBatch,
+  parseRunnerLine,
+  type RunnerChunkPayload,
+} from "@/lib/workflows/stream-bridge-server";
 import type { TenantId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ messageId: string }> };
+
+/**
+ * Per-message line cap. Bounds stolen-token blast radius (SEC-002 in the
+ * plan). The plan recommended `max_runtime_seconds * 100` per-message;
+ * v1 hard-codes the worst-case (3600s * 100 = 360k) since the agent's
+ * runtime cap is enforced at the runner-spawn level. Cap can be tightened
+ * to per-message-from-agent in a follow-up if production traffic shows
+ * abuse.
+ */
+const MAX_TRANSCRIPT_LINES_PER_MESSAGE = 360_000;
 
 const MessageRow = z.object({
   id: z.string(),
@@ -34,12 +52,27 @@ const SessionRowMin = z.object({
 const StoppedSandboxRow = z.object({ sandbox_id: z.string().nullable() });
 
 /**
- * Internal endpoint called by the sandbox runner to upload transcripts when a
- * detached message reaches its terminal state. Authenticated via an HMAC-based
- * message token bound to the URL `messageId`. Owns the U2 ephemeral-stop
- * responsibility: when the parent session is `ephemeral`, atomically CASes
- * it to `stopped` and stops the sandbox once. Persistent sessions are NEVER
- * stopped here.
+ * Internal endpoint called by the sandbox runner to upload transcripts.
+ * Authenticated via an HMAC-based message token bound to the URL
+ * `messageId`.
+ *
+ * Two modes distinguished by request `Content-Type`:
+ *
+ *   - **`application/x-ndjson`** (U3 per-line streaming mode): runner
+ *     POSTs one or more NDJSON lines per call; each line is parsed,
+ *     dedup-checked, line-cap-checked, and forwarded to the workflow's
+ *     hook via `resumeHook(transcript:msgId, payload)`. Headers carry
+ *     `X-Runner-Attempt-Sequence` (monotonic per run, resets on R6
+ *     auto-reissue) and `X-Batch-Sequence` (within an attempt).
+ *
+ *   - **legacy** (single-blob terminal POST): runner submits the full
+ *     transcript at the end; endpoint owns finalize, blob upload,
+ *     ephemeral-stop, and casActiveToIdle for detached persistent
+ *     runs. Kept until U10 retirement.
+ *
+ * The streaming mode does NOT finalize the message — the workflow's
+ * `finalizeStep` does that after the workflow body's `for await` breaks
+ * on the terminal-kind chunk. Legacy mode finalizes inline.
  */
 export const POST = withErrorHandler(async (request: NextRequest, context) => {
   const { messageId } = await (context as RouteContext).params;
@@ -85,6 +118,14 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   }
 
   const tenantId = message.tenant_id as TenantId;
+
+  // --- Mode dispatch by Content-Type ---
+  const contentType = (request.headers.get("content-type") ?? "").toLowerCase();
+  if (contentType.startsWith("application/x-ndjson")) {
+    return await handleStreamingBatch(request, messageId, tenantId);
+  }
+
+  // --- Legacy single-blob mode below (kept verbatim until U10) ---
 
   const body = await request.text();
   const lines = body.split("\n").filter((l) => l.trim());
@@ -205,3 +246,194 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// Per-line streaming (U3) — Content-Type: application/x-ndjson
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle a per-batch streaming POST from the runner.
+ *
+ * Headers:
+ *   - X-Runner-Attempt-Sequence (required, integer ≥ 0): monotonic per run,
+ *     resets when R6 auto-reissue boots a fresh runner
+ *   - X-Batch-Sequence (required, integer ≥ 0): increments per POST within
+ *     an attempt
+ *
+ * Body: NDJSON lines, one per JSON event from the runner.
+ *
+ * Responses:
+ *   - 200 OK: lines forwarded to resumeHook (or duplicate batch — idempotent)
+ *   - 400: malformed headers or empty body
+ *   - 429 (with Retry-After): per-message line cap exceeded
+ *   - 503 (retryable): resumeHook returned HookNotFoundError or transient
+ *     WDK error — runner backs off per its policy (100ms→1.6s, 30s budget)
+ */
+async function handleStreamingBatch(
+  request: NextRequest,
+  messageId: string,
+  tenantId: TenantId,
+): Promise<Response> {
+  const attemptSeqHeader = request.headers.get("x-runner-attempt-sequence");
+  const batchSeqHeader = request.headers.get("x-batch-sequence");
+  if (attemptSeqHeader === null || batchSeqHeader === null) {
+    return jsonResponse(
+      {
+        error: {
+          code: "validation_error",
+          message:
+            "Missing X-Runner-Attempt-Sequence or X-Batch-Sequence header",
+        },
+      },
+      400,
+    );
+  }
+  const attemptSequence = Number(attemptSeqHeader);
+  const batchSequence = Number(batchSeqHeader);
+  if (
+    !Number.isInteger(attemptSequence) ||
+    attemptSequence < 0 ||
+    !Number.isInteger(batchSequence) ||
+    batchSequence < 0
+  ) {
+    return jsonResponse(
+      {
+        error: {
+          code: "validation_error",
+          message:
+            "X-Runner-Attempt-Sequence and X-Batch-Sequence must be non-negative integers",
+        },
+      },
+      400,
+    );
+  }
+
+  // Idempotent: a duplicate (attemptSequence, batchSequence) returns 200 OK
+  // without re-forwarding to the hook. The runner's retry-on-5xx policy
+  // can produce duplicate POSTs under network reorder; the dedup catches
+  // those without entering the workflow stream twice.
+  if (
+    checkBatchDedup(messageId, attemptSequence, batchSequence) === "duplicate"
+  ) {
+    logger.info("transcript-streaming: duplicate batch ignored", {
+      message_id: messageId,
+      attempt_sequence: attemptSequence,
+      batch_sequence: batchSequence,
+    });
+    return jsonResponse({ status: "duplicate", delivered: 0 });
+  }
+
+  const body = await request.text();
+  const rawLines = body.split("\n").filter((l) => l.trim());
+  if (rawLines.length === 0) {
+    return jsonResponse(
+      { error: { code: "validation_error", message: "Empty NDJSON body" } },
+      400,
+    );
+  }
+
+  // Per-message line cap — bounds stolen-token blast radius.
+  const reservation = reserveLines(
+    messageId,
+    rawLines.length,
+    MAX_TRANSCRIPT_LINES_PER_MESSAGE,
+  );
+  if (!reservation.allowed) {
+    logger.warn("transcript-streaming: line cap exceeded", {
+      message_id: messageId,
+      cap: reservation.cap,
+      remaining: reservation.remaining,
+    });
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: "rate_limited",
+          message: `Per-message line cap of ${reservation.cap} exceeded`,
+        },
+      }),
+      {
+        status: 429,
+        headers: {
+          "content-type": "application/json",
+          "retry-after": "60",
+        },
+      },
+    );
+  }
+
+  // Parse NDJSON lines into RunnerChunkPayloads. Empty lines are filtered
+  // by parseRunnerLine (returns null); malformed JSON falls back to
+  // eventType='unknown' rather than throwing.
+  const payloads: RunnerChunkPayload[] = [];
+  for (const line of rawLines) {
+    const parsed = parseRunnerLine(line);
+    if (parsed) payloads.push(parsed);
+  }
+
+  // Forward to the workflow's hook. The dedup mark is set ONLY on
+  // successful delivery so a HookNotFoundError lets the runner retry
+  // the same batch.
+  const result = await resumeHookBatch(messageId, payloads);
+
+  if (result.hookNotFound) {
+    logger.info("transcript-streaming: hook not found — retryable", {
+      message_id: messageId,
+      attempt_sequence: attemptSequence,
+      batch_sequence: batchSequence,
+      delivered_before_failure: result.delivered,
+    });
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: "hook_not_found",
+          message: "Workflow hook not yet registered; retry with backoff",
+        },
+      }),
+      {
+        status: 503,
+        headers: {
+          "content-type": "application/json",
+          "retry-after": "1",
+        },
+      },
+    );
+  }
+  if (result.otherError) {
+    logger.warn("transcript-streaming: resumeHook error", {
+      message_id: messageId,
+      attempt_sequence: attemptSequence,
+      batch_sequence: batchSequence,
+      error: result.otherError,
+      delivered_before_failure: result.delivered,
+    });
+    return new Response(
+      JSON.stringify({
+        error: { code: "resume_hook_error", message: result.otherError },
+      }),
+      {
+        status: 503,
+        headers: {
+          "content-type": "application/json",
+          "retry-after": "1",
+        },
+      },
+    );
+  }
+
+  // All payloads delivered — mark the dedup tuple as seen.
+  markBatchSeen(messageId, attemptSequence, batchSequence);
+
+  logger.debug("transcript-streaming: batch delivered", {
+    message_id: messageId,
+    attempt_sequence: attemptSequence,
+    batch_sequence: batchSequence,
+    delivered: result.delivered,
+    remaining_lines: reservation.remaining,
+  });
+
+  return jsonResponse({
+    status: "ok",
+    delivered: result.delivered,
+    remaining_lines: reservation.remaining,
+  });
+}
