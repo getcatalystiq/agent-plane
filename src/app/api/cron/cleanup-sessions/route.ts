@@ -3,6 +3,7 @@ import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { execute, query } from "@/db";
 import { reconnectSandbox, salvageRunnerTranscript } from "@/lib/sandbox";
 import { invalidateSandboxHandle } from "@/lib/dispatcher";
+import { WORKFLOW_RUN_ID_PREFIX } from "@/lib/types";
 import {
   getIdleSessions,
   getStuckCreatingSessions,
@@ -171,6 +172,72 @@ async function cleanupBlob(session: Pick<Session, "session_blob_url">) {
   }
 }
 
+/**
+ * U6: try the workflow-cancel path first. Returns true if the workflow
+ * reached terminal status within `awaitMs` so the caller skips the
+ * legacy salvage-and-stop branch (the workflow's finalize step handled
+ * it). Returns false on any of:
+ *   - No workflow_run_id (legacy session)
+ *   - Malformed runId (post-rollback)
+ *   - getRun(runId).cancel() throws
+ *   - Run doesn't reach terminal status within timeout
+ *
+ * Caller falls through to the legacy direct-stop path on false. This is
+ * the belt-and-suspenders fallback the plan specifies for cron timeouts:
+ * the row ends up `stopped` either way.
+ */
+async function tryWorkflowCancel(
+  session: { id: string; tenant_id: string; workflow_run_id?: string | null },
+  reason: string,
+  awaitMs = 30_000,
+): Promise<boolean> {
+  if (!session.workflow_run_id) return false;
+  if (!session.workflow_run_id.startsWith(WORKFLOW_RUN_ID_PREFIX)) {
+    logger.warn("cleanup: unexpected workflow_run_id format; falling back to legacy", {
+      session_id: session.id,
+      stored: session.workflow_run_id,
+    });
+    return false;
+  }
+  const rawRunId = session.workflow_run_id.slice(WORKFLOW_RUN_ID_PREFIX.length);
+  const TERMINAL = new Set(["completed", "failed", "cancelled", "stopped"]);
+  try {
+    const { getRun } = await import("workflow/api");
+    const run = getRun(rawRunId);
+    await run.cancel();
+    const start = Date.now();
+    while (Date.now() - start < awaitMs) {
+      const status = await run.status;
+      if (TERMINAL.has(status as string)) {
+        logger.info("cleanup: workflow run reached terminal via cancel", {
+          session_id: session.id,
+          run_id: rawRunId,
+          reason,
+          status,
+          elapsed_ms: Date.now() - start,
+        });
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 1_000));
+    }
+    logger.warn("cleanup: workflow cancel timeout — falling back to legacy", {
+      session_id: session.id,
+      run_id: rawRunId,
+      reason,
+      timeout_ms: awaitMs,
+    });
+    return false;
+  } catch (err) {
+    logger.warn("cleanup: workflow cancel threw — falling back to legacy", {
+      session_id: session.id,
+      run_id: rawRunId,
+      reason,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 function countSweepResults<T>(
   results: PromiseSettledResult<T | false>[],
   errorLabel: string,
@@ -195,6 +262,17 @@ async function sweepExpired(): Promise<number> {
   const expired = await getExpiredSessions();
   const results = await withConcurrency(expired, SANDBOX_STOP_CONCURRENCY, async (session) => {
     if (session.status === "active") return false;
+    // U6: workflow-backed sessions are cancelled via WDK; the workflow's
+    // finalize step does salvage + DB CAS. On success, skip the legacy
+    // salvage/stop/markInFlight code below.
+    if (await tryWorkflowCancel(session, "expired")) {
+      invalidateSandboxHandle(session.id);
+      logger.info("Expired session cleaned up via workflow cancel", {
+        session_id: session.id,
+        tenant_id: session.tenant_id,
+      });
+      return true;
+    }
     // Salvage anything the runner managed to emit before the 4h cap. For
     // expired sessions the sandbox is usually long gone, but try anyway —
     // the helper is null-on-failure.
@@ -238,6 +316,14 @@ async function sweepExpired(): Promise<number> {
 async function sweepIdle(): Promise<number> {
   const idleSessions = await getIdleSessions();
   const results = await withConcurrency(idleSessions, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    if (await tryWorkflowCancel(session, "idle_ttl")) {
+      invalidateSandboxHandle(session.id);
+      logger.info("Idle session cleaned up via workflow cancel", {
+        session_id: session.id,
+        tenant_id: session.tenant_id,
+      });
+      return true;
+    }
     const cas = await query(
       z.object({ sandbox_id: z.string().nullable() }),
       `UPDATE sessions
@@ -266,6 +352,14 @@ async function sweepIdle(): Promise<number> {
 async function sweepCreatingWatchdog(): Promise<number> {
   const stuckCreating = await getStuckCreatingSessions(CREATING_WATCHDOG_MINUTES);
   const results = await withConcurrency(stuckCreating, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    if (await tryWorkflowCancel(session, "creating_watchdog")) {
+      invalidateSandboxHandle(session.id);
+      logger.warn("Creating-watchdog cleared via workflow cancel", {
+        session_id: session.id,
+        tenant_id: session.tenant_id,
+      });
+      return true;
+    }
     // Boot may have completed enough for the runner to start emitting before
     // the CAS-to-active raced; try salvage. Most often returns null.
     const messageId = await findRunningMessageId(session.id);
@@ -304,6 +398,18 @@ async function sweepCreatingWatchdog(): Promise<number> {
 async function sweepActiveWatchdog(): Promise<number> {
   const stuckActive = await getStuckActiveSessions(ACTIVE_WATCHDOG_GRACE_SECONDS);
   const results = await withConcurrency(stuckActive, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    // U6: workflow-backed sessions are cancelled via WDK; the workflow's
+    // finalize step does salvage-before-stop ordering itself, matching
+    // the legacy cleanup ordering preserved here. The plan calls this
+    // out specifically — most-fixed area in recent commit history.
+    if (await tryWorkflowCancel(session, "active_watchdog")) {
+      invalidateSandboxHandle(session.id);
+      logger.warn("Active-watchdog cleared via workflow cancel", {
+        session_id: session.id,
+        tenant_id: session.tenant_id,
+      });
+      return true;
+    }
     // Salvage the runner's NDJSON transcript BEFORE killing the sandbox, so
     // tool calls, partial outputs, and errors emitted up to the watchdog cut
     // survive on the message row. Without this the message row carries only
@@ -353,6 +459,14 @@ async function sweepActiveWithoutRunning(): Promise<number> {
     ACTIVE_NO_RUNNING_MESSAGE_MINUTES,
   );
   const results = await withConcurrency(orphans, SANDBOX_STOP_CONCURRENCY, async (session) => {
+    if (await tryWorkflowCancel(session, "active_no_running_message")) {
+      invalidateSandboxHandle(session.id);
+      logger.warn("Active-without-running-message cleared via workflow cancel", {
+        session_id: session.id,
+        tenant_id: session.tenant_id,
+      });
+      return true;
+    }
     const previousSandboxId = await forceStopSession(session.id);
     if (previousSandboxId) {
       await stopSandboxBestEffort(previousSandboxId, {
