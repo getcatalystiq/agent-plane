@@ -261,6 +261,13 @@ async function scenario4(): Promise<ScenarioResult> {
     // Wait for workflow completion before reading — see scenario 3 comment.
     await run.returnValue;
 
+    // Read first 3 chunks via getReadable startIndex=0; just release the
+    // reader lock when done. Do NOT call `r1.cancel()` — calling cancel on a
+    // WorkflowReadableStream propagates upstream and cancels the workflow
+    // run itself (verified via Vercel runtime logs:
+    // "Unconsumed event in event log: eventType=run_cancelled" + the
+    // downstream "TypeError: Invalid state: Unable to enqueue" in the
+    // route's response stream).
     const r1 = getRun<unknown>(run.runId).getReadable<string>({ startIndex: 0 });
     const first3: string[] = [];
     {
@@ -273,14 +280,11 @@ async function scenario4(): Promise<ScenarioResult> {
         }
       } finally {
         reader.releaseLock();
-        try {
-          await r1.cancel();
-        } catch {
-          /* ignore */
-        }
       }
     }
 
+    // Reconnect at startIndex=3 to verify chunks 3..end arrive without
+    // duplication or skip.
     const r2 = getRun<unknown>(run.runId).getReadable<string>({ startIndex: 3 });
     const rest = await readAll(r2);
 
