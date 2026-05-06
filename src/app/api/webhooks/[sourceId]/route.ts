@@ -3,7 +3,7 @@ import { execute, queryOne } from "@/db";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { dispatchOrWorkflowDispatch } from "@/lib/workflows/dispatch-shim";
 import {
   transitionMessageStatus,
   getSessionIdForMessage,
@@ -451,7 +451,15 @@ export async function POST(
     let messageId: string | null = null;
     let tenantIdForFinalize: TenantId | null = null;
     try {
-      const dispatchResult = await dispatchSessionMessage({
+      // U8: dispatchOrWorkflowDispatch picks workflow vs legacy based on
+      // shouldUseWorkflow('webhook', tenantId). Webhook-ingressed dispatches
+      // are always ephemeral=true (one-shot per delivery), so the
+      // by-row-coexistence rule doesn't apply (every webhook creates a
+      // new session). Idempotency is owned by webhook_deliveries dedupe
+      // upstream; the workflow start() takes no idempotency key, so the
+      // namespaced (sourceId, deliveryId) UNIQUE constraint at the
+      // webhook_deliveries layer is the only line of defense.
+      const dispatchResult = await dispatchOrWorkflowDispatch({
         tenantId,
         agentId,
         prompt,
