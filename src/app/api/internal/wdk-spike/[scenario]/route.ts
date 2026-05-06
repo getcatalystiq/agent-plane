@@ -113,6 +113,37 @@ async function readAll(stream: ReadableStream<unknown>): Promise<string[]> {
   return chunks;
 }
 
+/**
+ * Read exactly `tail - startIndex + 1` chunks from a WorkflowReadableStream.
+ *
+ * WDK's writable doesn't auto-close when the workflow body returns, so a
+ * plain `for await` over the readable hangs after the last chunk because
+ * `done` never fires. Use `getTailIndex()` (absolute index of the last
+ * known chunk) to know exactly how many chunks to expect.
+ *
+ * This is the pattern U2's REST/A2A render shims must use when draining
+ * the workflow stream of a completed run.
+ */
+async function readBounded<R = unknown>(
+  stream: ReadableStream<R> & { getTailIndex(): Promise<number> },
+  startIndex: number,
+): Promise<string[]> {
+  const tail = await stream.getTailIndex();
+  const expected = Math.max(0, tail - startIndex + 1);
+  const chunks: string[] = [];
+  const reader = stream.getReader();
+  try {
+    for (let i = 0; i < expected; i++) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      chunks.push(typeof value === "string" ? value : JSON.stringify(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return chunks;
+}
+
 // ------------------------------------------------------------
 // Scenarios
 // ------------------------------------------------------------
@@ -212,11 +243,11 @@ async function scenario3(): Promise<ScenarioResult> {
     } satisfies SpikeChunk);
 
     // Wait for workflow completion BEFORE reading the stream — WDK closes
-    // the writable when the run reaches terminal status, after which
-    // getReadable() yields `done` cleanly. Reading before completion
-    // hangs (no upstream signal that no more chunks are coming).
+    // the writable when the run reaches terminal status, after which the
+    // tail index is final. Reading without bounding by tailIndex hangs
+    // because `done` never fires (writable stays open across step calls).
     await run.returnValue;
-    const chunks = await readAll(run.getReadable<string>());
+    const chunks = await readBounded(run.getReadable<string>(), 0);
 
     const expected = 6;
     if (chunks.length !== expected) {
@@ -228,7 +259,7 @@ async function scenario3(): Promise<ScenarioResult> {
     return {
       scenario: 3,
       status: "verified",
-      notes: `Read ${chunks.length} chunks from workflow stream after run completion`,
+      notes: `Read ${chunks.length} chunks from workflow stream after run completion (bounded by getTailIndex)`,
       details: chunks,
     };
   } catch (err) {
@@ -284,9 +315,9 @@ async function scenario4(): Promise<ScenarioResult> {
     }
 
     // Reconnect at startIndex=3 to verify chunks 3..end arrive without
-    // duplication or skip.
+    // duplication or skip. Bounded by getTailIndex.
     const r2 = getRun<unknown>(run.runId).getReadable<string>({ startIndex: 3 });
-    const rest = await readAll(r2);
+    const rest = await readBounded(r2, 3);
 
     if (first3.length !== 3 || rest.length !== 4) {
       throw new Error(
