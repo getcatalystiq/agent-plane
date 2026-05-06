@@ -211,8 +211,12 @@ async function scenario3(): Promise<ScenarioResult> {
       data: "line-end",
     } satisfies SpikeChunk);
 
-    const chunks = await readAll(run.getReadable<string>());
+    // Wait for workflow completion BEFORE reading the stream — WDK closes
+    // the writable when the run reaches terminal status, after which
+    // getReadable() yields `done` cleanly. Reading before completion
+    // hangs (no upstream signal that no more chunks are coming).
     await run.returnValue;
+    const chunks = await readAll(run.getReadable<string>());
 
     const expected = 6;
     if (chunks.length !== expected) {
@@ -224,7 +228,7 @@ async function scenario3(): Promise<ScenarioResult> {
     return {
       scenario: 3,
       status: "verified",
-      notes: `Read ${chunks.length} chunks from workflow stream`,
+      notes: `Read ${chunks.length} chunks from workflow stream after run completion`,
       details: chunks,
     };
   } catch (err) {
@@ -254,6 +258,7 @@ async function scenario4(): Promise<ScenarioResult> {
       kind: "terminal",
       data: "rEnd",
     } satisfies SpikeChunk);
+    // Wait for workflow completion before reading — see scenario 3 comment.
     await run.returnValue;
 
     const r1 = getRun<unknown>(run.runId).getReadable<string>({ startIndex: 0 });
