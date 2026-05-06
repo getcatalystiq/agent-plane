@@ -24,6 +24,12 @@ import {
 import { spikeLongIdleWorkflow } from "@/lib/workflows/spike/long-idle-workflow";
 import { timingSafeEqual } from "@/lib/crypto";
 
+// Side-effect import: ensure the WDK Next.js plugin discovers
+// dispatchWorkflow at build time even before U5 wires it into a route
+// handler. The build manifest should report 4 workflows after this import
+// lands. Removed once U5's route handler imports dispatchWorkflow directly.
+import "@/lib/workflows";
+
 interface ScenarioResult {
   scenario: number;
   status: "verified" | "unverified" | "failed";
