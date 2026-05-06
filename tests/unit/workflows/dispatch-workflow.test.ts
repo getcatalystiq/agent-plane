@@ -250,7 +250,7 @@ describe("dispatchWorkflow steps", () => {
   });
 
   describe("launchRunnerStep", () => {
-    it("markRunnerStarted=true (fresh) → calls sandbox.runMessage", async () => {
+    it("markRunnerStarted=true (fresh) → calls sandbox.runMessage with streamPerLine=true", async () => {
       vi.mocked(markRunnerStarted).mockResolvedValueOnce(true);
       const prepared = makePrepared();
       const sandbox = makeSandbox();
@@ -265,6 +265,12 @@ describe("dispatchWorkflow steps", () => {
           messageToken: "message-token",
           maxTurns: 10,
           maxBudgetUsd: 1.0,
+          // U3-e: workflow path always spawns the runner with per-line
+          // streaming on so the workflow body's hook iterator receives
+          // chunks. attemptSequence=0 for the first attempt; R6 auto-
+          // reissue increments this in a follow-up.
+          streamPerLine: true,
+          runnerAttemptSequence: 0,
         }),
       );
     });

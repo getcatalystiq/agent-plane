@@ -191,16 +191,46 @@ describe("internal transcript endpoint — streaming mode (U3)", () => {
   });
 
   describe("header validation", () => {
-    it("missing X-Runner-Attempt-Sequence → 400", async () => {
+    it("missing X-Runner-Attempt-Sequence → falls through to legacy single-blob mode (NOT 400)", async () => {
+      // Critical regression guard: legacy runners use the same
+      // Content-Type: application/x-ndjson but do NOT emit
+      // X-Runner-Attempt-Sequence. Dispatching by Content-Type alone
+      // would route legacy POSTs into the streaming handler and break
+      // backward compatibility. The route disambiguates by header
+      // presence — missing header → legacy mode.
       setMessageRunning();
+      // Stub out legacy-mode dependencies so the legacy path can complete
+      const { uploadTranscript } = await import("@/lib/transcripts");
+      const { transitionMessageStatus } = await import("@/lib/session-messages");
+      const { parseResultEvent } = await import("@/lib/transcript-utils");
+      const { processLineAssets } = await import("@/lib/assets");
+      vi.mocked(uploadTranscript).mockResolvedValueOnce(
+        "https://blob.example/transcript.ndjson",
+      );
+      vi.mocked(transitionMessageStatus).mockResolvedValueOnce(true);
+      vi.mocked(parseResultEvent).mockResolvedValueOnce({
+        status: "completed",
+        updates: {},
+      });
+      vi.mocked(processLineAssets).mockImplementation(async (line: string) => line);
+      // Provide the session row mock for the ephemeral-stop transactional path.
+      // The legacy handler queries it via withTenantTransaction; mock to no-op.
+      const { withTenantTransaction } = await import("@/db");
+      vi.mocked(withTenantTransaction).mockImplementation(async () => undefined);
+      const { casActiveToIdle } = await import("@/lib/sessions");
+      vi.mocked(casActiveToIdle).mockResolvedValue(false);
+
       const res = await callPost(
         makeRequest({
           contentType: "application/x-ndjson",
           attemptSequence: null,
-          body: '{"type":"assistant"}',
+          batchSequence: null,
+          body: '{"type":"result","status":"completed"}',
         }),
       );
-      expect(res.status).toBe(400);
+      // Legacy mode should accept the body (200) — this is the legacy path
+      // continuing to work without the streaming-mode header.
+      expect(res.status).toBe(200);
     });
 
     it("missing X-Batch-Sequence → 400", async () => {

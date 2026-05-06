@@ -56,14 +56,17 @@ const StoppedSandboxRow = z.object({ sandbox_id: z.string().nullable() });
  * Authenticated via an HMAC-based message token bound to the URL
  * `messageId`.
  *
- * Two modes distinguished by request `Content-Type`:
+ * Two modes distinguished by header presence:
  *
- *   - **`application/x-ndjson`** (U3 per-line streaming mode): runner
- *     POSTs one or more NDJSON lines per call; each line is parsed,
- *     dedup-checked, line-cap-checked, and forwarded to the workflow's
- *     hook via `resumeHook(transcript:msgId, payload)`. Headers carry
- *     `X-Runner-Attempt-Sequence` (monotonic per run, resets on R6
- *     auto-reissue) and `X-Batch-Sequence` (within an attempt).
+ *   - **streaming** (U3): when `X-Runner-Attempt-Sequence` is set, the
+ *     POST is a per-batch streaming chunk. Body is one or more NDJSON
+ *     lines; each is parsed, dedup-checked, line-cap-checked, and
+ *     forwarded to the workflow's hook via `resumeHook(transcript:msgId,
+ *     payload)`. Headers also carry `X-Batch-Sequence` (within an
+ *     attempt). Both legacy and streaming runners use the same
+ *     `Content-Type: application/x-ndjson`, so dispatching by Content-Type
+ *     would route legacy POSTs into the streaming handler — the
+ *     `X-Runner-Attempt-Sequence` header is the disambiguator.
  *
  *   - **legacy** (single-blob terminal POST): runner submits the full
  *     transcript at the end; endpoint owns finalize, blob upload,
@@ -119,9 +122,12 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
 
   const tenantId = message.tenant_id as TenantId;
 
-  // --- Mode dispatch by Content-Type ---
-  const contentType = (request.headers.get("content-type") ?? "").toLowerCase();
-  if (contentType.startsWith("application/x-ndjson")) {
+  // --- Mode dispatch by header presence ---
+  // Streaming-mode runners emit `X-Runner-Attempt-Sequence`; legacy
+  // single-blob runners do not. Dispatch by Content-Type alone would
+  // route legacy POSTs (which use application/x-ndjson) into the new
+  // streaming handler, breaking backward compatibility.
+  if (request.headers.get("x-runner-attempt-sequence") !== null) {
     return await handleStreamingBatch(request, messageId, tenantId);
   }
 

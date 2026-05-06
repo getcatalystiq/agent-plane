@@ -246,11 +246,12 @@ export async function launchRunnerStep(
   const env = getEnv();
   const messageToken = await generateMessageToken(prepared.messageId, env.ENCRYPTION_KEY);
 
-  // Spawn the runner. **U3 changes the runner template** so it POSTs each
-  // NDJSON line to /api/internal/messages/:messageId/transcript instead of
-  // returning them via sandbox.runMessage()'s logs iterator. For U2 the
-  // workflow shape is in place but no chunks will reach the hook until U3
-  // ships — production toggles stay off until then.
+  // U3-e: spawn the runner with per-line streaming on. The runner POSTs
+  // each NDJSON line to /api/internal/messages/:messageId/transcript with
+  // X-Runner-Attempt-Sequence + X-Batch-Sequence headers; the route's
+  // streaming-mode handler dedups by tuple and forwards via resumeHook
+  // to the workflow's hook iterator. The workflow body iterates the
+  // hook (NOT the legacy logs() iterator).
   const result = await sandbox.runMessage({
     prompt: input.prompt,
     sdkSessionId: prepared.session.sdk_session_id,
@@ -258,10 +259,12 @@ export async function launchRunnerStep(
     messageToken,
     maxTurns: prepared.effectiveMaxTurns,
     maxBudgetUsd: prepared.effectiveBudget,
+    streamPerLine: true,
+    runnerAttemptSequence: 0, // R6 reissue increments this in a follow-up
   });
-  // The legacy logs iterator is intentionally not consumed in U2 — the
-  // workflow body's hook iterator is the consumer. Voiding to silence
-  // lint warnings about the unused property.
+  // The legacy logs iterator is intentionally not consumed — the workflow
+  // body's hook iterator is the consumer. Voiding to silence lint
+  // warnings about the unused property.
   void result.logs;
 }
 
