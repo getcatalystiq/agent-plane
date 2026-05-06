@@ -208,7 +208,7 @@ export interface DispatchResult {
   response: () => Response;
 }
 
-interface PreparedExecution {
+export interface PreparedExecution {
   session: Session;
   agent: AgentInternal;
   messageId: string;
@@ -382,7 +382,20 @@ export async function cancelSession(sessionId: string, tenantId: TenantId): Prom
 // Internals
 // ---------------------------------------------------------------------------
 
-async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedExecution> {
+/**
+ * Reserve a session + message row for an incoming dispatch.
+ *
+ * Resolves or creates the session, atomically claims the active slot via
+ * CAS, runs budget + concurrency checks, and appends the `running`
+ * session_messages row in a single tenant-scoped transaction. Returns
+ * the prepared execution context for the streaming pipeline (or, in U2's
+ * workflow path, for the workflow's `reserve` step).
+ *
+ * Exported for U2: the `dispatchWorkflow`'s `reserve` step delegates to
+ * this body unchanged. Behavior is identical to the legacy dispatch
+ * path so characterization parity holds.
+ */
+export async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedExecution> {
   return withTenantTransaction(input.tenantId, async (tx) => {
     // FIX #3 (adv-001): TOCTOU-safe concurrency cap via tx-scoped advisory
     // lock keyed on tenant_id. The lock auto-releases on commit/rollback.
@@ -874,7 +887,7 @@ async function runMessageStream(
   });
 }
 
-interface ColdStartArgs {
+export interface ColdStartArgs {
   agent: AgentInternal;
   tenantId: TenantId;
   sessionId: string;
@@ -890,7 +903,17 @@ interface ColdStartArgs {
   effectiveMaxTurns: number;
 }
 
-async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSandboxInstance> {
+/**
+ * Provision a fresh sandbox for a session (cold-start path).
+ *
+ * Restores the SDK session blob backup if present so a stopped session
+ * can resume conversation history. Records the sandbox id on the session
+ * row + bumps the MCP refresh timestamp.
+ *
+ * Exported for U2: the `dispatchWorkflow`'s `ensureSandbox` step calls
+ * this body when no warm handle exists for the session.
+ */
+export async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSandboxInstance> {
   if (args.mcpResult.errors.length > 0) {
     logger.warn("MCP config errors for session", {
       session_id: args.sessionId,
@@ -1037,7 +1060,7 @@ export async function finalizeMessage(args: FinalizeArgs): Promise<void> {
   }
 }
 
-interface SessionTailArgs {
+export interface SessionTailArgs {
   sessionId: string;
   tenantId: TenantId;
   sandbox: SessionSandboxInstance;
@@ -1045,7 +1068,16 @@ interface SessionTailArgs {
   ephemeral: boolean;
 }
 
-async function sessionTail(args: SessionTailArgs): Promise<void> {
+/**
+ * Session-tail transitions after a message reaches a terminal state.
+ *
+ * Persistent: backupSessionFile + transition active→idle (with
+ * session_blob_url + sdk_session_id persisted). Ephemeral: casToStopped
+ * + sandbox.stop + invalidateSandboxHandle.
+ *
+ * Exported for U2: the `dispatchWorkflow`'s `tail` step delegates here.
+ */
+export async function sessionTail(args: SessionTailArgs): Promise<void> {
   const { sessionId, tenantId, sandbox, sdkSessionId, ephemeral } = args;
 
   await incrementMessageCount(sessionId, tenantId);
