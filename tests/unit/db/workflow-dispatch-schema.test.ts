@@ -59,18 +59,21 @@ describe("034_workflow_dispatch_columns migration", () => {
     });
   });
 
-  describe("schedules.last_fired_dispatch_key + UNIQUE", () => {
+  describe("schedules.last_fired_dispatch_key", () => {
     it("adds the dispatch-key column nullable", () => {
       expect(sql).toMatch(
         /ALTER\s+TABLE\s+schedules\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+last_fired_dispatch_key\s+TEXT/i,
       );
     });
 
-    it("creates a partial UNIQUE index on (id, last_fired_dispatch_key)", () => {
-      // Partial because rows with NULL keys (cron hasn't fired this session)
-      // must not collide with each other.
-      expect(sql).toMatch(
-        /CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+\w+\s+ON\s+schedules[\s\S]*?\(id,\s*last_fired_dispatch_key\)[\s\S]*?WHERE\s+last_fired_dispatch_key\s+IS\s+NOT\s+NULL/i,
+    it("does NOT create a UNIQUE index — dedup is a CAS pattern in U7's cron handler", () => {
+      // The plan originally called for a UNIQUE constraint, but with one row
+      // per schedule and a single column storing the most recent fire's key,
+      // such a constraint would be redundant against the existing primary
+      // key. Dedup is a `WHERE last_fired_dispatch_key IS DISTINCT FROM $newKey`
+      // CAS in the schedule cron's /execute handler (U7).
+      expect(sql).not.toMatch(
+        /CREATE\s+UNIQUE\s+INDEX[\s\S]*?ON\s+schedules[\s\S]*?last_fired_dispatch_key/i,
       );
     });
   });
@@ -98,8 +101,8 @@ describe("034_workflow_dispatch_columns migration", () => {
       expect(addColumnIfNotExists.length).toBe(addColumns.length);
     });
 
-    it("uses CREATE UNIQUE INDEX IF NOT EXISTS for the partial index", () => {
-      expect(sql).toMatch(/CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS/i);
+    it("guards ADD CONSTRAINT in a DO block (Postgres lacks ADD CONSTRAINT IF NOT EXISTS)", () => {
+      expect(sql).toMatch(/DO\s+\$\$[\s\S]*?pg_constraint[\s\S]*?ALTER\s+TABLE\s+tenants\s+ADD\s+CONSTRAINT/i);
     });
   });
 });

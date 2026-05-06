@@ -32,17 +32,15 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS workflow_run_id TEXT;
 ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS runner_started_at TIMESTAMPTZ;
 
 -- ============================================================
--- 3. schedules.last_fired_dispatch_key + UNIQUE constraint
+-- 3. schedules.last_fired_dispatch_key
+--
+-- Single-column add; no UNIQUE constraint needed. There is one row per
+-- schedule, and `last_fired_dispatch_key` stores the most recent fire's
+-- key. Duplicate-fire dedup is a CAS pattern in the schedule cron's
+-- /execute handler (U7), not a DB-level uniqueness constraint.
 -- ============================================================
 
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_fired_dispatch_key TEXT;
-
--- Partial unique index: prevents duplicate (schedule_id, fireTime) dispatches.
--- Partial because rows where last_fired_dispatch_key IS NULL (no dispatch yet
--- this session of the cron's lifetime) should not collide.
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_schedules_last_fired_dispatch_key
-  ON schedules (id, last_fired_dispatch_key)
-  WHERE last_fired_dispatch_key IS NOT NULL;
 
 -- ============================================================
 -- 4. tenants.workflow_dispatch_overrides
@@ -54,8 +52,18 @@ ALTER TABLE tenants
 -- Constrain JSONB shape: object only (not array/string/number/null at the top).
 -- Per-trigger keys are validated in application code (Zod) so a future trigger
 -- can be added without a schema migration. We just guarantee it's an object.
-ALTER TABLE tenants ADD CONSTRAINT chk_workflow_dispatch_overrides_object
-  CHECK (jsonb_typeof(workflow_dispatch_overrides) = 'object')
-  NOT VALID;
-
-ALTER TABLE tenants VALIDATE CONSTRAINT chk_workflow_dispatch_overrides_object;
+--
+-- Wrapped in a DO block so the migration is idempotent on the constraint —
+-- ALTER TABLE ADD CONSTRAINT does not support IF NOT EXISTS in Postgres.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'chk_workflow_dispatch_overrides_object'
+       AND conrelid = 'tenants'::regclass
+  ) THEN
+    ALTER TABLE tenants ADD CONSTRAINT chk_workflow_dispatch_overrides_object
+      CHECK (jsonb_typeof(workflow_dispatch_overrides) = 'object');
+  END IF;
+END $$;
