@@ -388,3 +388,9 @@ main().then(
     process.exit(2);
   },
 );
+
+
+// Mark as ES module so top-level identifiers are file-scoped (avoids
+// duplicate-function-implementation collisions with other scripts that
+// also define helpers like `runScenario`).
+export {};

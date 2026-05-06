@@ -1253,7 +1253,9 @@ export async function reconnectSandbox(sandboxId: string): Promise<SandboxInstan
     const sandbox = await Sandbox.get({ sandboxId });
     return {
       id: sandbox.sandboxId,
-      stop: () => sandbox.stop(),
+      stop: async () => {
+        await sandbox.stop();
+      },
       logs: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: "" }) }) }),
     };
   } catch {
@@ -1324,7 +1326,9 @@ export async function reconnectSessionSandboxForBackup(
   return {
     id: sandbox.sandboxId,
     sandboxRef: sandbox,
-    stop: () => sandbox.stop(),
+    stop: async () => {
+      await sandbox.stop();
+    },
     logs: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: "" }) }) }),
     extendTimeout: async (ms: number) => {
       try { await sandbox.extendTimeout(ms); } catch { /* best effort */ }
