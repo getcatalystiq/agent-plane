@@ -921,7 +921,7 @@ async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSandboxInst
   return sandbox;
 }
 
-interface FinalizeArgs {
+export interface FinalizeArgs {
   messageId: string;
   tenantId: TenantId;
   session: Session;
@@ -944,8 +944,12 @@ interface FinalizeArgs {
  *
  * Idempotency: short-circuits if the runner-driven internal-upload route
  * already finalized the message (status != 'running').
+ *
+ * Exported so the U2 characterization test suite (and U2's workflow steps,
+ * which delegate to this body) can pin its behavior without re-implementing
+ * the legacy lifecycle.
  */
-async function finalizeMessage(args: FinalizeArgs): Promise<void> {
+export async function finalizeMessage(args: FinalizeArgs): Promise<void> {
   const { messageId, tenantId, session, sandbox, sdkSessionId, transcriptChunks, effectiveBudget } = args;
 
   try {
