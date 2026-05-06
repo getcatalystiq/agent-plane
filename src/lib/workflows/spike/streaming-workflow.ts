@@ -7,6 +7,11 @@
  *   - getWritable inside a step + getReadable from outside via run.getReadable
  *   - termination on a sentinel-kind chunk
  *
+ * **Step boundary rule:** the Hook object is not serializable (contains Symbols
+ * and functions). Both `createHook` and the iteration must live inside the same
+ * step. Only serializable primitives (the messageId) cross the workflow→step
+ * boundary. This matches what U2's `streamFromHook` step will do.
+ *
  * Plan reference: U0 in docs/plans/2026-05-05-001-refactor-workflow-sdk-dispatch-plan.md
  */
 import { createHook, getWritable } from "workflow";
@@ -28,17 +33,19 @@ export async function spikeStreamingWorkflow(
   "use workflow";
 
   const token = `spike:transcript:${input.messageId}`;
-  const hook = createHook<SpikeChunk>({ token });
-
-  await spikeIterateAndForward(hook);
-
+  await spikeIterateAndForward(input.messageId);
   return { messageId: input.messageId, token };
 }
 
-async function spikeIterateAndForward(
-  hook: AsyncIterable<SpikeChunk>,
-): Promise<void> {
+async function spikeIterateAndForward(messageId: string): Promise<void> {
   "use step";
+
+  // Reconstruct the deterministic token inside the step so external callers
+  // (resumeHook from the route handler) can find this hook by computing the
+  // same token from messageId — without passing the Hook object across the
+  // step boundary.
+  const token = `spike:transcript:${messageId}`;
+  const hook = createHook<SpikeChunk>({ token });
 
   const writable = getWritable<string>();
   const writer = writable.getWriter();
