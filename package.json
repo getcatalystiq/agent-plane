@@ -81,6 +81,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "typescript": "^5",
+    "vercel": "^53.1.1",
     "vitest": "^4.0.18"
   }
 }

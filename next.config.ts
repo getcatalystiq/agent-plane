@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withWorkflow } from "workflow/next";
 
 const nextConfig: NextConfig = {
   async redirects() {
@@ -25,4 +26,8 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// Vercel Workflow DevKit (`workflow` package). The plugin transforms
+// `"use workflow"` and `"use step"` directives at build time, generates the
+// `/.well-known/workflow/v1/*` routes, and wires up filesystem-backed dev
+// streams during `next dev`.
+export default withWorkflow(nextConfig);

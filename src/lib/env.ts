@@ -29,6 +29,13 @@ const EnvSchema = z.object({
   // Braintrust (observability)
   BRAINTRUST_API_KEY: z.string().optional(),
 
+  // U0 spike: gates the /api/internal/wdk-spike/* driver routes. Set on
+  // preview deployments only; production should have it unset so the spike
+  // routes 404. The shared secret is required so the spike isn't an open
+  // workflow-run-creation endpoint accessible to anyone who finds the
+  // preview URL.
+  WDK_SPIKE_TOKEN: z.string().optional(),
+
   // Runtime
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
 });
