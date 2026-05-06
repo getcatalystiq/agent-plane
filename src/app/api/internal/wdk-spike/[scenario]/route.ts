@@ -50,6 +50,54 @@ function errMsg(err: unknown): string {
   return String(err);
 }
 
+/**
+ * Retry resumeHook with exponential backoff. After `start()` returns, the
+ * workflow runtime may take several seconds (Vercel cold-start) before it
+ * begins executing the workflow body, where `createHook` registers the
+ * deterministic token. Until then, `resumeHook(token, ...)` throws
+ * `HookNotFoundError`. This helper retries with backoff until the token
+ * is registered, capped at the budget, and returns the last error if it
+ * never succeeds.
+ *
+ * Caller pays the cost as a one-time per-run delay; subsequent resumes
+ * after the first success are immediate.
+ */
+interface ResumeBackoffResult {
+  ok: boolean;
+  attempts: number;
+  lastError: string;
+}
+
+async function resumeHookWithBackoff(
+  token: string,
+  payload: unknown,
+  options: { budgetMs?: number } = {},
+): Promise<ResumeBackoffResult> {
+  const budgetMs = options.budgetMs ?? 30_000;
+  const start = Date.now();
+  let attempts = 0;
+  let waitMs = 100;
+  let lastError = "";
+  while (Date.now() - start < budgetMs) {
+    attempts++;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await resumeHook(token, payload as any);
+      return { ok: true, attempts, lastError };
+    } catch (err) {
+      lastError = errMsg(err);
+      // HookNotFoundError is the expected pre-registration error; other errors
+      // are reported back without further retry.
+      if (!lastError.includes("Hook not found")) {
+        return { ok: false, attempts, lastError };
+      }
+      await new Promise((r) => setTimeout(r, waitMs));
+      waitMs = Math.min(waitMs * 1.5, 2_000);
+    }
+  }
+  return { ok: false, attempts, lastError };
+}
+
 async function readAll(stream: ReadableStream<unknown>): Promise<string[]> {
   const chunks: string[] = [];
   const reader = stream.getReader();
@@ -73,11 +121,17 @@ async function scenario1(): Promise<ScenarioResult> {
   const messageId = `spike-${Date.now()}-1`;
   try {
     const run = await start(spikeStreamingWorkflow, [{ messageId }]);
-    await new Promise((r) => setTimeout(r, 200));
-    await resumeHook(`spike:transcript:${messageId}`, {
-      kind: "chunk",
-      data: "hello",
-    } satisfies SpikeChunk);
+    const t0 = Date.now();
+    const first = await resumeHookWithBackoff(
+      `spike:transcript:${messageId}`,
+      { kind: "chunk", data: "hello" } satisfies SpikeChunk,
+    );
+    if (!first.ok) {
+      throw new Error(
+        `Hook never registered within budget (attempts=${first.attempts}): ${first.lastError}`,
+      );
+    }
+    const registrationLatencyMs = Date.now() - t0;
     await resumeHook(`spike:transcript:${messageId}`, {
       kind: "terminal",
       data: "bye",
@@ -86,7 +140,7 @@ async function scenario1(): Promise<ScenarioResult> {
     return {
       scenario: 1,
       status: "verified",
-      notes: `Workflow returned ${JSON.stringify(result)}`,
+      notes: `Workflow returned ${JSON.stringify(result)}; hook registration latency=${registrationLatencyMs}ms (attempts=${first.attempts})`,
     };
   } catch (err) {
     return { scenario: 1, status: "failed", notes: errMsg(err) };
@@ -94,28 +148,24 @@ async function scenario1(): Promise<ScenarioResult> {
 }
 
 async function scenario2(): Promise<ScenarioResult> {
+  // Verifies that resumeHook tolerates being fired before the iterator parks.
+  // Implemented via the same backoff helper as scenario 1 — the post-start
+  // window during which resumeHook 404s IS the test surface. If backoff
+  // succeeds, the fire-before-park race is not a correctness issue (just a
+  // cold-start latency we measure in scenario 1).
   const messageId = `spike-${Date.now()}-2`;
   try {
     const run = await start(spikeStreamingWorkflow, [{ messageId }]);
-    // No sleep — try to fire resumeHook immediately, racing the workflow's
-    // createHook registration. Token is deterministic so reconstruction works.
-    let firstResumeOk = false;
-    let lastErr = "";
-    for (let i = 0; i < 10; i++) {
-      try {
-        await resumeHook(`spike:transcript:${messageId}`, {
-          kind: "chunk",
-          data: `racy-${i}`,
-        } satisfies SpikeChunk);
-        firstResumeOk = true;
-        break;
-      } catch (err) {
-        lastErr = errMsg(err);
-        await new Promise((r) => setTimeout(r, 50));
-      }
-    }
-    if (!firstResumeOk) {
-      throw new Error(`Could not resume hook within 500ms of start(): ${lastErr}`);
+    // Fire IMMEDIATELY — no wait at all.
+    const result1 = await resumeHookWithBackoff(
+      `spike:transcript:${messageId}`,
+      { kind: "chunk", data: "racy-0" } satisfies SpikeChunk,
+      { budgetMs: 30_000 },
+    );
+    if (!result1.ok) {
+      throw new Error(
+        `Could not resume hook (attempts=${result1.attempts}): ${result1.lastError}`,
+      );
     }
     await resumeHook(`spike:transcript:${messageId}`, {
       kind: "terminal",
@@ -125,14 +175,14 @@ async function scenario2(): Promise<ScenarioResult> {
     return {
       scenario: 2,
       status: "verified",
-      notes: `Hook delivered the racy resume; result ${JSON.stringify(result)}`,
+      notes: `Hook delivered the racy resume after ${result1.attempts} attempts; result ${JSON.stringify(result)}`,
     };
   } catch (err) {
     return {
       scenario: 2,
       status: "failed",
       notes: errMsg(err) +
-        " (may need backoff retry on the runner side; see U3 retry policy)",
+        " (the runner-side retry policy in U3 must use the same backoff pattern)",
     };
   }
 }
@@ -141,9 +191,16 @@ async function scenario3(): Promise<ScenarioResult> {
   const messageId = `spike-${Date.now()}-3`;
   try {
     const run = await start(spikeStreamingWorkflow, [{ messageId }]);
-    await new Promise((r) => setTimeout(r, 200));
 
-    for (let i = 0; i < 5; i++) {
+    // First chunk uses backoff; subsequent chunks should be immediate.
+    const first = await resumeHookWithBackoff(
+      `spike:transcript:${messageId}`,
+      { kind: "chunk", data: "line-0" } satisfies SpikeChunk,
+    );
+    if (!first.ok) {
+      throw new Error(`Hook never registered: ${first.lastError}`);
+    }
+    for (let i = 1; i < 5; i++) {
       await resumeHook(`spike:transcript:${messageId}`, {
         kind: "chunk",
         data: `line-${i}`,
@@ -179,9 +236,15 @@ async function scenario4(): Promise<ScenarioResult> {
   const messageId = `spike-${Date.now()}-4`;
   try {
     const run = await start(spikeStreamingWorkflow, [{ messageId }]);
-    await new Promise((r) => setTimeout(r, 200));
 
-    for (let i = 0; i < 6; i++) {
+    const first = await resumeHookWithBackoff(
+      `spike:transcript:${messageId}`,
+      { kind: "chunk", data: "r0" } satisfies SpikeChunk,
+    );
+    if (!first.ok) {
+      throw new Error(`Hook never registered: ${first.lastError}`);
+    }
+    for (let i = 1; i < 6; i++) {
       await resumeHook(`spike:transcript:${messageId}`, {
         kind: "chunk",
         data: `r${i}`,
@@ -237,12 +300,14 @@ async function scenario5(): Promise<ScenarioResult> {
   const messageId = `spike-${Date.now()}-5`;
   try {
     const run = await start(spikeStreamingWorkflow, [{ messageId }]);
-    await new Promise((r) => setTimeout(r, 200));
 
-    await resumeHook(`spike:transcript:${messageId}`, {
-      kind: "chunk",
-      data: "before-cancel",
-    } satisfies SpikeChunk);
+    const first = await resumeHookWithBackoff(
+      `spike:transcript:${messageId}`,
+      { kind: "chunk", data: "before-cancel" } satisfies SpikeChunk,
+    );
+    if (!first.ok) {
+      throw new Error(`Hook never registered: ${first.lastError}`);
+    }
     await new Promise((r) => setTimeout(r, 100));
 
     await run.cancel();
