@@ -100,6 +100,14 @@ vi.mock("@/lib/dispatcher", () => ({
   dispatchSessionMessage: mocks.dispatchSessionMessage,
 }));
 
+// U8: webhook route now goes through dispatchOrWorkflowDispatch. Stub the
+// shim's shouldUseWorkflow to deterministic-false so the legacy path
+// (dispatchSessionMessage above) is taken — this test file pins the
+// legacy contract; workflow-path coverage lives in dispatch-shim tests.
+vi.mock("@/lib/workflows/toggle", () => ({
+  shouldUseWorkflow: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock("@/lib/session-messages", () => ({
   transitionMessageStatus: mocks.transitionMessageStatus,
   getSessionIdForMessage: mocks.getSessionIdForMessage,
@@ -219,7 +227,11 @@ describe("POST /api/webhooks/[sourceId]", () => {
       source_name: "github",
     });
     // dispatchSessionMessage runs in `after()` (mocked to fire-and-forget); flush microtasks
-    // so the spy observes the call before assertions.
+    // so the spy observes the call before assertions. The U8 dispatchOrWorkflowDispatch
+    // shim adds an extra async hop (await shouldUseWorkflow), so flush twice
+    // to drain the deeper microtask chain.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     expect(dispatchSessionMessage).toHaveBeenCalledTimes(1);
   });
