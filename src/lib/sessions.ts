@@ -9,7 +9,7 @@ import {
   ConcurrencyLimitError,
 } from "./errors";
 import type { SessionStatus, TenantId, AgentId, RunTriggeredBy } from "./types";
-import { SESSION_VALID_TRANSITIONS } from "./types";
+import { SESSION_VALID_TRANSITIONS, WORKFLOW_RUN_ID_PREFIX } from "./types";
 
 /**
  * Tenant cap on concurrent active sessions. The cap counts only sessions in
@@ -581,6 +581,46 @@ export async function updateSessionMcpRefreshedAt(
 ): Promise<void> {
   await execute(
     "UPDATE sessions SET mcp_refreshed_at = now() WHERE id = $1 AND tenant_id = $2",
+    [sessionId, tenantId],
+  );
+}
+
+/**
+ * Persist the WDK workflow run id on a session row. Caller must pass an id
+ * already prefixed with `wdk_v1_` (use {@link requireWorkflowRunId} at the
+ * boundary). Stored values without the prefix are rejected here so a future
+ * WDK format change can't silently land an unparseable id.
+ */
+export async function setWorkflowRunId(
+  sessionId: string,
+  tenantId: TenantId,
+  workflowRunId: string,
+): Promise<void> {
+  if (!workflowRunId.startsWith(WORKFLOW_RUN_ID_PREFIX)) {
+    throw new Error(
+      `setWorkflowRunId: expected '${WORKFLOW_RUN_ID_PREFIX}' prefix, got: ${workflowRunId}`,
+    );
+  }
+  const result = await execute(
+    "UPDATE sessions SET workflow_run_id = $1 WHERE id = $2 AND tenant_id = $3",
+    [workflowRunId, sessionId, tenantId],
+  );
+  if (result.rowCount === 0) {
+    throw new NotFoundError("Session not found");
+  }
+}
+
+/**
+ * Clear the workflow_run_id on a session. Used by the operational runbook's
+ * "force a workflow-backed row back to legacy" step during the coexistence
+ * window — and by the cleanup cron when a workflow's runtime is unreachable.
+ */
+export async function clearWorkflowRunId(
+  sessionId: string,
+  tenantId: TenantId,
+): Promise<void> {
+  await execute(
+    "UPDATE sessions SET workflow_run_id = NULL WHERE id = $1 AND tenant_id = $2",
     [sessionId, tenantId],
   );
 }

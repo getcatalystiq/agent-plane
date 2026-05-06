@@ -12,6 +12,25 @@ export type SessionId = string & { readonly __brand: "SessionId" };
 export type SessionMessageId = string & { readonly __brand: "SessionMessageId" };
 export type WebhookSourceId = string & { readonly __brand: "WebhookSourceId" };
 export type WebhookDeliveryId = string & { readonly __brand: "WebhookDeliveryId" };
+export type WorkflowRunId = string & { readonly __brand: "WorkflowRunId" };
+
+/**
+ * Workflow run ids are stored on `sessions.workflow_run_id` with a version
+ * prefix so a future incompatible WDK upgrade can detect format-incompatible
+ * runIds and route them to the legacy salvage path on rollback.
+ *
+ * Prefix is `wdk_v1_<id>` for the current WDK 4.x family.
+ */
+export const WORKFLOW_RUN_ID_PREFIX = "wdk_v1_" as const;
+
+export const requireWorkflowRunId = (s: string): WorkflowRunId => {
+  if (!s.startsWith(WORKFLOW_RUN_ID_PREFIX)) {
+    throw new Error(
+      `Invalid WorkflowRunId — expected '${WORKFLOW_RUN_ID_PREFIX}' prefix`,
+    );
+  }
+  return s as unknown as WorkflowRunId;
+};
 
 /**
  * FIX #31 (kt-1): boundary helpers that brand a raw string after a UUID

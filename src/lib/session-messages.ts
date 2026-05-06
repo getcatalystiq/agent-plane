@@ -202,6 +202,29 @@ export async function transitionMessageStatus(
 }
 
 /**
+ * Mark the runner as started for a message. Used by the workflow path's
+ * launchRunner step as the DB-side spawn idempotency primitive: the column
+ * is set transactionally inside the step's tx; on workflow replay, a
+ * non-null value short-circuits re-spawn so a single function host crash
+ * does not produce two billed runners.
+ *
+ * Idempotent: subsequent calls return false (already-set) instead of
+ * overwriting.
+ */
+export async function markRunnerStarted(
+  messageId: string,
+  tenantId: TenantId,
+): Promise<boolean> {
+  const result = await execute(
+    `UPDATE session_messages
+       SET runner_started_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND runner_started_at IS NULL`,
+    [messageId, tenantId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
  * Look up the parent session_id for a message within a tenant. Returns null
  * when the message row does not exist (or the tenant scope mismatches).
  */

@@ -361,6 +361,12 @@ export const TenantRow = z.object({
   subscription_base_url: z.string().nullable().default(null),
   subscription_token_expires_at: z.coerce.string().nullable().default(null),
   spend_period_start: z.coerce.string(),
+  // Per-tenant workflow dispatch override deny-list. Keys match trigger names
+  // (api/schedule/webhook/a2a/cleanup/admin); values are booleans.
+  // Empty object = follow global env-var toggle. Tenant override wins when set.
+  workflow_dispatch_overrides: z
+    .record(z.string(), z.boolean())
+    .default({}),
   created_at: z.coerce.string(),
 });
 
@@ -570,6 +576,10 @@ export const SessionMessageRow = z.object({
   error_messages: z.array(z.string()),
   webhook_source_id: z.string().nullable().default(null),
   created_by_key_id: z.string().nullable().default(null),
+  // Workflow-path spawn idempotency. Set transactionally inside launchRunner
+  // step so workflow replay finds non-null and skips re-spawn. NULL on legacy
+  // path messages.
+  runner_started_at: z.coerce.string().nullable().default(null),
   started_at: z.coerce.string().nullable(),
   completed_at: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
@@ -603,6 +613,10 @@ export const ScheduleRow = z.object({
   enabled: z.boolean(),
   last_run_at: z.coerce.string().nullable().default(null),
   next_run_at: z.coerce.string().nullable().default(null),
+  // Workflow-path dedup primitive: typically `<scheduleId>:<fireTimestamp>`,
+  // bound by the partial UNIQUE index in migration 034. Replaces the
+  // (non-existent) WDK start() idempotency. NULL on legacy-path schedules.
+  last_fired_dispatch_key: z.string().nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -682,6 +696,11 @@ export const SessionRow = z.object({
   idle_since: z.coerce.string().nullable(),
   last_backup_at: z.coerce.string().nullable(),
   mcp_refreshed_at: z.coerce.string().nullable(),
+  // Workflow run id for the session's currently-active or most-recent dispatch.
+  // Stored with a `wdk_v1_<id>` version prefix so a future incompatible WDK
+  // upgrade can detect format-incompatible runIds and route them to the
+  // legacy salvage path on rollback. NULL on legacy-path sessions.
+  workflow_run_id: z.string().nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -694,6 +713,7 @@ export const SessionResponseRow = SessionRow.omit({
   session_blob_url: true,
   last_backup_at: true,
   mcp_refreshed_at: true,
+  workflow_run_id: true,
 });
 
 export type SessionResponse = z.infer<typeof SessionResponseRow>;
