@@ -8,7 +8,7 @@ import {
   SessionResponseRow,
 } from "@/lib/validation";
 import { createSession, listSessions } from "@/lib/sessions";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { dispatchOrWorkflowDispatch } from "@/lib/workflows/dispatch-shim";
 import { deriveTriggeredBy } from "@/lib/trigger";
 import type { AgentId } from "@/lib/types";
 
@@ -71,11 +71,14 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     return jsonResponse(SessionResponseRow.parse(session), 201);
   }
 
-  // With prompt: dispatch through the chokepoint. The dispatcher will
-  // create the session inside its own transaction and return the
-  // streaming response.
+  // With prompt: dispatch through the unified shim. Picks workflow vs
+  // legacy based on shouldUseWorkflow('api', tenantId) AND the by-row
+  // coexistence rule. Existing workflow-backed sessions stay on workflow;
+  // existing legacy-pinned sessions stay on legacy. NEW sessions follow
+  // the toggle. (For NEW sessions there's no prior session to pin from
+  // so the toggle decision is final.)
   const ephemeral = input.ephemeral ?? true;
-  const result = await dispatchSessionMessage({
+  const result = await dispatchOrWorkflowDispatch({
     tenantId: auth.tenantId,
     agentId: input.agent_id as AgentId,
     prompt: input.prompt,

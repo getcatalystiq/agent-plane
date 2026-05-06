@@ -7,6 +7,8 @@ import { getSession } from "@/lib/sessions";
 import { ndjsonHeaders } from "@/lib/streaming";
 import { NotFoundError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import { renderRest, renderRestHeaders } from "@/lib/workflows/render-rest";
+import { WORKFLOW_RUN_ID_PREFIX } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -19,6 +21,14 @@ type RouteContext = { params: Promise<{ sessionId: string; messageId: string }> 
  *
  * Query params:
  *   - offset: number of transcript lines already received (skip duplicates)
+ *   - startIndex: workflow-path equivalent of offset; if both are set,
+ *     startIndex wins for workflow-backed sessions
+ *
+ * **U5 — workflow-backed branch:** when the session has a non-null
+ * `workflow_run_id`, the reconnect reads from the durable WDK stream via
+ * `render-rest` (chunks are scrubbed and persistent across function host
+ * restarts). The legacy sandbox-file polling path is preserved verbatim
+ * for legacy-pinned sessions until U10a retirement.
  */
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const auth = await authenticateApiKey(request.headers.get("authorization"));
@@ -45,8 +55,40 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
     return new Response("", { status: 200, headers: ndjsonHeaders() });
   }
 
-  // Still running — reconnect to the parent session's sandbox.
+  // Still running — fetch the session row to determine workflow vs legacy.
   const session = await getSession(sessionId, auth.tenantId);
+
+  // U5: workflow-backed reconnect via render-rest (durable Redis-backed
+  // stream; survives function host restarts; bounded by getTailIndex).
+  if (session.workflow_run_id) {
+    if (!session.workflow_run_id.startsWith(WORKFLOW_RUN_ID_PREFIX)) {
+      logger.warn("Stream reconnect: unexpected workflow_run_id format", {
+        session_id: sessionId,
+        message_id: messageId,
+        stored: session.workflow_run_id,
+      });
+    } else {
+      const rawRunId = session.workflow_run_id.slice(
+        WORKFLOW_RUN_ID_PREFIX.length,
+      );
+      const startIndexRaw =
+        request.nextUrl.searchParams.get("startIndex") ??
+        request.nextUrl.searchParams.get("offset");
+      const startIndex = startIndexRaw ? Math.max(0, parseInt(startIndexRaw, 10)) : 0;
+      const stream = renderRest({
+        runId: rawRunId,
+        startIndex,
+        sessionId,
+        messageId,
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: renderRestHeaders(),
+      });
+    }
+  }
+
+  // Legacy sandbox-file polling path below — kept for legacy-pinned sessions.
   if (!session.sandbox_id) {
     return NextResponse.json(
       { error: { code: "conflict", message: "No sandbox for this session" } },

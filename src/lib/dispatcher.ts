@@ -326,10 +326,31 @@ export async function dispatchSessionMessage(input: DispatchInput): Promise<Disp
  *  - `active`    → Mark active message `cancelled`, stop sandbox, CAS to `stopped`.
  *  - `idle`      → CAS to `stopped`, drop sandbox if any.
  *  - `stopped`   → Idempotent no-op; returns the existing row.
+ *
+ * **U5 — workflow-aware cancellation (SEC-001 hardening).** When the session
+ * has a non-null `workflow_run_id`, this function additionally signals the
+ * workflow run to cancel via `getRun(runId).cancel()`. Tenant ownership is
+ * verified by `getSession`'s tenant-scoped DB read BEFORE the WDK call —
+ * cross-tenant taskId attempts return NotFoundError (via getSession) and
+ * never reach WDK, even though WDK runIds are not tenant-scoped at the
+ * SDK level.
  */
 export async function cancelSession(sessionId: string, tenantId: TenantId): Promise<Session> {
   const session = await getSession(sessionId, tenantId);
   if (session.status === "stopped") return session;
+
+  // U5 — signal the workflow run if this session is workflow-backed. Done
+  // BEFORE the legacy DB CAS so the workflow's catch path can salvage
+  // and finalize naturally. The legacy DB CAS below is preserved as a
+  // belt-and-suspenders fallback (and for legacy sessions).
+  if (session.workflow_run_id) {
+    const cancelled = await cancelWorkflowRun(session.workflow_run_id, sessionId, tenantId);
+    if (cancelled) {
+      // Workflow's finalize step will run salvage-before-stop ordering and
+      // CAS the message + session through. Fall through to the DB CAS
+      // below for atomic visibility — both paths converge on `stopped`.
+    }
+  }
 
   // FIX #9 (partial): if a sandbox boot is in flight for this session, fire
   // its abort signal. The sandbox SDK call doesn't yet honor the signal
@@ -1126,6 +1147,55 @@ export async function sessionTail(args: SessionTailArgs): Promise<void> {
           : {}),
       },
     );
+  }
+}
+
+/**
+ * Cancel the WDK workflow run for a session, if one is registered.
+ *
+ * Tenant ownership is verified by the caller's prior `getSession` —
+ * this function takes the (already-validated) workflow_run_id and only
+ * fires the `getRun(runId).cancel()` call. If WDK throws (run already
+ * terminal, runId stale, runtime hiccup), we log + return false so the
+ * caller's legacy DB CAS path can still drive the session to `stopped`.
+ *
+ * Imported lazily to avoid pulling the `workflow/api` runtime into
+ * code paths that never touch workflow-backed sessions.
+ */
+async function cancelWorkflowRun(
+  prefixedRunId: string,
+  sessionId: string,
+  tenantId: TenantId,
+): Promise<boolean> {
+  const PREFIX = "wdk_v1_";
+  if (!prefixedRunId.startsWith(PREFIX)) {
+    logger.warn("cancelWorkflowRun: unexpected runId format; skipping WDK call", {
+      session_id: sessionId,
+      tenant_id: tenantId,
+      stored_run_id: prefixedRunId,
+    });
+    return false;
+  }
+  const rawRunId = prefixedRunId.slice(PREFIX.length);
+  try {
+    const { getRun } = await import("workflow/api");
+    await getRun(rawRunId).cancel();
+    logger.info("cancelSession: workflow run cancelled", {
+      session_id: sessionId,
+      tenant_id: tenantId,
+      run_id: rawRunId,
+    });
+    return true;
+  } catch (err) {
+    // Known-OK errors: run already terminal, runId stale (post-rollback).
+    // Log + fall through; the legacy CAS path will drive the row to stopped.
+    logger.warn("cancelSession: workflow cancel failed (best-effort)", {
+      session_id: sessionId,
+      tenant_id: tenantId,
+      run_id: rawRunId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
   }
 }
 

@@ -5,7 +5,7 @@ import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { PaginationSchema, SessionMessageStatusSchema } from "@/lib/validation";
 import { getSession } from "@/lib/sessions";
 import { listMessages } from "@/lib/session-messages";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { dispatchOrWorkflowDispatch } from "@/lib/workflows/dispatch-shim";
 import { deriveTriggeredBy } from "@/lib/trigger";
 import { SessionStoppedError } from "@/lib/errors";
 import type { AgentId } from "@/lib/types";
@@ -37,7 +37,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   });
 
   try {
-    const result = await dispatchSessionMessage({
+    const result = await dispatchOrWorkflowDispatch({
       tenantId: auth.tenantId,
       agentId: session.agent_id as AgentId,
       sessionId,
