@@ -8,7 +8,7 @@ import {
 } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
 import { createSession } from "@/lib/sessions";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { dispatchOrWorkflowDispatch } from "@/lib/workflows/dispatch-shim";
 import { deriveTriggeredBy } from "@/lib/trigger";
 import { NotFoundError } from "@/lib/errors";
 import type { AgentId, TenantId } from "@/lib/types";
@@ -117,8 +117,12 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     return NextResponse.json(session, { status: 201 });
   }
 
+  // U5b: admin entry uses the same shim as REST. Toggle is
+  // WORKFLOW_DISPATCH_ADMIN (playground/chat triggers fold into 'admin'
+  // per the toggle helper). Coexistence rule applies: existing sessions
+  // pin their path; new sessions follow the toggle.
   const ephemeral = input.ephemeral ?? false;
-  const result = await dispatchSessionMessage({
+  const result = await dispatchOrWorkflowDispatch({
     tenantId,
     agentId: input.agent_id as AgentId,
     prompt: input.prompt,

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { query, queryOne } from "@/db";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { SessionRow, SessionMessageRow, PaginationSchema, SessionMessageStatusSchema } from "@/lib/validation";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
+import { dispatchOrWorkflowDispatch } from "@/lib/workflows/dispatch-shim";
 import { deriveTriggeredBy } from "@/lib/trigger";
 import { NotFoundError, SessionStoppedError } from "@/lib/errors";
 import type { AgentId, TenantId } from "@/lib/types";
@@ -37,7 +37,7 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
   });
 
   try {
-    const result = await dispatchSessionMessage({
+    const result = await dispatchOrWorkflowDispatch({
       tenantId,
       agentId: session.agent_id as AgentId,
       sessionId,
