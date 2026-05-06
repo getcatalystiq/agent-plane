@@ -9,6 +9,9 @@ import { transitionMessageStatus } from "@/lib/session-messages";
 import { BudgetExceededError, ConcurrencyLimitError } from "@/lib/errors";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
+import { shouldUseWorkflow } from "@/lib/workflows/toggle";
+import { start } from "workflow/api";
+import { dispatchWorkflow } from "@/lib/workflows/dispatch-workflow";
 import { z } from "zod";
 import type { AgentId, TenantId } from "@/lib/types";
 
@@ -76,6 +79,22 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       schedule_id,
       agent_id: agent.id,
       error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // U7: workflow path replaces the drain loop with a maxDuration-bounded
+  // race against run.returnValue. The drain pain doesn't disappear — it
+  // relocates: long-running runs detach when the cron's await hits the
+  // function timeout (same shape as legacy stream_detached), and the
+  // cleanup cron's stuck-active watchdog (now workflow-aware) is the
+  // backstop if the runner never emits terminal.
+  if (await shouldUseWorkflow("schedule", tenantId)) {
+    return await runViaWorkflow({
+      tenantId,
+      agentId,
+      sessionId: warmSessionId,
+      prompt: schedule.prompt,
+      schedule_id,
     });
   }
 
@@ -226,3 +245,109 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
   logger.info("Scheduled run completed", { schedule_id, agent_id: agent.id, message_id: messageId });
   return jsonResponse({ status: "triggered", message_id: messageId });
 });
+
+// ---------------------------------------------------------------------------
+// U7: Workflow-path runner.
+// ---------------------------------------------------------------------------
+
+/**
+ * Replaces the legacy 30s-per-read drain loop with a maxDuration-bounded
+ * race against `run.returnValue`. The plan's "drain pain relocated, not
+ * removed" framing applies here:
+ *
+ *   - For runs that complete within `maxDuration - 30s`, the cron returns
+ *     `{ status: 'completed' }` with the full result.
+ *   - For runs that take longer (e.g., agent.max_runtime_seconds=1800),
+ *     the cron returns `{ status: 'detached' }` and the workflow keeps
+ *     running. The cleanup cron's workflow-aware stuck-active watchdog
+ *     is the backstop if the runner never emits terminal.
+ */
+async function runViaWorkflow(input: {
+  tenantId: TenantId;
+  agentId: AgentId;
+  sessionId: string | undefined;
+  prompt: string;
+  schedule_id: string;
+}): Promise<Response> {
+  try {
+    const run = await start(
+      dispatchWorkflow as unknown as (input: {
+        tenantId: TenantId;
+        agentId: AgentId;
+        sessionId?: string;
+        prompt: string;
+        triggeredBy: "schedule";
+        ephemeral: false;
+        callerKeyId: null;
+        platformApiUrl: string;
+      }) => Promise<{ sessionId: string; messageId: string }>,
+      [
+        {
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          sessionId: input.sessionId,
+          prompt: input.prompt,
+          triggeredBy: "schedule",
+          ephemeral: false,
+          callerKeyId: null,
+          platformApiUrl: getCallbackBaseUrl(),
+        },
+      ],
+    );
+
+    // Race the workflow's return value against a maxDuration-30s timeout.
+    // Cron functions inherit the platform default (300s on Fluid Compute);
+    // the 30s headroom covers post-detach cleanup latency.
+    const TIMEOUT_MS = 270_000;
+    const timeoutSentinel = Symbol("schedule-detached");
+    const result = await Promise.race([
+      run.returnValue.then((value) => ({ kind: "terminal" as const, value })),
+      new Promise<{ kind: "timeout"; sentinel: symbol }>((resolve) =>
+        setTimeout(
+          () => resolve({ kind: "timeout", sentinel: timeoutSentinel }),
+          TIMEOUT_MS,
+        ),
+      ),
+    ]);
+
+    if (result.kind === "terminal") {
+      const out = result.value as { sessionId: string; messageId: string };
+      logger.info("Scheduled run (workflow) completed", {
+        schedule_id: input.schedule_id,
+        run_id: run.runId,
+        message_id: out.messageId,
+      });
+      return jsonResponse({
+        status: "completed",
+        message_id: out.messageId,
+        workflow_run_id: run.runId,
+      });
+    }
+
+    // Detached — workflow continues; cleanup cron is the backstop.
+    logger.info("Scheduled run (workflow) detached at maxDuration", {
+      schedule_id: input.schedule_id,
+      run_id: run.runId,
+    });
+    return jsonResponse({
+      status: "detached",
+      workflow_run_id: run.runId,
+    });
+  } catch (err) {
+    if (err instanceof ConcurrencyLimitError || err instanceof BudgetExceededError) {
+      const reason =
+        err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: input.schedule_id,
+        reason,
+        error: err.message,
+      });
+      return jsonResponse({ status: "skipped", reason });
+    }
+    logger.error("Scheduled run (workflow) failed", {
+      schedule_id: input.schedule_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jsonResponse({ status: "failed", reason: "dispatch_error" });
+  }
+}
