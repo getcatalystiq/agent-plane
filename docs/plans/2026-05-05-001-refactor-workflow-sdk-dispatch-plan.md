@@ -115,10 +115,12 @@ Carried from origin doc with R-IDs preserved. R1's step list is refined: origin 
 
 ## Key Technical Decisions
 
+> **U0 spike outcome (2026-05-06):** All 8 verification scenarios passed against a deployed Vercel preview. Several non-obvious WDK constraints surfaced and are now baked into the decisions below; the full rundown lives in `docs/research/wdk-spike-results.md`. Most consequential: `createHook` and the `for await` iterator MUST live in workflow body, but stream writes MUST live in a step — forcing a per-chunk-write step shape (not the original "one streamFromHook step that owns iteration + writes").
+
 - **Run-turn semantics split, not preserved as one step.** Origin R6's *meaning* (no mid-turn checkpointing inside an SDK loop) is preserved, but the *step boundary* shifts: the SDK call lives in the sandbox runner, not in a workflow step. The workflow uses a WDK hook iterator (Pattern A — see below) to wait without holding function compute across the SDK call's duration. This is the only viable shape given Vercel function max duration (300s default Fluid Compute, up to 900s Enterprise) < worst-case `agent.max_runtime_seconds` (3600s).
-- **Pattern A (Hook) for runner→workflow streaming.** The runner POSTs each NDJSON line to `/api/internal/messages/:messageId/transcript` (refactored to incremental). The endpoint calls WDK's `resumeHook(token, line)` against a deterministic per-message hook token (`transcript:${messageId}`). The workflow body creates the hook *before* `launchRunner` runs, so the token exists by spawn time and any early runner POST can never 404. A workflow step iterates the hook (`for await (const line of hook)`) and forwards each chunk via `getWritable().write(line)` to the workflow's persistent (Redis-backed) stream. The terminal POST sends a sentinel line that the iterator recognises and breaks out on, returning to the workflow body for finalize. Function compute is held only inside the iterator's individual step invocations; long idle gaps between runner POSTs do not consume function time. **Cost note:** each `resumeHook` re-triggers the workflow runtime, so a 500-line transcript = 500 re-trigger events. Coalescing strategy below caps this.
+- **Pattern A (Hook) for runner→workflow streaming, U0-spike-corrected.** The runner POSTs each NDJSON line to `/api/internal/messages/:messageId/transcript` (refactored to incremental). The endpoint calls WDK's `resumeHook(token, payload)` against a deterministic per-message hook token (`transcript:${messageId}`). The workflow body creates the hook *before* `launchRunner` runs, so the token exists by spawn time. **The U0 spike (verified 2026-05-06 against the deployed workflow runtime) measured a 500ms–1.2s registration window on Vercel cold-start during which `resumeHook` returns `HookNotFoundError`** — runner-side backoff (100ms→1.6s, 30s budget) absorbs it; the WDK resume-queue holds racy resumes once the hook does register. The workflow body iterates the hook with `for await (const chunk of hook)` and **dispatches each chunk's data to a small per-chunk `writeChunk(data: string)` step** that owns the actual `getWritable().getWriter().write()` call. The split is required by WDK: `createHook` and the iterator must live in the workflow body (calling them from a step throws `Error: createHook() can only be called from inside a workflow function`), while stream writes must live in a step (calling them from workflow body throws `Error: Not supported in workflow functions`). The terminal-kind chunk breaks the body's loop, returning to finalize. Function compute is held only inside the per-step invocations; long idle gaps between runner POSTs do not consume function time. **Cost note:** each `resumeHook` re-triggers the workflow runtime, AND each chunk produces one `writeChunk` step invocation. The coalescing strategy below caps this at ~50 events/min for typical agent runs.
 - **Per-line POST coalescing (10 lines OR 100ms, whichever first).** Runner buffers NDJSON output and flushes either after 10 lines or 100ms, whichever fires first. Critical events (`result`, `error`) flush immediately and ignore the coalesce. This caps `resumeHook` calls at ~50/min for typical agent runs and bounds the workflow re-trigger event count — without losing the per-line truncation/text_delta rules from `docs/solutions/logic-errors/transcript-capture-and-streaming-fixes.md` (those run on each line as it's appended to the buffer, not on each POST).
-- **Streaming bridge runs `scrubSecrets()` + `processLineAssets()` per-line, in the workflow step iterator (not on the POST endpoint and not in the render shims).** This preserves the institutional learning from `docs/solutions/logic-errors/transcript-capture-and-streaming-fixes.md`: secret redaction happens before any byte reaches the workflow stream (which is durable and consumed by both REST and A2A render shims and the transcript blob), and Composio/Firecrawl ephemeral asset URLs are persisted to Vercel Blob before the URL leaves the platform's trust boundary.
+- **Streaming bridge runs `scrubSecrets()` + `processLineAssets()` per-line, inside the `writeChunk` step (not on the POST endpoint and not in the render shims).** This preserves the institutional learning from `docs/solutions/logic-errors/transcript-capture-and-streaming-fixes.md`: secret redaction happens before any byte reaches the workflow stream (which is durable and consumed by both REST and A2A render shims and the transcript blob), and Composio/Firecrawl ephemeral asset URLs are persisted to Vercel Blob before the URL leaves the platform's trust boundary. The internal endpoint parses incoming NDJSON into `RunnerChunk`s and forwards them to `resumeHook`; scrubbing happens downstream, in the step.
 - **Idempotency is DB-side; WDK `start()` is not used as a dedupe primitive.** WDK 4.x `start()` accepts `world`, `specVersion`, `deploymentId` only — there is no `idempotencyKey` parameter. Each entry point owns its own DB-side dedupe BEFORE calling `start()`: webhook uses `webhook_deliveries.delivery_id` UNIQUE index; REST/A2A use `(tenantId, idempotencyKey)` cache + the `(session_id, message_id)` schema uniqueness; schedule uses `(scheduleId, fireTime)` UNIQUE constraint added in U1. On duplicate, the entry point reads the prior `workflow_run_id` from the existing message row and returns its `getRun(runId)` handle to the caller.
 - **One column added on sessions, one on schedules, one on tenants. Versioned run-id prefix.**
   - `sessions.workflow_run_id text NULL` carries the WDK run id (used by cancel/stream/cleanup). Stored as `wdk_v1_<id>` so a future incompatible WDK upgrade can detect format-incompatible runIds and route them to the salvage path on rollback.
@@ -126,9 +128,9 @@ Carried from origin doc with R-IDs preserved. R1's step list is refined: origin 
   - `tenants.workflow_dispatch_overrides JSONB DEFAULT '{}'` per-tenant deny-list `{"api": false, "schedule": false, …}` so on-call can opt one tenant out of workflow without redeploying. Empty default = follow global toggle.
 - **Per-trigger env-var toggle + per-tenant deny-list.** `WORKFLOW_DISPATCH_{API,SCHEDULE,WEBHOOK,A2A,CLEANUP,ADMIN}` (six toggles, see below) plus the per-tenant override column. `shouldUseWorkflow(trigger, tenantId)` reads both: tenant override wins.
 - **Six entry-point migrations, not five.** `src/app/api/admin/sessions/route.ts` and `src/app/api/admin/sessions/[sessionId]/messages/route.ts` (admin playground + chat triggers) are a sixth dispatch chokepoint. They get a sixth toggle (`WORKFLOW_DISPATCH_ADMIN`) and a sixth migration unit (U5b). Origin doc didn't enumerate them; their inclusion is mandatory for R3 ("workflow is the single chokepoint").
-- **Cancellation: tenant-scoped lookup, signal, then DB.** `cancelSession(sessionId, tenantId)` reads the row tenant-scoped via existing RLS, extracts `workflow_run_id`, calls `getRun(runId).cancel()` only after confirming the row's tenant matches the caller. Then preserves the existing DB CAS-to-stopped path. The workflow's awaitFinalize iterator throws on cancel and routes through finalize (which performs salvage-before-stop ordering matching the legacy cleanup cron). For legacy sessions (no runId), the existing direct-stop path runs unchanged. **Tenant binding is at the cancelSession boundary because WDK runIds are not tenant-scoped at the SDK level.**
+- **Cancellation: tenant-scoped lookup, signal, then DB.** `cancelSession(sessionId, tenantId)` reads the row tenant-scoped via existing RLS, extracts `workflow_run_id`, calls `getRun(runId).cancel()` only after confirming the row's tenant matches the caller. Then preserves the existing DB CAS-to-stopped path. The workflow body's `for await` iterator throws on cancel (verified U0 spike scenario 5); the catch block routes through finalize (which performs salvage-before-stop ordering matching the legacy cleanup cron). For legacy sessions (no runId), the existing direct-stop path runs unchanged. **Tenant binding is at the cancelSession boundary because WDK runIds are not tenant-scoped at the SDK level.** **Render shims must NEVER call `.cancel()` on `WorkflowReadableStream`** — that propagates upstream and cancels the run; only the explicit `cancelSession` path may cancel.
 - **Auto-reissue (R6) is gated on three checks, not just attempt count.** Before reissue: (1) `session_messages.status` is still `running` (skip reissue if already completed/failed/cancelled), (2) workflow stream has zero chunks for this messageId (a non-empty stream means the runner reached operational state and side-effectful tools may have executed), (3) `reissue_attempts < 1` (the original cap). All three must pass; otherwise finalize records `recovery_unsupported`.
-- **Runner has explicit retry contract; workflow has no implicit retry of runner spawn.** The runner's per-line POST gains a `X-Runner-Attempt-Sequence` monotonic header (resets per run). The streaming bridge's dedup tuple is `(messageId, attemptSequence)` so duplicate POSTs from the runner's own retries are skipped without entering the stream. `launchRunner` step's idempotency uses a DB-side `session_messages.runner_started_at TIMESTAMPTZ NULL` column set transactionally inside the same step's tx — replay finds non-null and skips spawn. Sandbox-side process inspection is NOT relied upon.
+- **Runner has explicit retry contract; workflow has no implicit retry of runner spawn.** The runner's per-line POST gains an `X-Runner-Attempt-Sequence` monotonic header (resets per run). The streaming bridge's dedup tuple is `(messageId, attemptSequence, batchSequence)` so duplicate POSTs from the runner's own retries are skipped without entering the stream. The runner's exponential backoff is U0-derived: **100ms → 200ms → 400ms → 800ms → 1.6s, capped at 30s total budget on `HookNotFoundError`** (the cold-start hook-registration window WDK exhibits on Vercel). On other 5xx: same backoff, max 5 attempts. `launchRunner` step's idempotency uses a DB-side `session_messages.runner_started_at TIMESTAMPTZ NULL` column set transactionally inside the same step's tx — replay finds non-null and skips spawn. Sandbox-side process inspection is NOT relied upon.
 - **Test posture: characterization-first, with named test cases per recent commit.** A new `tests/unit/dispatcher-characterization.test.ts` pins current dispatcher behavior; named scenarios reference the originating commit shas (e.g., `// Pins behavior from 277a5e5: finalize message on empty stream + iterator throw`). The same scenarios run against the workflow path during coexistence. **Plus** a Phase-2 staging-soak that intentionally injects each commit's failure scenario under load before the matching toggle goes to `on` in production.
 - **Legacy coexistence: by-row, not by-flag, with rollback runbook.** Sessions with `workflow_run_id IS NULL` continue on legacy; sessions with non-null `workflow_run_id` continue on workflow. No mid-flight switchover. Toggle only affects new dispatches. **Deploy rollback during migration is unsafe** — see the Operational Notes section's runbook for the steps required (drain workflow rows OR force-clear `workflow_run_id` to fall back to legacy salvage, valid only through Phase 3 while legacy paths exist).
 
@@ -165,60 +167,71 @@ Carried from origin doc with R-IDs preserved. R1's step list is refined: origin 
 
 > *This illustrates the intended approach and is directional guidance for review, not implementation specification. The implementing agent should treat it as context, not code to reproduce.*
 
-### Workflow shape (Pattern A — hook-based)
+### Workflow shape (Pattern A — hook-based, U0-spike-corrected)
 
 ```
                            ┌────────────────────────────────────────┐
 HTTP route (REST/A2A/etc.) │ DB-side dedup → start(dispatchWorkflow)│
-   │                       │ persist runId on session row in same tx│
    │                       └────────────────┬───────────────────────┘
    ▼                                        ▼
-                       (workflow body — code between steps is non-durable;
-                        any DB write must live inside a step)
+
+WORKFLOW BODY ("use workflow" — directly executes; any DB write must be
+in a step; createHook AND for-await iteration MUST be in body, not a step).
 
    ┌──────────┐
-   │  reserve │  also persists workflow_run_id on the row + creates the hook
-   │  (~ms)   │  token deterministically from messageId so resumeHook never 404s
-   └────┬─────┘
-        │ token = "transcript:" + messageId  (created BEFORE launchRunner so a fast
-        │                                     runner's first POST always finds it)
+   │  reserve │ STEP — persists workflow_run_id = "wdk_v1_" +
+   │  (~ms)   │        getWorkflowMetadata().workflowRunId on session row
+   └────┬─────┘        (same tx as message INSERT; durable)
+        ▼
+   ┌──────────────────────────────────────────────────────────────────┐
+   │ createHook({ token: "transcript:" + messageId })   in body       │
+   │   token is deterministic so the internal endpoint reconstructs   │
+   │   it from messageId. Created BEFORE launchRunner.                │
+   └──────────────────────────────────────────────────────────────────┘
+        │
         ▼
    ┌──────────────┐
-   │ ensureSandbox│  cold-start or reconnect (5–30s)
+   │ ensureSandbox│ STEP — cold-start or reconnect (5–30s)
    └────┬─────────┘
         ▼
    ┌────────────┐                 ┌─────────────────────────────────────────┐
    │launchRunner│ ──spawn──────▶  │ runner-<messageId>.mjs in sandbox       │
-   │  (~1–2s)   │   marker DB col │  • coalesces NDJSON: 10 lines OR 100ms │
-   │            │   set in same tx│  • flushes critical events (result,    │
-   │            │   so replay     │    error) immediately                    │
-   │            │   skips spawn   │  • POSTs to internal endpoint with     │
-   └────┬───────┘                 │    X-Runner-Attempt-Sequence header     │
-        ▼                          └────────────────┬────────────────────────┘
-   ┌────────────────────────────┐                   │ resumeHook(token, batch)
-   │ streamFromHook (step)      │ ◀─────────────────┘
-   │  for await batch of hook:  │
-   │    for each line in batch: │       ┌──────────────────────────────────────┐
-   │      scrubSecrets(line)    │       │ /api/internal/messages/:id/transcript │
-   │      processLineAssets()   │       │  • verify per-message bearer token    │
-   │      if isCriticalEvent:   │       │  • check session_messages.status==   │
-   │        getWritable()       │       │    "running" (rejects post-terminal)  │
-   │          .write(line)      │       │  • dedup by                           │
-   │      else (text_delta):    │       │    (messageId, attemptSequence)       │
-   │        getWritable()       │       │  • count guard: per-message line cap  │
-   │          .write(line)      │       │    bounds stolen-token blast radius   │
-   │      if isTerminalSentinel:│       │  • resumeHook(token, batch)           │
-   │        break               │       └──────────────────────────────────────┘
-   └────────┬───────────────────┘
-            ▼
+   │  (~1–2s)   │  STEP — sets    │  • coalesces NDJSON: 10 lines OR 100ms  │
+   │            │  runner_started │  • flushes critical events immediately  │
+   │            │  _at in same tx │  • POSTs to internal endpoint with      │
+   │            │  → replay skip  │    X-Runner-Attempt-Sequence header     │
+   │            │                 │  • backoff on HookNotFoundError:        │
+   │            │                 │    100ms→1.6s, 30s budget (U0-derived)  │
+   └────┬───────┘                 └────────────────┬────────────────────────┘
+        ▼                                           │ resumeHook(token, payload)
+   ┌─────────────────────────────────────────┐      │
+   │ for await (chunk of hook) {  in body    │ ◀────┘
+   │   await writeChunk(...)                  │
+   │   if (chunk.kind === "terminal") break  │      ┌──────────────────────────┐
+   │ }                                        │      │ /api/internal/messages/  │
+   │                                          │      │   :id/transcript         │
+   │ where:                                   │      │  • verify bearer token    │
+   │  writeChunk(tenantId, msgId, chunk) {   │      │  • status='running' check │
+   │    "use step"                            │      │  • (messageId, attemptSeq,│
+   │    scrubSecrets / processLineAssets      │      │    batchSeq) KV dedup    │
+   │    getWritable().getWriter().write()     │      │  • per-message line cap   │
+   │    releaseLock()                         │      │  • parses NDJSON to       │
+   │  }                                       │      │    RunnerChunk            │
+   │                                          │      │  • resumeHook(token, ...) │
+   └────────┬─────────────────────────────────┘      └──────────────────────────┘
+            ▼ (natural break OR catch-cancellation)
    ┌──────────┐  ┌─────┐
-   │ finalize │→ │ tail│   billing/transcript blob/CAS-to-idle-or-stopped
+   │ finalize │→ │ tail│   STEPs — billing/transcript blob/CAS-to-idle-or-stopped
    └──────────┘  └─────┘
 
 REST/A2A clients consume: getRun(runId).getReadable({ startIndex })
   Render shims (REST=NDJSON passthrough, A2A=SSE per spec) translate the
-  already-scrubbed bytes. Reconnect across function boundaries is automatic
-  via Redis-backed stream + startIndex.
+  already-scrubbed bytes. **Use getTailIndex() to bound reads on a
+  terminal run** — WDK's writable does NOT auto-close on workflow
+  termination, so a plain for-await over the readable hangs. Reconnect
+  across function boundaries is automatic via Redis-backed stream +
+  startIndex. **Render shims MUST NEVER call .cancel() on a
+  WorkflowReadableStream** — that propagates upstream and cancels the run.
 ```
 
 ### Cancellation path (tenant-scoped)
@@ -232,11 +245,12 @@ cancelSession(sessionId, tenantId)
    ├─ Tenant-scoped session row read (RLS enforces tenant ownership)
    │     ▶ row.tenant_id MUST equal caller's tenantId — otherwise NotFoundError
    ├─ Extract workflow_run_id from the verified row
-   ├─ If non-null: getRun(runId).cancel()
+   ├─ If non-null: getRun(runId).cancel()  (U0 spike scenario 5 verified)
    │     ▼
-   │     streamFromHook step's hook iterator throws (WDK delivers cancellation)
+   │     workflow body's `for await (chunk of hook)` throws (WDK delivers
+   │     cancellation as an exception inside the iterator)
    │        ▼
-   │        finalize step (in catch/finally): salvage transcript file from
+   │        catch block runs finalize STEP: salvage transcript file from
    │        sandbox FIRST, then mark message cancelled, then stop sandbox
    │        (matches the legacy cleanup-cron salvage-before-stop ordering)
    │
@@ -373,7 +387,17 @@ RLS unchanged (all tables already enforce tenant boundaries). Validation schemas
 
 ### U2. Define the workflow function with hook-based streaming
 
-**Goal:** Add `dispatchWorkflow` with the seven steps required by Pattern A: reserve (which also creates the hook AND persists workflow_run_id), ensureSandbox, launchRunner (with DB-backed spawn idempotency), streamFromHook (the hook iterator that scrubs+forwards lines), finalize, tail. Cancellation propagates through the hook iterator's catch/finally. Crash recovery's three pre-reissue gates are encoded in `launchRunner`.
+**Goal:** Add `dispatchWorkflow` with the steps required by Pattern A: reserve (persists workflow_run_id), ensureSandbox, launchRunner (with DB-backed spawn idempotency), and finalize/tail. The workflow body itself owns hook iteration (the spike confirmed `createHook` and `for await` must live in workflow body, not a step). Each iterated chunk is forwarded via a small `writeChunk(data)` step that owns the `getWritable().getWriter().write()` call (also confirmed by the spike: stream writes throw "Not supported in workflow functions" when called from workflow body). Cancellation propagates through the hook iterator's catch/finally. Crash recovery's three pre-reissue gates are encoded in `launchRunner`.
+
+**WDK constraints from the U0 spike** (recorded in `docs/research/wdk-spike-results.md`; codified in U2's design here):
+
+- `createHook()` must be in workflow body, NOT a step
+- `Hook<T>` cannot cross workflow→step boundary (carries non-serializable Symbols)
+- `getWritable().getWriter().write()` must be inside a step
+- → Workflow body owns iteration; per-chunk `writeChunk(data: string)` step owns the write
+- Hook registration takes ~500ms–1.2s on Vercel cold-start; runner-side backoff is mandatory (handled in U3)
+- `WorkflowReadableStream.cancel()` cancels the entire run — render shims must NEVER call it (handled in U3)
+- `getReadable` after run-completion needs `getTailIndex()`-bounded reads — writable does NOT auto-close on workflow termination (handled in U3)
 
 **Requirements:** R1, R2, R5, R6, R7, R8, AE2
 
@@ -390,20 +414,27 @@ RLS unchanged (all tables already enforce tenant boundaries). Validation schemas
 
 **Approach:**
 
-Workflow body shape (steps marked with `"use step"`; non-step body code is non-durable):
-1. `reserve(input)` step — DB tx that runs `reserveSessionAndMessage` AND persists `workflow_run_id = "wdk_v1_" + getRunMetadata().runId` on the session row in the SAME transaction. The runId persist must NOT live as plain workflow body code; if the function host crashes between reserve completing and the next step, the row would otherwise carry a runId pointing at a workflow that may double-spawn. Co-locating in reserve's tx makes the write durable.
-2. `createHook` call inside the workflow body using a deterministic token: `transcript:${prepared.messageId}`. The token is reconstructable from messageId so the internal POST endpoint computes it without extra state. Created BEFORE `launchRunner` so the runner's first POST always finds a registered hook (covers the signal-before-park race).
+Workflow body shape (steps marked with `"use step"`; non-step body code is non-durable). The hook iterator runs in workflow body — that's the only place WDK allows `createHook` and `for await (const x of hook)`. Each iterated chunk is forwarded via a small per-chunk write step.
+
+1. `reserve(input, runId)` step — DB tx that runs `reserveSessionAndMessage` AND persists `workflow_run_id = "wdk_v1_" + runId` on the session row in the SAME transaction. RunId is sourced from `getWorkflowMetadata().workflowRunId` in the workflow body and passed in. Co-locating the runId persist with reserve's tx makes the write durable; a function-host crash between reserve and ensureSandbox cannot leave a session row with a stale runId.
+2. `createHook` call inside workflow body using a deterministic token: `transcript:${prepared.messageId}`. Token is reconstructable from messageId so the internal POST endpoint computes it without extra state. Created BEFORE `launchRunner` so the runner's first POST always finds a registered hook (covers the signal-before-park race; the U0 spike measured ~500ms–1.2s registration latency on cold start, absorbed by runner-side backoff in U3).
 3. `ensureSandbox(prepared)` step — cold-start or reconnect. Idempotent on `session.sandbox_id`.
 4. `launchRunner(prepared, sandbox)` step:
-   - Pre-spawn check: read `session_messages.runner_started_at` for this messageId. If non-null, the runner already spawned in a prior step invocation; skip spawn and return.
+   - Pre-spawn check: read `session_messages.runner_started_at` for this messageId. If non-null, runner already spawned in a prior step invocation; skip spawn and return.
    - Pre-reissue gates (apply only on retry, where step state's `reissueAttempts > 0`): (a) `session_messages.status == 'running'`, else short-circuit to finalize, (b) workflow stream chunk count for this messageId == 0, else record `recovery_unsupported`, (c) `reissueAttempts < 1`, else record `recovery_unsupported`.
    - If gates pass and prior runner is gone: try SDK session resume; on resume-impossible, increment `reissueAttempts`, boot fresh sandbox, re-issue.
    - On spawn: `session_messages.runner_started_at = now()` set transactionally inside the step's tx BEFORE the actual spawn call returns. Even if the function crashes mid-spawn, the column is set, replay skips, and the orphaned runner is reaped by cleanup cron's stuck-active watchdog.
-5. `streamFromHook(prepared, hook)` step — `for await (const batch of hook)` loop. For each line in batch: run `scrubSecrets(line)` and `processLineAssets(line, tenantId, messageId)`, then `getWritable<string>().write(scrubbedLine)`. Recognises a terminal sentinel line (the runner's final POST contains a known marker) and breaks. The truncation rule from `transcript-capture-and-streaming-fixes.md` applies here: `result` and `error` events always written even after `MAX_TRANSCRIPT_EVENTS`; `text_delta` events written to the stream but flagged so finalize excludes them from the final transcript blob.
-6. `finalize(prepared, sandbox, streamMetadata)` step (also entered via cancel-throws path) — calls extracted `finalizeMessage` body. On the cancel path, runs salvage-from-sandbox FIRST, then transitions message to `cancelled`/`timed_out`/`failed`, THEN stops sandbox. Matches legacy cleanup-cron salvage-before-stop ordering.
-7. `tail(prepared, sandbox)` step — calls `sessionTail` body. Idempotent.
+5. **Hook iteration loop in workflow body** (NOT a step):
+   - `for await (const line of hook) { ... }`
+   - For each iterated line, the body **must dispatch to a `writeChunk` step**, not call `getWritable().write()` directly — workflow-body stream writes throw `Error: Not supported in workflow functions`.
+   - The body recognises the runner's terminal-sentinel line shape (e.g., a JSON line with `kind === "terminal"`) and breaks out of the loop after dispatching it.
+6. `writeChunk(data: string)` step — receives the chunk's serializable string, runs `scrubSecrets(data)` and `processLineAssets(data, tenantId, messageId)`, then `getWritable<string>().getWriter().write(scrubbedLine)`. Releases the writer's lock in `finally`. The truncation rule from `transcript-capture-and-streaming-fixes.md` applies inside this step: `result` and `error` events always written even after `MAX_TRANSCRIPT_EVENTS`; `text_delta` events written to the stream but flagged so finalize excludes them from the final transcript blob.
+7. `finalize(prepared, sandbox, streamMetadata)` step (entered both on natural loop-end and via cancel-throws path) — calls extracted `finalizeMessage` body. On the cancel path, runs salvage-from-sandbox FIRST, then transitions message to `cancelled`/`timed_out`/`failed`, THEN stops sandbox. Matches legacy cleanup-cron salvage-before-stop ordering.
+8. `tail(prepared, sandbox)` step — calls `sessionTail` body. Idempotent.
 
 Step state (workflow-internal, opaque to callers): `reissueAttempts` (number), `cancelReason` (string?). No other internal state needed — the persistent stream is the source of truth for emitted bytes.
+
+**Why the per-chunk-step shape is correct (not a perf concern at v1):** Each `resumeHook` from the runner re-triggers the workflow runtime; each `writeChunk` step is one additional event. The U0 coalescing strategy (10 lines OR 100ms in the runner) caps `resumeHook` calls at ~50/min for typical agent runs, so writeChunk invocations are bounded by the same budget. If the cost shows up in Phase 2 monitoring, the writeChunk step can batch (accept `data: string[]` and write all at once).
 
 **Execution note:** Characterization-first. `tests/unit/dispatcher-characterization.test.ts` lands as the very first commit in this unit; no workflow code in the same PR. Test scenarios named per originating commit sha so the workflow path's parity bar is unambiguous.
 
@@ -415,29 +446,55 @@ Step state (workflow-internal, opaque to callers): `reissueAttempts` (number), `
 export async function dispatchWorkflow(input: DispatchInput): Promise<DispatchResult> {
   "use workflow";
 
-  // Step 1: reserve (also persists wdk_v1_<runId> on sessions row in same tx)
-  const prepared = await reserve(input, getRunMetadata().runId);
+  const runId = getWorkflowMetadata().workflowRunId;
 
-  // Hook MUST exist before launchRunner so the runner's first POST never 404s.
-  // Token is deterministic so the internal endpoint reconstructs it from messageId.
-  const hook = createHook<string>({ token: `transcript:${prepared.messageId}` });
+  // Step 1: reserve (persists wdk_v1_<runId> on sessions row in same tx).
+  const prepared = await reserve(input, runId);
+
+  // Hook MUST be created in workflow body BEFORE launchRunner so the runner's
+  // first POST never 404s. createHook in a step throws "Not supported in
+  // workflow functions" — verified in U0 spike.
+  const hook = createHook<RunnerChunk>({
+    token: `transcript:${prepared.messageId}`,
+  });
 
   const sandbox = await ensureSandbox(prepared);
   await launchRunner(prepared, sandbox);  // sets runner_started_at transactionally
 
   try {
-    await streamFromHook(prepared, hook);  // scrub + asset + getWritable; breaks on sentinel
+    // Iterate hook in workflow body. Each iterated chunk's data goes to a
+    // writeChunk STEP — workflow-body stream writes are not allowed.
+    for await (const chunk of hook) {
+      await writeChunk(prepared.tenantId, prepared.messageId, chunk);
+      if (chunk.kind === "terminal") break;
+    }
     await finalize(prepared, sandbox, { cancelled: false });
   } catch (err) {
     // WDK cancel propagates here; runner crash also lands here.
     await finalize(prepared, sandbox, {
       cancelled: err instanceof CancellationError,
-      reason: err.message,
+      reason: err instanceof Error ? err.message : String(err),
     });
   }
 
   await tail(prepared, sandbox);
   return { sessionId: prepared.session.id, messageId: prepared.messageId };
+}
+
+async function writeChunk(
+  tenantId: string,
+  messageId: string,
+  chunk: RunnerChunk,
+): Promise<void> {
+  "use step";
+  const scrubbed = scrubSecrets(chunk.data);
+  await processLineAssets(scrubbed, tenantId, messageId);
+  const writer = getWritable<string>().getWriter();
+  try {
+    await writer.write(scrubbed);
+  } finally {
+    writer.releaseLock();
+  }
 }
 ```
 
@@ -447,20 +504,20 @@ export async function dispatchWorkflow(input: DispatchInput): Promise<DispatchRe
 - `captureTranscript` truncation rules from `transcript-capture-and-streaming-fixes.md` ported into `streamFromHook` line-by-line — preserved, not bypassed
 
 **Test scenarios:**
-- *Happy path: workflow runs all steps in order, terminal sentinel breaks loop, returnValue matches legacy dispatcher output for the same input fixture*
+- *Happy path: workflow runs all steps in order, terminal-kind chunk breaks the body's `for await` loop, returnValue matches legacy dispatcher output for the same input fixture*
 - *Idempotency: reserve replay.* Re-invoking with same input returns the same `PreparedExecution` (and same workflow_run_id since it's keyed by runId)
 - *Idempotency: ensureSandbox replay.* Sandbox handle reused
 - *Idempotency: launchRunner replay finds runner_started_at non-null and skips spawn (DB-backed primitive — does NOT inspect sandbox processes)*
-- *Idempotency: streamFromHook replay reads from getReadable startIndex matching last-written position so no chunks are lost or duplicated*
+- *Idempotency: writeChunk step is naturally idempotent on per-step replay because the workflow body's `for await` only delivers each chunk to the iterator once; on retry the workflow runtime replays from the last committed step, not from the start of the loop*
 - *Idempotency: finalize replay short-circuits on non-running status*
 - *Crash recovery gate 1: status check.* Original runner's terminal POST landed during function crash; replay sees `status='completed'`, finalize from existing data, no reissue
 - *Crash recovery gate 2: stream non-empty.* Stream has 5 chunks but session crashed; replay sees non-empty stream, records `recovery_unsupported`, no reissue (preserves side-effectful tool execution boundary)
 - *Crash recovery gate 3: SDK resume succeeds.* All gates pass, resume succeeds, run continues normally, no extra billable turn
 - *Crash recovery: reissue once succeeds.* `Covers AE2.` Resume impossible, reissue boots fresh sandbox, second runner produces terminal event, message succeeds with `reissueAttempts: 1`
 - *Crash recovery: reissue fails.* Second crash records `recovery_unsupported`, finalize marks message `failed`
-- *Cancellation: thrown inside hook iterator.* External `getRun(runId).cancel()` while in `streamFromHook`; iterator throws; finalize runs salvage-before-stop in catch block; sandbox killed only after transcript salvaged; message `cancelled`
-- *Race: hook resumed before iterator parks.* Runner POSTs first line in <1ms after launchRunner; WDK delivers to the iterator on first poll. Verifies the createHook-before-launchRunner ordering catches the race.
-- *Race: cancel during launchRunner BEFORE iterator runs.* Cancellation arrives before streamFromHook starts; WDK propagates to next step; iterator throws on first iteration; finalize records cancelled
+- *Cancellation: thrown inside the workflow body's hook iterator.* External `getRun(runId).cancel()` while the body is awaiting the next iterated chunk; the `for await` throws; `finalize` runs salvage-before-stop in the catch block; sandbox killed only after transcript salvaged; message `cancelled`. **(U0 spike scenario 5 verified this primitive on the deployed runtime.)**
+- *Race: hook resumed before iterator parks.* Runner POSTs first line in <1ms after launchRunner; WDK queues the resume payload until the iterator picks it up. **(U0 spike scenario 2 verified WDK's resume queue absorbs the race; spike measured 500ms–1.2s registration latency.)** The runner-side backoff in U3 is mandatory.
+- *Race: cancel during launchRunner BEFORE iteration begins.* Cancellation arrives before the body enters the `for await`; WDK propagates to the next workflow body operation; iterator throws on first iteration; finalize records cancelled
 - *Race: terminal POST during finalize.* Runner's final POST arrives while finalize is running (after iterator broke); endpoint sees `status != 'running'` and rejects with 409 (no double-finalize)
 - *Per-commit named scenarios* (referencing the recent commit history this plan exists to address):
   - `// 277a5e5 — finalize on empty stream` — runner exits before any non-text_delta event; stream has zero non-text_delta lines; finalize records `error_type: 'empty_stream'`
@@ -505,23 +562,29 @@ export async function dispatchWorkflow(input: DispatchInput): Promise<DispatchRe
   1. `(messageId, attemptSequence, batchSequence)` not in KV dedup → first time, mark seen with TTL
   2. Per-message line count under cap (default `MAX_TRANSCRIPT_LINES_PER_MESSAGE = max_runtime_seconds * 100`, computed at message-create time and stored in KV with same TTL) → bounds stolen-token blast radius from SEC-002
   3. `session_messages.status == 'running'` → 409 if not (closes SEC-006 token-after-terminal window)
-- After guards: `resumeHook("transcript:" + messageId, line)` per line. Errors fail the batch with retryable 5xx so the runner's retry path (designed in this unit) re-sends.
+- After guards: `resumeHook("transcript:" + messageId, payload)` per line. Errors fail the batch with retryable 5xx so the runner's retry path (designed in this unit) re-sends. **The payload SHAPE matters — the U2 hook iterator expects a structured object (e.g., `{ kind: "chunk" | "terminal", data: string, eventType: ... }`), not a raw string. Each POSTed line is parsed/validated by this endpoint before resumeHook so the workflow body's `for await` always sees valid `RunnerChunk`s.**
 
-**Coalescing in the runner (sandbox.ts template):**
+**Coalescing + cold-start backoff in the runner (sandbox.ts template):**
 - Buffer NDJSON output. Flush triggers (whichever first):
   - Buffer reaches 10 lines
   - 100ms since last flush
   - Critical event seen (`result`, `error` event types — flush immediately and reset timer)
 - Each flush is one POST with the batch as NDJSON body. Sequence `(attemptSequence, batchSequence)` increments per POST.
-- On 5xx response: exponential backoff (250ms, 500ms, 1s, 2s, max 5 attempts) before failing the batch. On final failure: log + continue (the cleanup cron's salvage path will pick up the in-sandbox transcript file).
+- **Hook-not-found backoff (mandatory, U0-derived):** the runner's first POST after spawn frequently lands during the WDK hook-registration window (~500ms–1.2s on Vercel cold-start; verified via U0 spike scenarios 1+2). The endpoint returns a retryable 5xx when `resumeHook` throws `HookNotFoundError`; the runner retries with exponential backoff: **100ms → 200ms → 400ms → 800ms → 1.6s, capped at 30s total budget** (matches the spike's `resumeHookWithBackoff`). After the first successful POST per attempt, subsequent POSTs go through immediately.
+- Other 5xx response: same backoff, but only 5 attempts. On final failure: log + continue (the cleanup cron's salvage path will pick up the in-sandbox transcript file).
 
-**Render shims:**
+**Render shims (U0-derived constraints baked in):**
 - REST: byte-passthrough from `getReadable()`. Heartbeats injected by the shim every 15s (workflow stream doesn't heartbeat natively). Detach event becomes informational since reconnect is durable; clients can reconnect via `/api/sessions/:id/messages/:messageId/stream` which returns `getReadable({ startIndex })`.
 - A2A: parse each NDJSON line, map to A2A SSE events using existing `a2a.ts` event-mapping logic. Reuse `MessageBackedTaskStore`'s save-skip optimization.
+- **Both shims MUST follow these rules from the U0 spike:**
+  - **Never call `.cancel()` on `WorkflowReadableStream`.** Calling cancel on the readable propagates upstream and cancels the workflow run itself. To release a reader: `reader.releaseLock()` only.
+  - **Use `getTailIndex()` to bound reads when the run is already terminal.** WDK's writable doesn't auto-close on workflow termination — a plain `for await` over the readable hangs because `done` never fires. After `run.returnValue` resolves, call `await readable.getTailIndex()` and read exactly `tail - startIndex + 1` chunks.
+  - **For live (in-flight) reads**, the same rule still applies but the tail index advances as the writer writes. Either poll `getTailIndex()` periodically, or read until the consumer disconnects (heartbeat-driven loop). Never assume a particular line is the last one.
+  - **Heartbeats are shim-side, not WDK-side.** WDK doesn't emit heartbeats on its readable; the REST shim's 15s heartbeat injection is what keeps clients' connections alive on long-running streams.
 
 **Patterns to follow:**
 - Existing `src/lib/streaming.ts` for heartbeat cadence and stream-shape conventions
-- Existing event vocabulary in `src/lib/transcript-utils.ts` (truncation/text_delta rules) — the rules now live in `streamFromHook` (U2), NOT in this endpoint or in render shims. The endpoint forwards bytes; the workflow step scrubs and applies rules; render shims passthrough.
+- Existing event vocabulary in `src/lib/transcript-utils.ts` (truncation/text_delta rules) — the rules now live in U2's `writeChunk` step, NOT in this endpoint or in render shims. The endpoint forwards parsed `RunnerChunk`s; the writeChunk step scrubs/applies rules before `getWritable().write()`; render shims passthrough.
 - Authentication on the internal endpoint stays per-message bearer token (`generateMessageToken` / verify) — unchanged
 - KV usage pattern: existing `src/lib/rate-limit.ts` shows the platform's KV access pattern
 
@@ -539,12 +602,17 @@ export async function dispatchWorkflow(input: DispatchInput): Promise<DispatchRe
 - *Integration: REST end-to-end.* `Covers F1.` POST `/api/sessions/:id/messages` starts workflow; client receives streamed NDJSON byte-identical to legacy for a fixed input fixture; terminal event closes stream cleanly
 - *Integration: A2A end-to-end.* `Covers F1.` `message/stream` JSON-RPC produces A2A-spec SSE events matching the legacy executor's output for a fixed input fixture
 - *Integration: client disconnect mid-stream.* Client reconnects via `/api/sessions/:id/messages/:messageId/stream` using runId from the session row; `getReadable({ startIndex: -200 })` returns last 200 chunks; new chunks arrive live
-- *Integration: runner backoff after 5xx.* Endpoint returns 503 once; runner retries after 250ms; second POST succeeds; no lines lost
+- *Integration: runner backoff after 5xx.* Endpoint returns 503 once; runner retries after 100ms (U0-spec backoff); second POST succeeds; no lines lost
+- *Integration: runner backoff during cold-start hook-registration window.* `resumeHook` throws `HookNotFoundError` for first ~500ms–1.2s after `start()`. Runner retries with the U0-derived schedule (100ms → 1.6s, 30s budget); first POST eventually lands. **(Calibrated against U0 spike scenarios 1+2 measurements.)**
+- *Render: getTailIndex bounds reads on a terminal run.* Run completes with 6 chunks; render shim calls `getTailIndex()` (returns 5), reads exactly 6 chunks, exits cleanly. **(U0 spike scenario 3 verified; the prior `for await ... done` pattern hung because the writable never closes.)**
+- *Render: NEVER call .cancel() on the readable.* Test deliberately calls `readable.cancel()` and asserts it propagates upstream killing the run (sanity check). Production render shim code path uses `reader.releaseLock()` only and is verified to leave the run alive. **(U0 spike scenario 4 documented this trap.)**
+- *Render: live read across reconnect.* Client opens stream while run is in-flight; reads N chunks; disconnects; reconnects via `getReadable({ startIndex: N })`; receives chunk N onwards without duplication or skip. **(U0 spike scenario 4 verified the primitive on a completed run; this test extends to a still-running run.)**
 
 **Verification:**
 - Per-line streaming works end-to-end on a deployed Vercel preview
 - A REST request and an A2A `message/stream` request against the same input fixture produce identical observable output sequences vs the legacy path
 - KV dedup state visible during a run; expires after `agent.max_runtime_seconds + 5min`
+- Render shims demonstrably never call `.cancel()` on a `WorkflowReadableStream` (covered by lint rule or assertion in tests)
 
 ---
 
@@ -1018,7 +1086,10 @@ Workflow run history is the *operational* audit surface (R12). `session_messages
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| WDK signal API differs from searched docs (`waitForEvent`, signal-from-outside, hook lifecycle) | High | High | **U0 spike is the gate.** All 8 primitives verified on a deployed Vercel preview before U1 lands. If any primitive fails, plan returns to brainstorm; Pattern B (status-polling) is the documented alternative (see Alternatives Considered). |
+| ~~WDK signal API differs from searched docs~~ — **RESOLVED via U0 spike (2026-05-06).** Hook lifecycle, signal-from-outside, cancel propagation, getReadable reconnect, step retry, and long-idle suspension all verified on a deployed Vercel preview. Three non-obvious constraints surfaced and are now baked into U2/U3 (createHook in body not step; Hook<T> non-serializable across boundary; stream writes must be in step). | Resolved | n/a | Done — see `docs/research/wdk-spike-results.md` for the full record. |
+| `getReadable` after run terminates hangs without `getTailIndex()` bound | Medium | Medium | U3 render shims MUST use `getTailIndex()` — documented in U3's Render shims section. Test scenario covers it explicitly. |
+| Render shim accidentally calls `.cancel()` on a `WorkflowReadableStream` and kills the run | Low | High | U3 documents the rule; test scenario verifies; consider a lint rule ban on `WorkflowReadableStream.cancel()` calls outside the explicit `cancelSession` path. |
+| Hook registration latency on Vercel cold-start (~500ms–1.2s measured) burns runner POSTs without backoff | Resolved (mitigated) | Medium | U3 runner-side backoff is U0-derived (100ms→1.6s, 30s budget). Verified absorbing the window in U0 spike scenarios 1+2. |
 | Cross-tenant workflow cancellation via guessed runId | Low | High | `cancelSession` does tenant-scoped DB read FIRST; only after row's `tenant_id` matches caller does the `getRun().cancel()` call fire. Audit-logged. RLS bypass would be required to reach the cancel — and would already be a higher-severity break elsewhere. |
 | Stolen per-message bearer token used to flood internal endpoint with malicious NDJSON | Low | High | Per-message line cap enforced at endpoint (default `max_runtime_seconds * 100` lines); `(messageId, attemptSequence, batchSequence)` dedup; `session_messages.status == 'running'` check rejects post-terminal POSTs. Token TTL unchanged from today (1h). |
 | Auto-reissue (R6) re-executes side-effectful tools (Composio, file writes) twice | Medium | High | Three pre-reissue gates: status check, stream-empty check, attempt-count check. All three must pass before reissue fires. A non-empty stream is treated as "runner reached operational state" and blocks reissue. |
