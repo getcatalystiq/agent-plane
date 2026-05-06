@@ -157,9 +157,10 @@ export async function dispatchWorkflow(
   return { sessionId: prepared.session.id, messageId: prepared.messageId };
 }
 
-// --- Steps ---
+// --- Steps (exported for testability; not re-exported from workflows/index.ts
+//     so callers don't accidentally invoke them outside the workflow body) ---
 
-async function reserveStep(
+export async function reserveStep(
   input: DispatchInput,
   runId: string,
 ): Promise<PreparedExecution> {
@@ -174,7 +175,7 @@ async function reserveStep(
   return prepared;
 }
 
-async function ensureSandboxStep(
+export async function ensureSandboxStep(
   input: DispatchInput,
   prepared: PreparedExecution,
 ): Promise<SessionSandboxInstance> {
@@ -214,7 +215,7 @@ async function ensureSandboxStep(
   });
 }
 
-async function launchRunnerStep(
+export async function launchRunnerStep(
   input: DispatchInput,
   prepared: PreparedExecution,
   sandbox: SessionSandboxInstance,
@@ -264,7 +265,7 @@ async function launchRunnerStep(
   void result.logs;
 }
 
-async function writeChunkStep(
+export async function writeChunkStep(
   tenantId: TenantId,
   messageId: string,
   chunk: RunnerChunk,
@@ -287,7 +288,7 @@ async function writeChunkStep(
   }
 }
 
-async function finalizeStep(
+export async function finalizeStep(
   prepared: PreparedExecution,
   sandbox: SessionSandboxInstance,
   opts: { cancelled: boolean; cancelReason?: string },
@@ -324,7 +325,7 @@ async function finalizeStep(
   });
 }
 
-async function tailStep(
+export async function tailStep(
   prepared: PreparedExecution,
   sandbox: SessionSandboxInstance,
 ): Promise<void> {
