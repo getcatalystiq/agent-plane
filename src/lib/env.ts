@@ -36,19 +36,29 @@ const EnvSchema = z.object({
   // preview URL.
   WDK_SPIKE_TOKEN: z.string().optional(),
 
-  // --- U4 dispatch toggles (per-trigger; default off until each entry
-  //     point's migration unit ships and its 48h soak passes).
+  // --- U4 dispatch toggles (per-trigger).
+  //
+  // API + ADMIN flipped to default "on" for debug visibility. Chat (the
+  // only currently-shipped consumer of the WDK chat workflow) sits on top
+  // of `start(dispatchWorkflow, ...)` and its inner workflow has been
+  // observed to never produce output in production; mirroring playground
+  // and the public REST surface onto the same WDK path makes the bug
+  // reproducible against simpler inputs. SCHEDULE / WEBHOOK / A2A stay
+  // off — those are still on the legacy path until each one's migration
+  // unit ships.
   //
   // Strict on/off — Zod rejects unknown values at parse time so a typo
   // at deploy fails the build rather than silently disabling. Per-tenant
   // override via tenants.workflow_dispatch_overrides JSONB is read by
-  // shouldUseWorkflow() and wins over the global toggle. ---
-  WORKFLOW_DISPATCH_API: z.enum(["on", "off"]).default("off"),
+  // shouldUseWorkflow() and wins over the global toggle.
+  // LEGACY_DISPATCH_GLASS_BREAK=on forces ALL triggers back to legacy in
+  // one deploy if a regression surfaces. ---
+  WORKFLOW_DISPATCH_API: z.enum(["on", "off"]).default("on"),
   WORKFLOW_DISPATCH_SCHEDULE: z.enum(["on", "off"]).default("off"),
   WORKFLOW_DISPATCH_WEBHOOK: z.enum(["on", "off"]).default("off"),
   WORKFLOW_DISPATCH_A2A: z.enum(["on", "off"]).default("off"),
   WORKFLOW_DISPATCH_CLEANUP: z.enum(["on", "off"]).default("off"),
-  WORKFLOW_DISPATCH_ADMIN: z.enum(["on", "off"]).default("off"),
+  WORKFLOW_DISPATCH_ADMIN: z.enum(["on", "off"]).default("on"),
 
   // U10a glass-break: when set to 'on', forces the legacy dispatcher path
   // even when the matching WORKFLOW_DISPATCH_* toggle is on. One-deploy
