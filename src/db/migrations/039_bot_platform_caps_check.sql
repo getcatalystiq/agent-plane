@@ -11,20 +11,27 @@
 -- integer. The keys are unconstrained at the DB level (Zod still
 -- validates them as ChatPlatform at read time).
 
-ALTER TABLE tenants
-  ADD CONSTRAINT bot_platform_caps_shape_valid CHECK (
-    bot_platform_caps IS NULL
-    OR (
-      jsonb_typeof(bot_platform_caps) = 'object'
-      AND NOT EXISTS (
-        SELECT 1
-        FROM jsonb_each(bot_platform_caps) AS kv
-        WHERE jsonb_typeof(kv.value) <> 'number'
-           OR (kv.value)::text::numeric <= 0
-           OR (kv.value)::text::numeric <> trunc((kv.value)::text::numeric)
-      )
-    )
-  );
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'bot_platform_caps_shape_valid'
+  ) THEN
+    ALTER TABLE tenants
+      ADD CONSTRAINT bot_platform_caps_shape_valid CHECK (
+        bot_platform_caps IS NULL
+        OR (
+          jsonb_typeof(bot_platform_caps) = 'object'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_each(bot_platform_caps) AS kv
+            WHERE jsonb_typeof(kv.value) <> 'number'
+               OR (kv.value)::numeric <= 0
+               OR (kv.value)::numeric % 1 <> 0
+          )
+        )
+      );
+  END IF;
+END $$;
 
 COMMENT ON CONSTRAINT bot_platform_caps_shape_valid ON tenants IS
   'bot_platform_caps must be NULL or a JSONB object whose values are all positive integers. Invalid shapes are rejected at write time so getTenantBotCap cannot encounter a malformed row.';

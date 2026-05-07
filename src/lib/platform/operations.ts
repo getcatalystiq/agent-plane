@@ -363,25 +363,9 @@ export async function enforceAttestationGate(input: AttestationGateInput): Promi
 // CRUD (tenant-scoped, RLS)
 // ---------------------------------------------------------------------------
 
-const TenantThresholdRow = z.object({ max_trusted_members: z.number().int().positive() });
-
-async function getTenantThreshold(tx: TxClient, tenantId: TenantId): Promise<number> {
-  // RLS on tenants table allows the tenant's own row.
-  const row = await tx.queryOne(
-    TenantThresholdRow,
-    "SELECT max_trusted_members FROM tenants WHERE id = $1",
-    [tenantId],
-  );
-  return row?.max_trusted_members ?? 100;
-}
-
-// Per-tenant per-platform enabled-bot cap. The Discord gateway listener
-// holds one DB pool client for ~700s per enabled bot, so unbounded
-// enablement on a single tenant can starve the shared pool (max=20).
-// 10 per platform per tenant fits with comfortable headroom. Round-5
-// review #3: cap is now per-tenant via tenants.bot_platform_caps JSONB
-// (migration 038). The constant below is the platform default when the
-// tenant has no override.
+// Default cap when the tenant has no per-platform override. The Discord
+// gateway listener holds one DB pool client for ~700s per enabled bot,
+// so 10/platform/tenant keeps the shared pool (max=20) usable.
 const DEFAULT_ENABLED_BOTS_PER_TENANT_PER_PLATFORM = 10;
 
 const EnabledBotCountRow = z.object({ count: z.coerce.number().int().nonnegative() });
@@ -392,9 +376,8 @@ async function countEnabledBots(
   agentId: AgentId,
   platform: ChatPlatform,
 ): Promise<number> {
-  // Count enabled rows for this tenant+platform, EXCLUDING the agent we
-  // are upserting (UPSERT on the same agent should not count itself
-  // against the cap).
+  // Excludes the agent being upserted so an UPSERT on the same agent
+  // doesn't count itself.
   const row = await tx.queryOne(
     EnabledBotCountRow,
     `SELECT COUNT(*) AS count FROM platform_bot_configs
@@ -405,15 +388,30 @@ async function countEnabledBots(
   return row?.count ?? 0;
 }
 
-const TenantBotCapsRow = z.object({
+const TenantConfigRow = z.object({
   bot_platform_caps: z.record(z.string(), z.number().int().positive()).nullable(),
+  max_trusted_members: z.number().int().positive(),
 });
 
-// Round-6 review #D: extracted helper so the lock key string is
-// constructed in one place. Two call sites (probe tx + UPSERT tx)
-// must use the same key for the lock to actually serialize.
-function botCapLockKey(tenantId: TenantId, platform: ChatPlatform): string {
-  return `bot-cap:${tenantId}:${platform}`;
+interface TenantConfig {
+  cap: number;
+  threshold: number;
+}
+
+async function getTenantConfig(
+  tx: TxClient,
+  tenantId: TenantId,
+  platform: ChatPlatform,
+): Promise<TenantConfig> {
+  const row = await tx.queryOne(
+    TenantConfigRow,
+    "SELECT bot_platform_caps, max_trusted_members FROM tenants WHERE id = $1",
+    [tenantId],
+  );
+  return {
+    cap: row?.bot_platform_caps?.[platform] ?? DEFAULT_ENABLED_BOTS_PER_TENANT_PER_PLATFORM,
+    threshold: row?.max_trusted_members ?? 100,
+  };
 }
 
 async function acquireBotCapLock(
@@ -421,23 +419,29 @@ async function acquireBotCapLock(
   tenantId: TenantId,
   platform: ChatPlatform,
 ): Promise<void> {
+  // Lock keyed on `bot-cap:<tenant>:<platform>` so distinct pairs don't
+  // contend. Auto-released at COMMIT.
   await tx.execute(
     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-    [botCapLockKey(tenantId, platform)],
+    [`bot-cap:${tenantId}:${platform}`],
   );
 }
 
-async function getTenantBotCap(
+async function assertBotCapAvailable(
   tx: TxClient,
   tenantId: TenantId,
+  agentId: AgentId,
   platform: ChatPlatform,
 ): Promise<number> {
-  const row = await tx.queryOne(
-    TenantBotCapsRow,
-    "SELECT bot_platform_caps FROM tenants WHERE id = $1",
-    [tenantId],
-  );
-  return row?.bot_platform_caps?.[platform] ?? DEFAULT_ENABLED_BOTS_PER_TENANT_PER_PLATFORM;
+  // Caller is expected to have already acquired the advisory lock.
+  // Returns the current cap so callers that also need it (the probe-tx)
+  // don't re-read.
+  const { cap } = await getTenantConfig(tx, tenantId, platform);
+  const enabled = await countEnabledBots(tx, tenantId, agentId, platform);
+  if (enabled >= cap) {
+    throw new TenantBotCapExceededError(platform, cap);
+  }
+  return cap;
 }
 
 // Round-5 review #4: extend ConflictError so withErrorHandler maps to
@@ -471,34 +475,20 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
     throw new CredentialValidationError(validation);
   }
 
-  // Round-6 review #E fix: split the cap pre-check from the probe. The
-  // probe is a 5s HTTP call to Slack/Discord; if held inside a tx with
-  // the advisory lock, it pins both a pool client AND the lock for that
-  // duration. Under concurrent admin connects, this serialized 5s
-  // probes one at a time and saturated the pool. Now: take the lock
-  // briefly for the pre-check (cheap SQL only), release at COMMIT,
-  // run the probe with no resources held, then re-take the lock in the
-  // UPSERT transaction (which re-checks the cap to close the window).
-  await withTenantTransaction(input.tenantId, async (tx) => {
+  // The cap pre-check holds the advisory lock briefly for cheap SQL only,
+  // then releases at COMMIT. Probe runs unlocked (5s HTTP would otherwise
+  // pin the pool client + lock under concurrent admin connects). The
+  // UPSERT-tx below re-takes the lock and re-checks the cap to close
+  // the inter-tx window. Threshold is read alongside the cap to avoid
+  // a second round-trip.
+  const threshold = await withTenantTransaction(input.tenantId, async (tx) => {
     await acquireBotCapLock(tx, input.tenantId, input.credentials.platform);
-    const cap = await getTenantBotCap(tx, input.tenantId, input.credentials.platform);
-    const enabledCount = await countEnabledBots(
-      tx,
-      input.tenantId,
-      input.agentId,
-      input.credentials.platform,
-    );
-    if (enabledCount >= cap) {
-      throw new TenantBotCapExceededError(input.credentials.platform, cap);
-    }
+    const { cap, threshold } = await getTenantConfig(tx, input.tenantId, input.credentials.platform);
+    const enabled = await countEnabledBots(tx, input.tenantId, input.agentId, input.credentials.platform);
+    if (enabled >= cap) throw new TenantBotCapExceededError(input.credentials.platform, cap);
+    return threshold;
   });
 
-  // Probe runs OUTSIDE the lock now so the pool client + advisory lock
-  // are released before the network call. Threshold is read in its own
-  // tiny transaction.
-  const threshold = await withTenantTransaction(input.tenantId, async (tx) => {
-    return getTenantThreshold(tx, input.tenantId);
-  });
   const probe = await enforceAttestationGate({
     tenantId: input.tenantId,
     credentials: input.credentials,
@@ -524,23 +514,11 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
     attested_by_admin: true,
   };
 
-  // 5. UPSERT — bumping credentials_version on conflict.
-  // Re-acquire the advisory lock (released when the cap-check transaction
-  // committed) so concurrent upserts can't slot in between cap-check and
-  // INSERT. Re-check the cap inside this transaction to close the window
-  // where attestation/probe completed for two concurrent connects.
+  // Re-acquire the lock + re-check the cap so concurrent upserts that
+  // started between this and the pre-check can't both slot under the cap.
   return withTenantTransaction(input.tenantId, async (tx) => {
     await acquireBotCapLock(tx, input.tenantId, input.credentials.platform);
-    const cap = await getTenantBotCap(tx, input.tenantId, input.credentials.platform);
-    const enabledCount = await countEnabledBots(
-      tx,
-      input.tenantId,
-      input.agentId,
-      input.credentials.platform,
-    );
-    if (enabledCount >= cap) {
-      throw new TenantBotCapExceededError(input.credentials.platform, cap);
-    }
+    await assertBotCapAvailable(tx, input.tenantId, input.agentId, input.credentials.platform);
     const row = await tx.queryOne(
       PlatformBotConfigRow,
       `INSERT INTO platform_bot_configs

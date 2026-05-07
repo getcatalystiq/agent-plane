@@ -62,11 +62,9 @@ describe("CreateAgentSchema", () => {
   });
 
   it("rejects max_runtime_seconds outside 60..3600", () => {
-    // Round-5 review residual rel-005: cap was 14400 but watchdog
-    // horizon (max_runtime_seconds + 120s grace) must stay below the
-    // session expires_at hard cap (4h = 14400s) so a watchdog reap
-    // fires before expires_at. 3600 is the documented bound in
-    // CLAUDE.md.
+    // Watchdog horizon (max_runtime_seconds + 120s grace) must stay
+    // below the session expires_at hard cap (4h) so a watchdog reap
+    // fires before expires_at. 3600 is the documented bound.
     expect(() =>
       CreateAgentSchema.parse({ name: "test", max_runtime_seconds: 59 }),
     ).toThrow();
