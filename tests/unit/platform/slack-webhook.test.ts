@@ -18,11 +18,13 @@ vi.mock("@/lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+const env: { SLACK_SIGNING_SECRET: string | undefined; SLACK_SIGNING_SECRET_PREVIOUS: string | undefined } = {
+  SLACK_SIGNING_SECRET: undefined,
+  SLACK_SIGNING_SECRET_PREVIOUS: undefined,
+};
+
 vi.mock("@/lib/env", () => ({
-  getEnv: () => ({
-    SLACK_SIGNING_SECRET: undefined,
-    SLACK_SIGNING_SECRET_PREVIOUS: undefined,
-  }),
+  getEnv: () => env,
 }));
 
 const { findBotByTeamIdMock, decryptMock } = vi.hoisted(() => ({
@@ -158,31 +160,56 @@ describe("Slack webhook strict ordering", () => {
     expect(body.status).toBe("unhandled");
   });
 
-  it("returns 200 with the challenge when url_verification arrives with a valid signature", async () => {
-    findBotByTeamIdMock.mockReturnValueOnce({
-      tenantId: "tenant-1",
-      agentId: "agent-1",
-    });
-    decryptMock.mockResolvedValueOnce({
-      platform: "slack",
-      botToken: "xoxb-fake",
-      signingSecret: SIGNING_SECRET,
-    });
+  it("returns 200 with the challenge on url_verification — uses global SLACK_SIGNING_SECRET fallback (no team_id in Slack's payload)", async () => {
+    // Slack's url_verification body does NOT include team_id — only
+    // {type, challenge, token}. The route must short-circuit on
+    // type === 'url_verification' BEFORE the team_id requirement so
+    // the global SLACK_SIGNING_SECRET fallback can authorize the
+    // handshake. Per-bot signing secret isn't queried; findBotByTeamId
+    // is never reached.
+    env.SLACK_SIGNING_SECRET = SIGNING_SECRET;
+    try {
+      const ts = nowSeconds();
+      const body = JSON.stringify({
+        type: "url_verification",
+        challenge: "test-challenge-value",
+        token: "verification-token",
+      });
+      const sig = await hmacHex(SIGNING_SECRET, `v0:${ts}:${body}`);
+      const res = await POST(
+        makeRequest(body, {
+          "x-slack-request-timestamp": ts,
+          "x-slack-signature": `v0=${sig}`,
+        }),
+      );
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toBe("test-challenge-value");
+      expect(findBotByTeamIdMock).not.toHaveBeenCalled();
+      expect(decryptMock).not.toHaveBeenCalled();
+    } finally {
+      env.SLACK_SIGNING_SECRET = undefined;
+    }
+  });
+
+  it("returns 200 unhandled on url_verification when SLACK_SIGNING_SECRET is unset", async () => {
+    // No global fallback configured. The route still short-circuits
+    // on type before the team_id check, but maybeHandleFirstTimeChallenge
+    // returns the unhandled response when the signing secret is absent.
     const ts = nowSeconds();
     const body = JSON.stringify({
       type: "url_verification",
       challenge: "test-challenge-value",
-      team_id: "T123",
+      token: "verification-token",
     });
-    const sig = await hmacHex(SIGNING_SECRET, `v0:${ts}:${body}`);
     const res = await POST(
       makeRequest(body, {
         "x-slack-request-timestamp": ts,
-        "x-slack-signature": `v0=${sig}`,
+        "x-slack-signature": "v0=abc",
       }),
     );
     expect(res.status).toBe(200);
-    const text = await res.text();
-    expect(text).toBe("test-challenge-value");
+    const json = (await res.json()) as { status: string };
+    expect(json.status).toBe("unhandled");
   });
 });

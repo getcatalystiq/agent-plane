@@ -145,7 +145,18 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     });
   }
 
-  // 2. Extract team_id — body is unauthenticated until step 6, but the
+  // 2. url_verification short-circuit. Slack's url_verification POST
+  //    has no `team_id` field — only `{type, challenge, token}` — so
+  //    the team_id-required path below would 400 on it. Peek at `type`
+  //    in the unauthenticated body prefix and route directly to
+  //    maybeHandleFirstTimeChallenge, which does the HMAC verify
+  //    before echoing the challenge.
+  const bodyPrefix = rawBody.length > 4096 ? rawBody.slice(0, 4096) : rawBody;
+  if (/"type"\s*:\s*"url_verification"/.test(bodyPrefix)) {
+    return await maybeHandleFirstTimeChallenge(rawBody, ts, req.headers.get("x-slack-signature"));
+  }
+
+  // 3. Extract team_id — body is unauthenticated until step 6, but the
   //    extract is length-bounded.
   const teamId = extractTeamId(rawBody);
   if (!teamId) {
