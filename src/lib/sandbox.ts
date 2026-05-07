@@ -665,7 +665,16 @@ const mcpServers = process.env.MCP_SERVERS_JSON
   ? JSON.parse(process.env.MCP_SERVERS_JSON)
   : {};
 
-const transcriptPath = '/vercel/sandbox/transcript.ndjson';
+// Per-message transcript file. Matches the path read by the admin live-
+// session stream route (api/admin/sessions/.../messages/.../stream) and
+// salvageRunnerTranscript's primary candidate. Without a per-message
+// suffix, those readers see no events for an in-flight run because
+// they look for transcript-<messageId>.ndjson but the runner historically
+// wrote a single shared transcript.ndjson — a leftover from before the
+// runner became per-message.
+const transcriptPath = process.env.AGENT_PLANE_MESSAGE_ID
+  ? '/vercel/sandbox/transcript-' + process.env.AGENT_PLANE_MESSAGE_ID + '.ndjson'
+  : '/vercel/sandbox/transcript.ndjson';
 writeFileSync(transcriptPath, '');
 
 // --- U3-e: Per-line streaming POST (when AGENT_PLANE_STREAM_PER_LINE=on) ---

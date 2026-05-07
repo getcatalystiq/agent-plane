@@ -210,6 +210,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     let handedOffToReconnect = false;
     let transcriptEventCount = 0;
     let runId: string | null = null;
+    let sawTerminalEvent = false;
 
     try {
       while (true) {
@@ -237,6 +238,10 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
               runIdRef.current = runId;
             }
 
+            if (event.type === "result" || event.type === "error") {
+              sawTerminalEvent = true;
+            }
+
             if (event.type === "text_delta") {
               setStreamingText((prev) => prev + (event.text as string ?? ""));
             } else if (event.type === "stream_detached") {
@@ -259,8 +264,28 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           }
         }
       }
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
+      // Stream error — fall back to polling for the terminal state.
+      const messageId = runIdRef.current;
+      if (messageId && !sawTerminalEvent) {
+        await pollForFinalResult(messageId);
+      }
+      return;
     } finally {
       if (!handedOffToReconnect) {
+        if (!sawTerminalEvent) {
+          // Stream closed cleanly but we never saw `result` or `error` —
+          // the workflow run may still be live (server-side finalize is
+          // racing the stream close, or render-rest's terminal-status
+          // detection beat the writer). Poll for terminal state instead
+          // of stranding the UI.
+          const messageId = runIdRef.current;
+          if (messageId) {
+            await pollForFinalResult(messageId);
+            return;
+          }
+        }
         setRunning(false);
         abortRef.current = null;
         runIdRef.current = null;
