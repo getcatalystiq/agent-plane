@@ -252,7 +252,11 @@ export const CreateAgentSchema = z.object({
     .default("bypassPermissions"),
   max_turns: z.number().int().min(1).max(1000).default(10),
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
-  max_runtime_seconds: z.number().int().min(60).max(14400).default(600),
+  // Cap at 3600s (1h) — must stay strictly below sessions.expires_at
+  // (4h hard cap) MINUS the active-watchdog grace (120s default) so a
+  // watchdog reap can actually fire before expires_at. CLAUDE.md
+  // documents this bound explicitly. Round-5 review residual rel-005.
+  max_runtime_seconds: z.number().int().min(60).max(3600).default(600),
   a2a_enabled: z.boolean().default(false),
   soul_md: z.string().max(50_000).nullable().optional(),
   identity_md: z.string().max(50_000).nullable().optional(),
@@ -293,7 +297,7 @@ export const UpdateAgentSchema = z.object({
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),
   max_turns: z.number().int().min(1).max(1000),
   max_budget_usd: z.number().min(0.01).max(100.0),
-  max_runtime_seconds: z.number().int().min(60).max(14400),
+  max_runtime_seconds: z.number().int().min(60).max(3600),
   a2a_enabled: z.boolean(),
   a2a_tags: z.array(z.string().min(1).max(100)),
   slug: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9-]*$/, "Slug must be lowercase alphanumeric with hyphens"),
