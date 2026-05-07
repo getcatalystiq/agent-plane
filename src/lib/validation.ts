@@ -416,6 +416,13 @@ export const AgentRow = z.object({
   examples_bad_md: z.string().nullable().default(null),
   soul_spec_version: z.string().nullable().default('0.5'),
   identity: identityJsonbSchema.default(null),
+  // Write-time prompt-injection scanner audit columns. Set by the admin
+  // edit endpoints when scannable fields (SoulSpec markdown, skills) are
+  // changed. See migration 035 and U5 of
+  // docs/plans/2026-05-06-002-feat-prompt-injection-scanner-plan.md.
+  injection_detected: z.boolean().default(false),
+  injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
+  injection_patterns: z.array(z.string()).nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -625,6 +632,11 @@ export const ScheduleRow = z.object({
   // bound by the partial UNIQUE index in migration 034. Replaces the
   // (non-existent) WDK start() idempotency. NULL on legacy-path schedules.
   last_fired_dispatch_key: z.string().nullable().default(null),
+  // Write-time prompt-injection scanner audit columns. See migration 035 +
+  // U5 of docs/plans/2026-05-06-002-feat-prompt-injection-scanner-plan.md.
+  injection_detected: z.boolean().default(false),
+  injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
+  injection_patterns: z.array(z.string()).nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });

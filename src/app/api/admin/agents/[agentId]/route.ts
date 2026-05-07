@@ -5,6 +5,7 @@ import { removeToolkitConnections, pruneAllowedToolsForToolkits } from "@/lib/co
 import { resolveEffectiveRunner, isPermissionModeAllowed } from "@/lib/models";
 import { withErrorHandler } from "@/lib/api";
 import { deriveIdentity } from "@/lib/identity";
+import { scanWriteFields } from "@/lib/safety/write-time-gate";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -145,6 +146,40 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     identityWarnings = parseResult.warnings;
     sets.push(`identity = $${idx++}`);
     params.push(parseResult.identity ? JSON.stringify(parseResult.identity) : null);
+  }
+
+  // Write-time prompt-injection scan. Covers SoulSpec markdown columns and
+  // skill bodies (skills is a JSONB array of {name, description, content}).
+  // Throws PromptRejectedError on `high` confidence; returns the audit
+  // verdict for `medium`/`low` so we persist it on the agent row.
+  //
+  // We scan only the fields the admin is *changing* on this PATCH — fields
+  // they didn't touch are out of scope (already in storage; would have been
+  // scanned at their own write time).
+  const fieldsToScan: Array<{ surface: string; content: string | null | undefined }> = [];
+  for (const f of identityFields) {
+    const val = (input as Record<string, unknown>)[f];
+    if (val !== undefined) {
+      fieldsToScan.push({ surface: `agent.${f}`, content: val as string | null });
+    }
+  }
+  if (input.skills !== undefined) {
+    const skills = input.skills as Array<{ name?: string; description?: string; content?: string }>;
+    for (const skill of skills) {
+      fieldsToScan.push({
+        surface: `agent.skills:${skill.name ?? "(unnamed)"}`,
+        content: skill.content ?? null,
+      });
+    }
+  }
+  if (fieldsToScan.length > 0) {
+    const verdict = scanWriteFields(fieldsToScan, current.tenant_id);
+    sets.push(`injection_detected = $${idx++}`);
+    params.push(verdict.injection_detected);
+    sets.push(`injection_confidence = $${idx++}`);
+    params.push(verdict.injection_confidence);
+    sets.push(`injection_patterns = $${idx++}`);
+    params.push(verdict.injection_patterns);
   }
 
   if (sets.length === 0) {
