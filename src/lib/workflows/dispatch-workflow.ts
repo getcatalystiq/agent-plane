@@ -381,16 +381,56 @@ export async function finalizeStep(
     // here uses whatever chunks landed before cancel.
   }
 
+  // Capture sdk_session_id from the runner's `session_info` event so the
+  // session row can persist it via sessionTail (called inside finalizeMessage).
+  // Without this, follow-up messages on the same persistent session launch
+  // the runner without `resume`, which makes the SDK start a fresh
+  // conversation — visible in the playground as "you haven't shared any
+  // code in this conversation yet" responses to follow-ups. Mirrors the
+  // legacy capture at dispatcher.ts:827-842.
+  const capturedSdkSessionId = extractSdkSessionId(transcriptChunks)
+    ?? prepared.session.sdk_session_id;
+
   const sandbox = await reconnectInStep(sandboxRef);
   await finalizeMessage({
     messageId: prepared.messageId,
     tenantId: prepared.session.tenant_id as TenantId,
     session: prepared.session as Session,
     sandbox,
-    sdkSessionId: prepared.session.sdk_session_id,
+    sdkSessionId: capturedSdkSessionId,
     transcriptChunks,
     effectiveBudget: prepared.effectiveBudget,
   });
+}
+
+/**
+ * Walk the captured NDJSON chunks for a `session_info` event whose
+ * `sdk_session_id` is the SDK's session id. The runner emits this once on
+ * iterator init (sandbox.ts:788). Returns the LAST one in case the runner
+ * spans multiple SDK sessions in a single message (rare; present for
+ * future-proofing).
+ */
+function extractSdkSessionId(chunks: string[]): string | null {
+  let captured: string | null = null;
+  for (const line of chunks) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (
+        event &&
+        typeof event === "object" &&
+        event.type === "session_info" &&
+        typeof event.sdk_session_id === "string" &&
+        event.sdk_session_id.length > 0
+      ) {
+        captured = event.sdk_session_id;
+      }
+    } catch {
+      // Non-JSON line — skip. Same defensive parse as parseRunnerLine.
+    }
+  }
+  return captured;
 }
 
 export async function tailStep(
