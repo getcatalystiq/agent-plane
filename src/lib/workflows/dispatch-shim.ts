@@ -19,32 +19,21 @@
  * sessions with non-null `workflow_run_id` continue on workflow. The
  * toggle only affects NEW dispatches.
  */
-import { z } from "zod";
-import { queryOne } from "@/db";
-import { getSession } from "@/lib/sessions";
+import { getSession, setWorkflowRunId } from "@/lib/sessions";
 import {
   dispatchSessionMessage,
+  reserveSessionAndMessage,
   type DispatchInput,
   type DispatchResult,
+  type PreparedExecution,
 } from "@/lib/dispatcher";
+import { transitionMessageStatus } from "@/lib/session-messages";
 import { start } from "workflow/api";
 import { dispatchWorkflow } from "@/lib/workflows/dispatch-workflow";
 import { renderRest, renderRestHeaders } from "@/lib/workflows/render-rest";
 import { shouldUseWorkflow } from "@/lib/workflows/toggle";
 import { logger } from "@/lib/logger";
-import { WORKFLOW_RUN_ID_PREFIX } from "@/lib/types";
-import type { TenantId, RunTriggeredBy } from "@/lib/types";
-
-const POLL_INTERVAL_MS = 100;
-const POLL_BUDGET_MS = 5_000;
-
-const SessionByRunIdRow = z.object({
-  id: z.string(),
-});
-
-const RunningMessageRow = z.object({
-  id: z.string(),
-});
+import type { RunTriggeredBy } from "@/lib/types";
 
 /**
  * Dispatch via workflow when the toggle is on for `(triggeredBy, tenantId)`
@@ -82,87 +71,78 @@ export async function dispatchOrWorkflowDispatch(
 async function dispatchViaWorkflow(
   input: DispatchInput,
 ): Promise<DispatchResult> {
-  // Start the workflow. `start()` returns immediately; the workflow body
-  // executes async and the reserve step persists `workflow_run_id` on
-  // the session row.
-  const run = await start(
-    dispatchWorkflow as unknown as (input: DispatchInput) => Promise<{
-      sessionId: string;
-      messageId: string;
-    }>,
-    [input],
-  );
+  // PERF: reserve session + message in-process BEFORE starting the workflow.
+  // Pre-fix this happened inside the workflow's reserveStep, so the shim had
+  // to pollForReserveCommit (100ms-5s) to recover sessionId/messageId for
+  // the response headers. Doing it here makes both ids available immediately
+  // and removes a step boundary from the workflow's first-byte path.
+  //
+  // Trade-off: reserve no longer participates in WDK retry. If reserve fails
+  // here we surface the error to the caller (5xx); if it succeeds and
+  // start() then fails, we transition the message to failed before throwing.
+  const prepared = await reserveSessionAndMessage(input);
 
-  const expectedRunId = `${WORKFLOW_RUN_ID_PREFIX}${run.runId}`;
-
-  // Poll for reserve-step commit. Typical: 100-300ms cold-start; faster
-  // when the WDK runtime is warm. Bounded at 5s — if reserve doesn't
-  // commit by then, the workflow is broken and we throw.
-  const ids = await pollForReserveCommit(expectedRunId, input.tenantId);
-  if (!ids) {
-    logger.error("dispatchViaWorkflow: reserve step never committed", {
-      run_id: run.runId,
-      tenant_id: input.tenantId,
-    });
-    throw new Error(
-      `Workflow reserve step did not commit within ${POLL_BUDGET_MS}ms`,
+  let runId: string;
+  try {
+    const run = await start(
+      dispatchWorkflow as unknown as (
+        input: DispatchInput,
+        prepared: PreparedExecution,
+      ) => Promise<{ sessionId: string; messageId: string }>,
+      [input, prepared],
     );
+    runId = run.runId;
+  } catch (err) {
+    // Workflow failed to start — message is already reserved as 'running'.
+    // Mark it failed so it doesn't sit forever waiting for the runner.
+    await transitionMessageStatus(
+      prepared.messageId,
+      input.tenantId,
+      "running",
+      "failed",
+      {
+        completed_at: new Date().toISOString(),
+        error_type: "workflow_start_failed",
+        error_messages: [err instanceof Error ? err.message : String(err)],
+      },
+    ).catch(() => {});
+    throw err;
   }
 
+  // Best-effort: persist runId on the session row for cleanup/cancel lookup.
+  // The workflow body also persists this via persistWorkflowRunIdStep — that
+  // covers the case where this in-process write loses to a function-host
+  // crash here.
+  await setWorkflowRunId(
+    prepared.session.id,
+    input.tenantId,
+    `wdk_v1_${runId}`,
+  ).catch((err) => {
+    logger.warn("dispatchViaWorkflow: setWorkflowRunId failed (best-effort)", {
+      session_id: prepared.session.id,
+      run_id: runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+
   const stream = renderRest({
-    runId: run.runId,
-    sessionId: ids.sessionId,
-    messageId: ids.messageId,
+    runId,
+    sessionId: prepared.session.id,
+    messageId: prepared.messageId,
   });
 
   return {
-    sessionId: ids.sessionId,
-    messageId: ids.messageId,
+    sessionId: prepared.session.id,
+    messageId: prepared.messageId,
     stream,
     response: () =>
       new Response(stream, {
         status: 200,
         headers: {
           ...renderRestHeaders(),
-          "X-Session-Id": ids.sessionId,
-          "X-Message-Id": ids.messageId,
+          "X-Session-Id": prepared.session.id,
+          "X-Message-Id": prepared.messageId,
         },
       }),
   };
-}
-
-async function pollForReserveCommit(
-  expectedRunId: string,
-  tenantId: TenantId,
-): Promise<{ sessionId: string; messageId: string } | null> {
-  const start = Date.now();
-  while (Date.now() - start < POLL_BUDGET_MS) {
-    // 1. Find the session this workflow run reserved.
-    const session = await queryOne(
-      SessionByRunIdRow,
-      `SELECT id FROM sessions
-       WHERE workflow_run_id = $1 AND tenant_id = $2
-       LIMIT 1`,
-      [expectedRunId, tenantId],
-    );
-    if (session) {
-      // 2. Find the latest 'running' message on that session — the one
-      // this dispatch reserved. There's only ever one in-flight message
-      // per session (in-session concurrency cap = 1), so this is
-      // unambiguous.
-      const message = await queryOne(
-        RunningMessageRow,
-        `SELECT id FROM session_messages
-         WHERE session_id = $1 AND tenant_id = $2 AND status = 'running'
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [session.id, tenantId],
-      );
-      if (message) {
-        return { sessionId: session.id, messageId: message.id };
-      }
-    }
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-  }
-  return null;
 }

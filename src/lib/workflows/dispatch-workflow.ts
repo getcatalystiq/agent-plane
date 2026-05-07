@@ -130,14 +130,23 @@ export interface SandboxRef {
  */
 export async function dispatchWorkflow(
   input: DispatchInput,
+  prepared: PreparedExecution,
 ): Promise<DispatchWorkflowOutput> {
   "use workflow";
 
   const runId = getWorkflowMetadata().workflowRunId;
 
-  // Step 1 — reserve message + persist runId in same tx
-  const prepared = await reserveStep(input, runId);
-
+  // PERF: reserveSessionAndMessage now runs in the shim (dispatch-shim.ts)
+  // BEFORE start(), so:
+  //   - The shim has session.id + messageId immediately and skips
+  //     pollForReserveCommit entirely (was up to 5s of polling pre-fix,
+  //     ~300-700ms even on the happy path).
+  //   - The first step of the workflow is no longer a 100-300ms WDK
+  //     round-trip just to do a DB write the shim could've done in-process.
+  // The legacy in-process dispatchSessionMessage works the same way; this
+  // brings the workflow path to parity on the cheapest part of the boot
+  // path.
+  //
   // Hook MUST exist before launchRunner so the runner's first POST never
   // 404s — the U0 spike measured a 500ms–1.2s registration window absorbed
   // by U3's runner-side backoff (100ms→1.6s, 30s budget).
@@ -147,10 +156,12 @@ export async function dispatchWorkflow(
     token: `transcript:${prepared.messageId}`,
   });
 
-  // Step 2 — provision sandbox; returns POJO ref (NOT live wrapper — see SandboxRef)
-  const sandboxRef = await ensureSandboxStep(input, prepared);
+  // Persist workflow_run_id on the session row now that we know the runId.
+  // (Pre-fix this was inside reserveStep; moved here so the shim can skip
+  // pollForReserveCommit. Idempotent on retry — same row, same value.)
+  await persistWorkflowRunIdStep(prepared, runId, input.tenantId);
 
-  // Step 3 — spawn runner inside sandbox; sets runner_started_at idempotently
+  const sandboxRef = await ensureSandboxStep(input, prepared);
   await launchRunnerStep(input, prepared, sandboxRef);
 
   // Workflow body — iterate hook, dispatch each chunk to writeChunkStep.
@@ -191,6 +202,28 @@ export async function dispatchWorkflow(
 // --- Steps (exported for testability; not re-exported from workflows/index.ts
 //     so callers don't accidentally invoke them outside the workflow body) ---
 
+/**
+ * Persist `wdk_v1_<runId>` on the session row. Replaces the legacy
+ * `reserveStep` whose reserve work now happens in the shim before start().
+ * Kept as a step so a function-host crash here doesn't lose the runId
+ * linkage entirely — WDK retries it. Idempotent: setWorkflowRunId is a
+ * plain UPDATE on a row that already exists; replay overwrites with the
+ * same value.
+ */
+export async function persistWorkflowRunIdStep(
+  prepared: PreparedExecution,
+  runId: string,
+  tenantId: TenantId,
+): Promise<void> {
+  "use step";
+  await setWorkflowRunId(prepared.session.id, tenantId, `wdk_v1_${runId}`);
+}
+
+/**
+ * @deprecated Kept exported for unit tests that pin its behavior. The
+ * workflow body no longer calls this — reserve runs in the shim before
+ * start() and `persistWorkflowRunIdStep` records the runId after.
+ */
 export async function reserveStep(
   input: DispatchInput,
   runId: string,
