@@ -13,31 +13,20 @@
 -- The plan's runbook telemetry counter `chat.workflow_resume_count`
 -- maps to inserts that hit the conflict path.
 
--- session_id, message_id, inner_run_id are filled in via a follow-up
--- UPDATE after reserveSessionAndMessage + start(). The placeholder row
--- (with NULL fillables) is inserted FIRST as a claim, so concurrent
--- step retries serialize at the unique constraint — the loser sees
--- the placeholder, polls for completion, and returns the winner's
--- runId without ever invoking reserveSessionAndMessage. This avoids
--- the orphan-on-retry pattern flagged in review run 20260506-232400-round2
--- as REL-R2-01.
 CREATE TABLE IF NOT EXISTS chat_event_dedupe (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   platform        chat_platform NOT NULL,
   event_id        TEXT NOT NULL,
-  session_id      TEXT,
-  message_id      TEXT,
-  inner_run_id    TEXT,
-  claimed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Persisted output of the first successful step run. WDK retry returns
+  -- this so the workflow body sees the same { sessionId, messageId,
+  -- innerRunId } on replay.
+  session_id      TEXT NOT NULL,
+  message_id      TEXT NOT NULL,
+  inner_run_id    TEXT NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-  UNIQUE (tenant_id, platform, event_id),
-  -- Once filled, all three must be non-null together.
-  CONSTRAINT chat_event_dedupe_filled_atomically CHECK (
-    (session_id IS NULL AND message_id IS NULL AND inner_run_id IS NULL) OR
-    (session_id IS NOT NULL AND message_id IS NOT NULL AND inner_run_id IS NOT NULL)
-  )
+  UNIQUE (tenant_id, platform, event_id)
 );
 
 ALTER TABLE chat_event_dedupe ENABLE ROW LEVEL SECURITY;

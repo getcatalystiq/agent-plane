@@ -84,7 +84,7 @@ export function registerDiscordHandlers(bot: Chat, input: DiscordHandlerInput): 
         prompt: m.text ?? "",
         authorId: m.author?.userId ?? "",
         authorDisplayName: m.author?.userName ?? "",
-        eventId: m.id ?? `${Date.now()}`,
+        eventId: m.id ?? crypto.randomUUID(),
         replyToMessageId: m.id,
       });
     } catch (err) {
@@ -133,7 +133,7 @@ export function registerDiscordHandlers(bot: Chat, input: DiscordHandlerInput): 
         prompt: m.text ?? "",
         authorId: m.author?.userId ?? "",
         authorDisplayName: m.author?.userName ?? "",
-        eventId: m.id ?? `${Date.now()}`,
+        eventId: m.id ?? crypto.randomUUID(),
         replyToMessageId: m.id,
       });
     } catch (err) {

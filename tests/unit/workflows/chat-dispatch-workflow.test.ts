@@ -127,11 +127,12 @@ describe("pollForDedupeFill", () => {
     });
 
     const promise = __testing.pollForDedupeFill(tenantId, "discord", "evt-2");
-    // Drive past POLL_MAX_DURATION_MS in chunks so each setTimeout(POLL_INTERVAL_MS)
-    // resolves in turn. With fake timers, advancing time alone isn't enough —
-    // we need to flush microtasks between ticks.
-    for (let elapsed = 0; elapsed < __testing.POLL_MAX_DURATION_MS + 200; elapsed += __testing.POLL_INTERVAL_MS) {
-      await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_MS);
+    // Round-3: pollForDedupeFill now uses exponential backoff (capped at
+    // POLL_INTERVAL_CAP_MS). Advance the timer in cap-sized chunks past
+    // the total budget; each chunk fires whatever inner setTimeout is
+    // currently scheduled.
+    for (let elapsed = 0; elapsed < __testing.POLL_MAX_DURATION_MS + 1000; elapsed += __testing.POLL_INTERVAL_CAP_MS) {
+      await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_CAP_MS);
     }
     const result = await promise;
     expect(result).toBeNull();
@@ -146,11 +147,31 @@ describe("pollForDedupeFill", () => {
       .mockResolvedValueOnce(filled);
 
     const promise = __testing.pollForDedupeFill(tenantId, "discord", "evt-3");
-    // Two intervals before the third call resolves with filled row.
+    // First backoff is POLL_INTERVAL_MS (100ms); second is doubled (200ms).
     await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_MS);
-    await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_MS * 2);
     const result = await promise;
     expect(result).toEqual(filled);
     expect(withTenantTransactionMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses exponential backoff: ~11 DB round-trips over the 30s budget, not 300", async () => {
+    // Round-3 review #8 fix verification. Always return unfilled.
+    withTenantTransactionMock.mockResolvedValue({
+      session_id: null,
+      message_id: null,
+      inner_run_id: null,
+    });
+
+    const promise = __testing.pollForDedupeFill(tenantId, "discord", "evt-backoff");
+    for (let elapsed = 0; elapsed < __testing.POLL_MAX_DURATION_MS + 1000; elapsed += __testing.POLL_INTERVAL_CAP_MS) {
+      await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_CAP_MS);
+    }
+    await promise;
+    // Sanity: substantially fewer than the 300 the fixed-100ms scheme
+    // would have produced. Allow generous slack to avoid flakiness on
+    // exact backoff arithmetic.
+    expect(withTenantTransactionMock.mock.calls.length).toBeLessThan(30);
+    expect(withTenantTransactionMock.mock.calls.length).toBeGreaterThan(5);
   });
 });

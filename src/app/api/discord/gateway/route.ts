@@ -132,7 +132,11 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
           );
           await Promise.all(listenerPromises);
         } catch (err) {
-          if ((err as Error).name !== "AbortError") {
+          // Round-3 review kt-002: narrow via instanceof rather than the
+          // unchecked cast. AbortError is a DOMException-shaped Error in
+          // Node 22+ and a plain Error subclass elsewhere; both reach
+          // here as `instanceof Error` true with `name === "AbortError"`.
+          if (!(err instanceof Error) || err.name !== "AbortError") {
             logger.error("discord-gateway: listener failed", {
               agent_id: cached.agentId,
               error: err instanceof Error ? err.message : String(err),

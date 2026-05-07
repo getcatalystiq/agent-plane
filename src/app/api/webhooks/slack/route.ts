@@ -89,7 +89,7 @@ async function verifySlackV0(
   return constantTimeEqualHex(provided, expected);
 }
 
-const UNHANDLED_RESPONSE = (): Response =>
+const unhandledResponse = (): Response =>
   new Response(JSON.stringify({ status: "unhandled" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
@@ -102,8 +102,8 @@ async function maybeHandleFirstTimeChallenge(
 ): Promise<Response> {
   const env = getEnv();
   const fallback = env.SLACK_SIGNING_SECRET;
-  if (!fallback) return UNHANDLED_RESPONSE();
-  if (!(await verifySlackV0(rawBody, ts, sigHeader, fallback))) return UNHANDLED_RESPONSE();
+  if (!fallback) return unhandledResponse();
+  if (!(await verifySlackV0(rawBody, ts, sigHeader, fallback))) return unhandledResponse();
 
   // Signature valid against the global fallback. Only respond to
   // url_verification — anything else gets unhandled (we don't want to
@@ -112,7 +112,7 @@ async function maybeHandleFirstTimeChallenge(
   try {
     parsed = JSON.parse(rawBody) as SlackEventBody;
   } catch {
-    return UNHANDLED_RESPONSE();
+    return unhandledResponse();
   }
   if (parsed.type === "url_verification" && typeof parsed.challenge === "string") {
     logger.info("slack-webhook: first-time url_verification accepted via global fallback secret");
@@ -121,7 +121,7 @@ async function maybeHandleFirstTimeChallenge(
       headers: { "Content-Type": "text/plain" },
     });
   }
-  return UNHANDLED_RESPONSE();
+  return unhandledResponse();
 }
 
 export const POST = withErrorHandler(async (req: NextRequest) => {
@@ -167,13 +167,15 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     // After credentials are saved, the per-bot signing secret takes
     // over for real events.
     //
-    // SEC-R2-002 (review run 20260506-232400-round2): timing channel.
-    // The known-team-id branch runs DB+decrypt+HMAC; the unknown-team-id
-    // branch runs zero or one HMAC. To uniformize latency, run a no-op
-    // HMAC against a 32-byte zero-secret in this branch — same algorithm,
-    // same input shape, comparable wall-clock. Cost is negligible and
-    // closes the side channel that team_ids are registered.
-    await hmacSha256Hex("0".repeat(64), `v0:${ts}:${rawBody}`);
+    // Round-3 review #9: the prior SEC-R2-002 no-op HMAC against a
+    // zero-secret was timing theatre — it closed <1% of the gap because
+    // the known-team-id branch is dominated by Neon SELECT + AES-GCM
+    // decrypt latency (~10-100ms), not the HMAC. We accept the residual
+    // workspace-existence oracle: the side channel is reconnaissance-
+    // grade only. Real events still require the per-bot signing secret,
+    // so the oracle does not enable forgery — it only reveals which
+    // team_ids have AgentPlane bots installed, information already
+    // discoverable by attempting an OAuth install in the workspace.
     return await maybeHandleFirstTimeChallenge(rawBody, ts, req.headers.get("x-slack-signature"));
   }
 
@@ -221,7 +223,7 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
   //    to close the timing/registration oracle (P2 #18).
   const sigHeader = req.headers.get("x-slack-signature");
   const verified = await verifySlackV0(rawBody, ts, sigHeader, signingSecret);
-  if (!verified) return UNHANDLED_RESPONSE();
+  if (!verified) return unhandledResponse();
 
   // 6. Parse body — now safe.
   let parsed: SlackEventBody;

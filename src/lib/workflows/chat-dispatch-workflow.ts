@@ -322,6 +322,39 @@ export async function chatDispatchWorkflow(
     }
   }
 
+  // Round-3 review #10: empty-readable guard. If the inner dispatch
+  // failed fast (transient runtime error, sandbox boot rejection,
+  // immediate validation failure) the readable closes with zero
+  // chunks — `hasPosted` stays false, `responseText` stays empty,
+  // and the final-flush block above is a no-op. Without an explicit
+  // signal here the user sees absolute silence: no reply, no error.
+  // Post a minimal acknowledgement so the bot is observably alive.
+  if (!hasPosted && !postFailed) {
+    logger.warn("chatDispatchWorkflow: inner dispatch produced no output", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      inner_run_id: started.innerRunId,
+    });
+    try {
+      await postOrEditStep({
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        platform: input.platform,
+        threadId: input.threadKey,
+        text: "_(agent produced no output — please retry)_",
+        existingMessageId: null,
+        seal: false,
+        continuation: false,
+      });
+    } catch (err) {
+      logger.error("chatDispatchWorkflow: empty-readable acknowledgement failed", {
+        tenant_id: input.tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   await finalizeChatStep(input);
 }
 
@@ -340,8 +373,18 @@ const DedupeRow = z.object({
   inner_run_id: z.string().nullable(),
 });
 
+// Exponential backoff parameters for pollForDedupeFill (round-3 review
+// finding #8). Starts at POLL_INTERVAL_MS, doubles each iteration up to
+// POLL_INTERVAL_CAP_MS. Total budget remains POLL_MAX_DURATION_MS so the
+// upper bound on a losing race is unchanged; what changes is DB load —
+// fixed 100ms × 30s = 300 round-trips → exponential ≈ 11 round-trips.
 const POLL_INTERVAL_MS = 100;
+const POLL_INTERVAL_CAP_MS = 2_000;
 const POLL_MAX_DURATION_MS = 30_000;
+// Stale-claim threshold for the atomic-steal recovery path (round-3 #1/#7).
+// Must be ≥ POLL_MAX_DURATION_MS so a still-running winner cannot be
+// stolen by a loser that finished its poll early.
+const STALE_CLAIM_THRESHOLD_SECONDS = 30;
 
 async function startInnerDispatchStep(
   input: ChatTriggerInput,
@@ -387,15 +430,53 @@ async function startInnerDispatchStep(
         event_id: input.eventId,
         inner_run_id: filled.inner_run_id,
       });
-      return { innerRunId: filled.inner_run_id! };
+      return { innerRunId: filled.inner_run_id };
     }
-    // Winner crashed before filling — fall through and re-attempt as if we won.
-    // The original placeholder row will be UPDATEd by us (the new "winner").
-    logger.warn("startInnerDispatchStep: lost claim but winner never filled; recovering", {
+    // Round-3 review #1/#7 fix: do NOT fall through to the winner path
+    // unconditionally. The previous "re-attempt as if we won" branch
+    // double-dispatched (calling reserveSessionAndMessage + start again)
+    // whenever the original winner was slow-but-alive (>30s in
+    // start(dispatchWorkflow) on a cold sandbox). Instead, atomically
+    // STEAL the placeholder using a stale-claim guard: only the process
+    // that wins this UPDATE may run reserve+start. Concurrent stealers
+    // serialize at the row lock; at most one observes claimed_at <
+    // threshold and proceeds.
+    const stolen = await withTenantTransaction(input.tenantId, async (tx) => {
+      return tx.queryOne(
+        DedupeRow,
+        `UPDATE chat_event_dedupe
+         SET claimed_at = now()
+         WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+           AND inner_run_id IS NULL
+           AND claimed_at < now() - make_interval(secs => $4)
+         RETURNING session_id, message_id, inner_run_id`,
+        [input.tenantId, input.platform, input.eventId, STALE_CLAIM_THRESHOLD_SECONDS],
+      );
+    });
+    if (!stolen) {
+      // Either the placeholder filled in the race window between poll
+      // and steal (re-poll once), or another concurrent stealer won
+      // (let WDK retry — the next attempt will see the filled row).
+      const reFilled = await pollForDedupeFill(input.tenantId, input.platform, input.eventId);
+      if (reFilled) {
+        logger.info("startInnerDispatchStep: claim filled during steal window; attaching", {
+          tenant_id: input.tenantId,
+          platform: input.platform,
+          event_id: input.eventId,
+          inner_run_id: reFilled.inner_run_id,
+        });
+        return { innerRunId: reFilled.inner_run_id };
+      }
+      throw new Error(
+        `startInnerDispatchStep: claim race lost and steal failed for event ${input.eventId}; will retry via WDK`,
+      );
+    }
+    logger.warn("startInnerDispatchStep: stole stale claim; promoting to new winner", {
       tenant_id: input.tenantId,
       platform: input.platform,
       event_id: input.eventId,
     });
+    // Fall through to the winner path with the stolen claim.
   }
 
   const composedPrompt = `[${input.platform} message from ${input.authorDisplayName}]\n${input.prompt}${renderAttachmentPromptBlock(persisted)}`;
@@ -445,8 +526,10 @@ async function startInnerDispatchStep(
 
 /**
  * Poll the dedupe row until the winner's UPDATE fills inner_run_id.
- * Returns the filled row, or null when the poll times out (winner crashed
- * before filling — caller should fall through and re-attempt as if it won).
+ * Returns the filled row, or null when the poll times out. Round-3 review
+ * #8 fix: exponential backoff (100ms → 200 → 400 → 800 → 1600 → cap 2000)
+ * instead of fixed 100ms × 300, so a losing race burns ~11 DB round-trips
+ * over the 30s budget instead of 300.
  */
 async function pollForDedupeFill(
   tenantId: TenantId,
@@ -454,6 +537,7 @@ async function pollForDedupeFill(
   eventId: string,
 ): Promise<{ session_id: string; message_id: string; inner_run_id: string } | null> {
   const start = Date.now();
+  let interval = POLL_INTERVAL_MS;
   while (Date.now() - start < POLL_MAX_DURATION_MS) {
     const row = await withTenantTransaction(tenantId, async (tx) => {
       return tx.queryOne(
@@ -466,7 +550,8 @@ async function pollForDedupeFill(
     if (row && row.inner_run_id && row.session_id && row.message_id) {
       return { session_id: row.session_id, message_id: row.message_id, inner_run_id: row.inner_run_id };
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    await new Promise((resolve) => setTimeout(resolve, interval));
+    interval = Math.min(interval * 2, POLL_INTERVAL_CAP_MS);
   }
   return null;
 }
@@ -658,9 +743,14 @@ function parseNdjsonLine(raw: string): ParsedEvent | null {
 
 // Test-only re-exports. Internal helpers stay module-private; this object
 // gives tests a single entry point without expanding the public surface.
+// `as const` (round-3 review kt-005) preserves literal types on the
+// numeric constants so test assertions can use them as comparison bounds
+// without runtime widening.
 export const __testing = {
   parseNdjsonLine,
   pollForDedupeFill,
   POLL_INTERVAL_MS,
+  POLL_INTERVAL_CAP_MS,
   POLL_MAX_DURATION_MS,
-};
+  STALE_CLAIM_THRESHOLD_SECONDS,
+} as const;

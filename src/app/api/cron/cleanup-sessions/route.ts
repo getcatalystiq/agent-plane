@@ -513,6 +513,38 @@ async function sweepOrphans(): Promise<number> {
   return countSweepResults(results, "Failed orphan-sandbox cleanup");
 }
 
+// Round-3 review #6: chat_event_dedupe sweep. Two cohorts:
+//   (a) STALE PLACEHOLDERS — winner crashed between INSERT and UPDATE.
+//       claimed_at is older than the workflow step's max wall clock
+//       (POLL_MAX_DURATION_MS = 30s in chat-dispatch-workflow); we add
+//       a generous 5-minute buffer so an in-flight cold sandbox boot
+//       isn't reaped mid-start. Once swept, the next retry observing
+//       the (tenant, platform, event_id) triple gets a clean INSERT
+//       slot and becomes the new winner.
+//   (b) FILLED ROWS PAST 7-DAY TTL — long-tail cleanup. The 7-day
+//       window is the workflow body's max useful idempotency horizon
+//       (inner workflow runs are gone well before then). Without this
+//       sweep filled rows accumulate forever.
+async function sweepChatEventDedupe(): Promise<{ stale: number; expired: number }> {
+  const stalePromise = execute(
+    `DELETE FROM chat_event_dedupe
+      WHERE inner_run_id IS NULL
+        AND claimed_at < now() - INTERVAL '5 minutes'`,
+  );
+  const expiredPromise = execute(
+    `DELETE FROM chat_event_dedupe
+      WHERE created_at < now() - INTERVAL '7 days'`,
+  );
+  const [stale, expired] = await Promise.all([stalePromise, expiredPromise]);
+  if (stale.rowCount > 0 || expired.rowCount > 0) {
+    logger.info("chat_event_dedupe sweep", {
+      stale_placeholders_deleted: stale.rowCount,
+      expired_filled_deleted: expired.rowCount,
+    });
+  }
+  return { stale: stale.rowCount, expired: expired.rowCount };
+}
+
 export const GET = withErrorHandler(async (request: NextRequest) => {
   verifyCronSecret(request);
 
@@ -526,6 +558,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     activeWatchdog,
     activeNoRunning,
     orphansCleaned,
+    chatDedupeCleaned,
   ] = await Promise.all([
     sweepExpired(),
     sweepIdle(),
@@ -533,6 +566,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     sweepActiveWatchdog(),
     sweepActiveWithoutRunning(),
     sweepOrphans(),
+    sweepChatEventDedupe(),
   ]);
 
   const total =
@@ -541,7 +575,9 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     creatingWatchdog +
     activeWatchdog +
     activeNoRunning +
-    orphansCleaned;
+    orphansCleaned +
+    chatDedupeCleaned.stale +
+    chatDedupeCleaned.expired;
   logger.info("Session cleanup completed", {
     expired_cleaned: expiredCleaned,
     idle_cleaned: idleCleaned,
@@ -549,6 +585,8 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     active_watchdog: activeWatchdog,
     active_no_running_message: activeNoRunning,
     orphans_cleaned: orphansCleaned,
+    chat_dedupe_stale: chatDedupeCleaned.stale,
+    chat_dedupe_expired: chatDedupeCleaned.expired,
     total,
   });
 
@@ -560,5 +598,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     active_watchdog: activeWatchdog,
     active_no_running_message: activeNoRunning,
     orphans: orphansCleaned,
+    chat_dedupe_stale: chatDedupeCleaned.stale,
+    chat_dedupe_expired: chatDedupeCleaned.expired,
   });
 });

@@ -97,8 +97,14 @@ export async function ensurePrivateBlobStore(): Promise<void> {
   // TTL so an env rotation (BLOB_PRIVATE_READ_WRITE_TOKEN swap) re-runs
   // the canary instead of trusting the stale verification for the rest
   // of the function-instance lifetime.
+  //
+  // Round-3 review #13 fix: single-flight an in-flight canary so two
+  // concurrent calls during cold start don't both invoke runCanary().
+  // canaryResult truthy + canaryResultExpiresAt still 0 means a probe
+  // is in flight — return the existing promise. Only re-run when the
+  // promise has resolved AND the TTL has elapsed.
   const now = Date.now();
-  if (canaryResult && now < canaryResultExpiresAt) {
+  if (canaryResult && (canaryResultExpiresAt === 0 || now < canaryResultExpiresAt)) {
     return canaryResult;
   }
 

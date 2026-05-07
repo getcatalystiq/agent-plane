@@ -387,21 +387,26 @@ async function ensureSandboxImpl(
         await Promise.allSettled(
           input.preInjectFiles.map(async (f) => {
             try {
+              // Round-3 review #5: keep the AbortController active until
+              // arrayBuffer() resolves. The previous clearTimeout-in-fetch-
+              // finally pattern released the timer before the body
+              // downloaded, so a slow-streaming server hung until Vercel
+              // maxDuration. The signal is shared between fetch() and the
+              // stream consumed by arrayBuffer(); aborting cancels both.
               const ctl = new AbortController();
               const tm = setTimeout(() => ctl.abort(), 30_000);
-              let res: Response;
               try {
-                res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+                const res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+                if (!res.ok) throw new Error(`http_${res.status}`);
+                const ab = await res.arrayBuffer();
+                if (ab.byteLength > f.sizeBytes + 1024) {
+                  throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
+                }
+                const buf = Buffer.from(ab);
+                await reconnectResult.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
               } finally {
                 clearTimeout(tm);
               }
-              if (!res.ok) throw new Error(`http_${res.status}`);
-              const ab = await res.arrayBuffer();
-              if (ab.byteLength > f.sizeBytes + 1024) {
-                throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
-              }
-              const buf = Buffer.from(ab);
-              await reconnectResult.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
             } catch (err) {
               logger.warn("preInjectFiles (warm): stage failed (fail-open)", {
                 path: f.path,
@@ -488,21 +493,23 @@ async function ensureSandboxImpl(
           // sizeBytes from the persisted record (already capped at 25 MB
           // upstream); reject larger to prevent OOM via attacker-controlled
           // blob.
+          // Round-3 review #5: keep the AbortController active until
+          // arrayBuffer() resolves so the body download is bounded by
+          // the 30s timeout, not Vercel maxDuration.
           const ctl = new AbortController();
           const tm = setTimeout(() => ctl.abort(), 30_000);
-          let res: Response;
           try {
-            res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+            const res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+            if (!res.ok) throw new Error(`http_${res.status}`);
+            const ab = await res.arrayBuffer();
+            if (ab.byteLength > f.sizeBytes + 1024) {
+              throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
+            }
+            const buf = Buffer.from(ab);
+            await sandbox.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
           } finally {
             clearTimeout(tm);
           }
-          if (!res.ok) throw new Error(`http_${res.status}`);
-          const ab = await res.arrayBuffer();
-          if (ab.byteLength > f.sizeBytes + 1024) {
-            throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
-          }
-          const buf = Buffer.from(ab);
-          await sandbox.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
         } catch (err) {
           logger.warn("preInjectFiles: stage failed (fail-open)", {
             path: f.path,
