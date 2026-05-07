@@ -58,6 +58,7 @@ import {
   type PreparedExecution,
 } from "@/lib/dispatcher";
 import {
+  casCreatingToActive,
   setWorkflowRunId,
   type Session,
 } from "@/lib/sessions";
@@ -239,6 +240,22 @@ export async function ensureSandboxStep(
     effectiveBudget,
     effectiveMaxTurns,
   });
+
+  // Promote creating→active now that the sandbox boot succeeded — same
+  // transition the legacy runMessageStream does at dispatcher.ts:770. Without
+  // this, fresh sessions stay in `creating` for their entire lifetime,
+  // which (a) makes finalizeMessage's internal sessionTail's active→idle
+  // CAS no-op (logs "Session status transition failed (stale state)"),
+  // and (b) — far worse — leaves the session visible to the next schedule
+  // tick's findWarmScheduleSession, whose query includes 'creating'.
+  // The next tick passes that stuck session as warmSessionId and reserveStep
+  // throws "Session is still being created", which WDK retries 3× before
+  // bubbling FatalError.
+  //
+  // Idempotent CAS: noop on warm-reuse paths where the session was already
+  // 'active' coming out of reserveStep.
+  await casCreatingToActive(session.id, input.tenantId, { sandbox_id: sandbox.id });
+
   // Return a serializable ref (sandboxId + the POJO config used to provision
   // it). Subsequent steps reconnect via reconnectSessionSandbox(sandboxId, cfg)
   // — the sandbox process keeps running on its own host between steps.

@@ -48,6 +48,7 @@ vi.mock("@/lib/dispatcher", () => ({
 
 vi.mock("@/lib/sessions", () => ({
   setWorkflowRunId: vi.fn().mockResolvedValue(undefined),
+  casCreatingToActive: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@/lib/session-messages", () => ({
