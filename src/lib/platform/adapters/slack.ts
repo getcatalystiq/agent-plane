@@ -55,7 +55,14 @@ export function registerSlackHandlers(bot: Chat, input: SlackHandlerInput): void
         prompt: m.text ?? "",
         authorId: m.author?.userId ?? "",
         authorDisplayName: m.author?.userName ?? "",
-        eventId: m.id ?? crypto.randomUUID(),
+        // Slack delivers BOTH app_mention AND message.channels for one
+        // @mention, with different m.id but the SAME m.ts (the user's
+        // message timestamp). Keying the dedupe row on m.ts collapses
+        // them into one chat_event_dedupe row so only one workflow
+        // runs per user message. Without this, the second handler's
+        // reserveSessionAndMessage hits the first session in `creating`
+        // and throws ConcurrencyLimitError → WDK FatalError loop.
+        eventId: m.ts ?? m.id ?? crypto.randomUUID(),
         replyToMessageId: m.id,
       });
     } catch (err) {
@@ -84,7 +91,14 @@ export function registerSlackHandlers(bot: Chat, input: SlackHandlerInput): void
         prompt: m.text ?? "",
         authorId: m.author?.userId ?? "",
         authorDisplayName: m.author?.userName ?? "",
-        eventId: m.id ?? crypto.randomUUID(),
+        // Slack delivers BOTH app_mention AND message.channels for one
+        // @mention, with different m.id but the SAME m.ts (the user's
+        // message timestamp). Keying the dedupe row on m.ts collapses
+        // them into one chat_event_dedupe row so only one workflow
+        // runs per user message. Without this, the second handler's
+        // reserveSessionAndMessage hits the first session in `creating`
+        // and throws ConcurrencyLimitError → WDK FatalError loop.
+        eventId: m.ts ?? m.id ?? crypto.randomUUID(),
         replyToMessageId: m.id,
       });
     } catch (err) {
