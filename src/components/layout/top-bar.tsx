@@ -64,34 +64,55 @@ export function TopBar() {
 
   let parentRoute = "";
   let entityId: string | undefined;
+  let inSubPage = false;
+
+  const subPageLabels: Record<string, string> = {
+    playground: "Playground",
+    plugins: "Plugins",
+    connectors: "Connectors",
+    schedule: "Schedule",
+  };
 
   for (let i = 1; i < segments.length; i++) {
     const href = "/" + segments.slice(0, i + 1).join("/");
+
+    // Once we've entered a sub-page that owns a catch-all (e.g. /plugins/[...pluginName]),
+    // collapse the remaining segments into a single crumb so we don't relabel "plugins"
+    // twice or split a slash-bearing entity name across crumbs.
+    if (inSubPage) {
+      const fullName = segments.slice(i).join("/");
+      const fullHref = "/" + segments.join("/");
+      crumbs.push({
+        label: fullName.length > 24 ? fullName.slice(0, 21) + "..." : fullName,
+        href: fullHref,
+        isEntityId: false,
+      });
+      break;
+    }
+
     const label = ROUTE_LABELS[href];
     if (label) {
       crumbs.push({ label, href, isEntityId: false });
       parentRoute = href;
-    } else {
-      // Check if this is a known sub-page name (e.g. "playground")
-      const subPageLabels: Record<string, string> = {
-        playground: "Playground",
-        plugins: "Plugins",
-        connectors: "Connectors",
-        schedule: "Schedule",
-      };
-      const subLabel = subPageLabels[segments[i]];
-      if (subLabel) {
-        crumbs.push({ label: subLabel, href, isEntityId: false });
-      } else {
-        // Detail page — will resolve name
-        entityId = segments[i];
-        crumbs.push({
-          label: segments[i].length > 12 ? segments[i].slice(0, 8) + "..." : segments[i],
-          href,
-          isEntityId: true,
-        });
-      }
+      continue;
     }
+
+    const subLabel = subPageLabels[segments[i]];
+    if (subLabel) {
+      crumbs.push({ label: subLabel, href, isEntityId: false });
+      inSubPage = true;
+      continue;
+    }
+
+    // Detail page — only the first unknown segment after a labeled route is the
+    // entity id we resolve. Deeper catch-all segments must not overwrite it.
+    const isPrimaryEntity = entityId === undefined;
+    if (isPrimaryEntity) entityId = segments[i];
+    crumbs.push({
+      label: segments[i].length > 12 ? segments[i].slice(0, 8) + "..." : segments[i],
+      href,
+      isEntityId: isPrimaryEntity,
+    });
   }
 
   // If on /admin exactly, show "Dashboard"

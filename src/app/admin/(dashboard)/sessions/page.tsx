@@ -22,6 +22,7 @@ const SessionWithContext = z.object({
   total_cost_usd: z.coerce.number(),
   latest_activity: z.coerce.string().nullable(),
   latest_trigger: RunTriggeredBySchema.nullable().catch(null),
+  latest_message_status: z.string().nullable(),
   sandbox_id: z.string().nullable(),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
@@ -149,7 +150,8 @@ async function SessionsListServer({
       s.updated_at,
       COALESCE(agg.total_cost, 0) AS total_cost_usd,
       agg.latest_activity AS latest_activity,
-      latest.triggered_by AS latest_trigger
+      latest.triggered_by AS latest_trigger,
+      latest.status AS latest_message_status
     FROM sessions s
     JOIN agents a ON a.id = s.agent_id
     LEFT JOIN LATERAL (
@@ -160,7 +162,7 @@ async function SessionsListServer({
       WHERE m.session_id = s.id
     ) agg ON true
     LEFT JOIN LATERAL (
-      SELECT triggered_by
+      SELECT triggered_by, status
       FROM session_messages
       WHERE session_id = s.id
       ORDER BY created_at DESC

@@ -82,7 +82,7 @@ export default async function TenantDetailPage({
         <MetricCard label="Monthly Budget"><span className="font-mono">${tenant.monthly_budget_usd.toFixed(2)}</span></MetricCard>
         <MetricCard label="Current Spend"><span className="font-mono">${tenant.current_month_spend.toFixed(2)}</span></MetricCard>
         <MetricCard label="Agents">{agents.length}</MetricCard>
-        <MetricCard label="Executions">{totalMessages}</MetricCard>
+        <MetricCard label="Runs">{totalMessages}</MetricCard>
       </div>
 
       <TenantEditForm tenant={tenant} />
@@ -123,9 +123,9 @@ export default async function TenantDetailPage({
         </AdminTable>
       </div>
 
-      {/* Executions */}
+      {/* Runs */}
       <div className="rounded-lg border border-muted-foreground/25 p-5">
-        <SectionHeader title="Executions" />
+        <SectionHeader title="Runs" />
         <AdminTable footer={
           <PaginationBar
             page={page}

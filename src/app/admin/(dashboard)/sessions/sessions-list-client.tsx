@@ -22,21 +22,51 @@ interface SessionItem {
   total_cost_usd: number;
   latest_activity: string | null;
   latest_trigger: RunTriggeredBy | null;
+  latest_message_status: string | null;
   sandbox_id: string | null;
   created_at: string;
   updated_at: string;
 }
 
-const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
+type DisplayStatus =
+  | "creating"
+  | "active"
+  | "idle"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "stopped";
+
+const STATUS_VARIANT: Record<DisplayStatus, "default" | "secondary" | "destructive" | "outline"> = {
+  creating: "outline",
   active: "default",
   idle: "secondary",
-  creating: "outline",
+  completed: "default",
+  failed: "destructive",
+  cancelled: "outline",
+  timed_out: "destructive",
   stopped: "outline",
 };
 
-function statusLabel(s: SessionItem) {
-  if (s.status === "stopped" && s.ephemeral) return "stopped (ephemeral)";
+const TERMINAL_MESSAGE_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out"]);
+
+// Once a session leaves `creating`/`active`, its lifecycle column (idle/stopped)
+// no longer tells the user whether the run succeeded — the latest message status
+// does. Mirror the detail page's per-message badge so a successful schedule run
+// shows "completed" on the index instead of "stopped".
+function deriveDisplayStatus(s: SessionItem): DisplayStatus {
+  if (s.status === "creating" || s.status === "active") return s.status;
+  if (s.latest_message_status && TERMINAL_MESSAGE_STATUSES.has(s.latest_message_status)) {
+    return s.latest_message_status as DisplayStatus;
+  }
   return s.status;
+}
+
+function statusLabel(s: SessionItem): string {
+  const display = deriveDisplayStatus(s);
+  if (display === "stopped" && s.ephemeral) return "stopped (ephemeral)";
+  return display.replace("_", " ");
 }
 
 interface Props {
@@ -141,7 +171,7 @@ export function SessionsListClient({
                 </td>
                 <td className="p-3 text-xs">{s.agent_name}</td>
                 <td className="p-3">
-                  <Badge variant={STATUS_VARIANT[s.status] ?? "outline"} className="text-[10px]">
+                  <Badge variant={STATUS_VARIANT[deriveDisplayStatus(s)] ?? "outline"} className="text-[10px]">
                     {statusLabel(s)}
                   </Badge>
                 </td>

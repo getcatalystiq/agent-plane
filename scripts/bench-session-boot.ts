@@ -22,6 +22,19 @@
  *              forces a new session with sandbox restore from blob if your
  *              tenant has cached state. Falls back to cold on failure.
  *
+ *              CAVEAT: this scenario does NOT actually exercise the archived
+ *              restore path against production. `cancel` transitions the
+ *              session to `stopped`, after which the second message creates
+ *              a fresh session — equivalent to a `cold` measurement, not a
+ *              true archived restore. A real archived test would need to kill
+ *              the sandbox while keeping the session row alive (no public
+ *              endpoint exposes that today). Measuring archived restore
+ *              latency requires DB-level intervention (e.g. `UPDATE sessions
+ *              SET sandbox_id = NULL WHERE id = ...` between primer and
+ *              second message). Until that test harness exists, the archived
+ *              numbers reported here should be treated as a cold-path
+ *              control, not as evidence of archived-restore performance.
+ *
  * The harness measures four wall-clock timings per iteration:
  *   t_first_byte           — ms from POST send to the first response byte.
  *   t_first_event          — ms to the first NDJSON event whose type field
@@ -190,36 +203,41 @@ interface CreateSessionResp {
   id?: string;
 }
 
-async function createSession(flags: Flags): Promise<{ sessionId: string; timings: Timings }> {
+async function createSession(flags: Flags, opts?: { ephemeral?: boolean }): Promise<{ sessionId: string; timings: Timings }> {
   const startMs = Date.now();
+  const body: Record<string, unknown> = { agent_id: flags.agentId, prompt: flags.prompt };
+  if (opts?.ephemeral !== undefined) body.ephemeral = opts.ephemeral;
   const res = await fetch(`${flags.baseUrl}/api/sessions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${flags.apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ agent_id: flags.agentId, prompt: flags.prompt }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`createSession failed ${res.status}: ${t.slice(0, 300)}`);
   }
-  // session creation may stream NDJSON OR may return JSON depending on shape
+  // session creation may stream NDJSON OR may return JSON depending on shape.
+  // The dispatcher returns the new session id via X-Session-Id header on
+  // the streaming response (no `session_created` event in NDJSON).
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("application/x-ndjson") || ct.includes("application/octet-stream") || ct.includes("text/plain")) {
-    // Stream form — first event carries session_id; we'll parse out and time.
+    const headerSid = res.headers.get("X-Session-Id");
     const timings = await streamAndTime(res, startMs);
-    // Reissue a metadata fetch is overkill; for create-with-prompt the
-    // response also typically embeds session_id via `run_started` event.
-    // For robustness: we'll list latest session after stream end if needed.
-    // Simpler: fetch /api/sessions and pick most recent.
-    const list = await fetch(`${flags.baseUrl}/api/sessions?limit=1`, {
-      headers: { Authorization: `Bearer ${flags.apiKey}` },
-    });
-    if (!list.ok) throw new Error(`session list failed: ${list.status}`);
-    const lj = (await list.json()) as { sessions?: Array<{ id: string }> };
-    const sid = lj.sessions?.[0]?.id;
-    if (!sid) throw new Error("could not resolve session id from list");
+    let sid = headerSid;
+    if (!sid) {
+      // Fallback: list latest session for this tenant.
+      const list = await fetch(`${flags.baseUrl}/api/sessions?limit=1`, {
+        headers: { Authorization: `Bearer ${flags.apiKey}` },
+      });
+      if (list.ok) {
+        const lj = (await list.json()) as { data?: Array<{ id: string }>; sessions?: Array<{ id: string }> };
+        sid = lj.data?.[0]?.id ?? lj.sessions?.[0]?.id ?? null;
+      }
+    }
+    if (!sid) throw new Error("could not resolve session id (no X-Session-Id header, list fallback empty)");
     return { sessionId: sid, timings };
   }
   // JSON form — { session_id } returned synchronously; no boot timing.
@@ -278,8 +296,8 @@ async function runScenario(
         const { timings } = await createSession(flags);
         out.push(timings);
       } else if (scenario === "warm" || scenario === "hot") {
-        const { sessionId } = await createSession(flags);
-        // Drain primer if needed; create returned only after stream closed.
+        // Persistent session so the primer's sandbox stays alive for follow-ups.
+        const { sessionId } = await createSession(flags, { ephemeral: false });
         await sleep(scenario === "warm" ? 30_000 : 200);
         const t = await sendMessage(flags, sessionId);
         out.push(t);
@@ -370,3 +388,9 @@ main().then(
     process.exit(2);
   },
 );
+
+
+// Mark as ES module so top-level identifiers are file-scoped (avoids
+// duplicate-function-implementation collisions with other scripts that
+// also define helpers like `runScenario`).
+export {};

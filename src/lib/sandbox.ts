@@ -668,10 +668,96 @@ const mcpServers = process.env.MCP_SERVERS_JSON
 const transcriptPath = '/vercel/sandbox/transcript.ndjson';
 writeFileSync(transcriptPath, '');
 
+// --- U3-e: Per-line streaming POST (when AGENT_PLANE_STREAM_PER_LINE=on) ---
+//
+// Buffers each emitted NDJSON line and flushes to the platform's internal
+// transcript endpoint per the U3 runner contract:
+//   - Flush triggers: 10 lines OR 100ms OR critical event (result/error)
+//   - Headers: X-Runner-Attempt-Sequence + X-Batch-Sequence
+//   - Backoff: 100ms→200→400→800→1600 (cap 30s total) on HookNotFoundError
+//     and other 5xx — matches the cold-start hook-registration window
+//     measured by the U0 spike (~500ms-1.2s typical)
+//
+// When STREAM_PER_LINE is off, emit() just writes to console + transcript
+// file (legacy behavior); the batched-final POST in claudeSdkErrorAndCleanup
+// uploads the full file at the end.
+const STREAM_PER_LINE = process.env.AGENT_PLANE_STREAM_PER_LINE === 'on';
+const ATTEMPT_SEQUENCE = parseInt(process.env.AGENT_PLANE_RUNNER_ATTEMPT_SEQUENCE || '0', 10);
+let __streamBatchSeq = 0;
+let __streamBuffer = [];
+let __streamFlushTimer = null;
+const __STREAM_BATCH_SIZE = 10;
+const __STREAM_FLUSH_MS = 100;
+const __STREAM_BACKOFF_MS = [0, 100, 200, 400, 800, 1600, 3200, 6400];
+const __STREAM_BACKOFF_TOTAL_BUDGET_MS = 30_000;
+
+async function __flushStreamBuffer() {
+  if (!STREAM_PER_LINE || __streamBuffer.length === 0) return;
+  if (__streamFlushTimer) {
+    clearTimeout(__streamFlushTimer);
+    __streamFlushTimer = null;
+  }
+  const batch = __streamBuffer.splice(0, __streamBuffer.length);
+  const seq = __streamBatchSeq++;
+  const body = batch.join('\\n');
+
+  const url = process.env.AGENT_PLANE_PLATFORM_URL + '/api/internal/messages/' + process.env.AGENT_PLANE_MESSAGE_ID + '/transcript';
+  const headers = {
+    'Authorization': 'Bearer ' + process.env.AGENT_PLANE_MESSAGE_TOKEN,
+    'Content-Type': 'application/x-ndjson',
+    'X-Runner-Attempt-Sequence': String(ATTEMPT_SEQUENCE),
+    'X-Batch-Sequence': String(seq),
+  };
+
+  const startMs = Date.now();
+  for (let attempt = 0; attempt < __STREAM_BACKOFF_MS.length; attempt++) {
+    const delay = __STREAM_BACKOFF_MS[attempt];
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+    if (Date.now() - startMs > __STREAM_BACKOFF_TOTAL_BUDGET_MS) break;
+
+    try {
+      const res = await fetch(url, { method: 'POST', headers, body });
+      if (res.ok) return; // 200 (delivered or duplicate-skipped)
+      if (res.status === 503) {
+        // HookNotFoundError or transient — retry per backoff
+        continue;
+      }
+      // 4xx (auth/validation) → don't retry; cleanup-cron salvage will pick
+      // up the in-sandbox transcript file as a fallback.
+      console.error('[runner stream] non-retryable POST failure:', res.status, attempt);
+      return;
+    } catch (err) {
+      // Network error — retry per backoff
+      console.error('[runner stream] POST network error:', err && err.message);
+    }
+  }
+  console.error('[runner stream] gave up after backoff exhaustion; salvage will recover');
+}
+
+function __scheduleStreamFlush() {
+  if (!STREAM_PER_LINE || __streamFlushTimer) return;
+  __streamFlushTimer = setTimeout(() => {
+    __streamFlushTimer = null;
+    __flushStreamBuffer().catch(err => console.error('[runner stream] flush error:', err && err.message));
+  }, __STREAM_FLUSH_MS);
+}
+
 function emit(event) {
   const line = JSON.stringify(event);
   console.log(line);
   appendFileSync(transcriptPath, line + '\\n');
+
+  if (STREAM_PER_LINE) {
+    __streamBuffer.push(line);
+    const isCritical = event && (event.type === 'result' || event.type === 'error');
+    if (isCritical || __streamBuffer.length >= __STREAM_BATCH_SIZE) {
+      // Fire-and-forget: the runner keeps processing; the POST may resolve
+      // out of band. The endpoint's dedup tuple makes overlapping POSTs safe.
+      __flushStreamBuffer().catch(err => console.error('[runner stream] flush error:', err && err.message));
+    } else {
+      __scheduleStreamFlush();
+    }
+  }
 }
 
 `;
@@ -745,7 +831,20 @@ function claudeSdkErrorAndCleanup(): string {
     });
   }
 
-  if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_MESSAGE_TOKEN) {
+  if (STREAM_PER_LINE) {
+    // U3-e streaming mode: flush any remaining buffered lines (including
+    // the just-emitted error or the natural terminal 'result' event).
+    // The endpoint's dedup tuple makes a final flush after a fire-and-forget
+    // mid-run flush safe — duplicate batches return 200 'duplicate'.
+    try {
+      await __flushStreamBuffer();
+    } catch (err) {
+      console.error('[runner stream] final flush error:', err && err.message);
+    }
+  } else if (process.env.AGENT_PLANE_PLATFORM_URL && process.env.AGENT_PLANE_MESSAGE_TOKEN) {
+    // Legacy single-blob mode: upload the full transcript at the end.
+    // Kept until U10 retirement so non-workflow-backed sessions still
+    // finalize correctly.
     try {
       const { readFileSync } = await import('fs');
       const transcript = readFileSync(transcriptPath);
@@ -846,6 +945,22 @@ export interface SessionSandboxInstance extends SandboxInstance {
     messageToken: string;
     maxTurns: number;
     maxBudgetUsd: number;
+    /**
+     * U3-e: when true, the runner POSTs each NDJSON line incrementally
+     * to /api/internal/messages/:messageId/transcript with
+     * X-Runner-Attempt-Sequence + X-Batch-Sequence headers (and backs
+     * off on HookNotFoundError). Used by the workflow path so the
+     * workflow body's hook iterator receives chunks. When false (the
+     * default for legacy callers), the runner uploads the full
+     * transcript as a single blob at the end. Both modes also write
+     * to the sandbox transcript file for cleanup-cron salvage.
+     */
+    streamPerLine?: boolean;
+    /**
+     * U3-e: monotonic per-run sequence; resets on R6 auto-reissue.
+     * Required when streamPerLine is true. Defaults to 0.
+     */
+    runnerAttemptSequence?: number;
   }): Promise<{ logs: () => AsyncIterable<string> }>;
   extendTimeout(ms: number): Promise<void>;
   writeSessionFile(sdkSessionId: string, content: Buffer): Promise<void>;
@@ -1171,13 +1286,19 @@ function buildSessionSandboxInstance(
         { path: `/vercel/sandbox/${runnerFilename}`, content: Buffer.from(runnerScript) },
       ]);
 
-      const env = {
+      const env: Record<string, string> = {
         ...baseEnv,
         AGENT_PLANE_MESSAGE_ID: opts.messageId,
         // Alias kept for the in-sandbox transcript-<id>.ndjson convention.
         AGENT_PLANE_RUN_ID: opts.messageId,
         AGENT_PLANE_MESSAGE_TOKEN: opts.messageToken,
       };
+      if (opts.streamPerLine) {
+        env.AGENT_PLANE_STREAM_PER_LINE = "on";
+        env.AGENT_PLANE_RUNNER_ATTEMPT_SEQUENCE = String(
+          opts.runnerAttemptSequence ?? 0,
+        );
+      }
 
       const command = await sandbox.runCommand({
         cmd: "node",
@@ -1253,12 +1374,54 @@ export async function reconnectSandbox(sandboxId: string): Promise<SandboxInstan
     const sandbox = await Sandbox.get({ sandboxId });
     return {
       id: sandbox.sandboxId,
-      stop: () => sandbox.stop(),
+      stop: async () => {
+        await sandbox.stop();
+      },
       logs: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: "" }) }) }),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Best-effort transcript salvage from a still-alive sandbox before the
+ * cleanup cron kills it. Used by the watchdog sweeps so users can see what
+ * the runner actually executed — tool calls, partial outputs, errors —
+ * instead of just a "watchdog timed out" stub. Returns the file contents
+ * (NDJSON) or null if the sandbox is gone or the file doesn't exist.
+ *
+ * The Claude SDK runner emits to a fixed `/vercel/sandbox/transcript.ndjson`
+ * (it gets overwritten on each new message); the Vercel AI SDK runner emits
+ * to a per-message `/vercel/sandbox/transcript-<messageId>.ndjson`. We try
+ * both since the cleanup cron typically doesn't have the runner type wired
+ * through.
+ */
+export async function salvageRunnerTranscript(
+  sandboxId: string,
+  messageId: string,
+): Promise<string | null> {
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.get({ sandboxId });
+  } catch {
+    return null;
+  }
+  const candidatePaths = [
+    `/vercel/sandbox/transcript-${messageId}.ndjson`,
+    `/vercel/sandbox/transcript.ndjson`,
+  ];
+  for (const filePath of candidatePaths) {
+    try {
+      const buf = await sandbox.readFileToBuffer({ path: filePath });
+      if (!buf) continue;
+      const content = buf.toString("utf-8");
+      if (content.trim().length > 0) return content;
+    } catch {
+      // file not present — try next candidate
+    }
+  }
+  return null;
 }
 
 /**
@@ -1284,7 +1447,9 @@ export async function reconnectSessionSandboxForBackup(
   return {
     id: sandbox.sandboxId,
     sandboxRef: sandbox,
-    stop: () => sandbox.stop(),
+    stop: async () => {
+      await sandbox.stop();
+    },
     logs: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: "" }) }) }),
     extendTimeout: async (ms: number) => {
       try { await sandbox.extendTimeout(ms); } catch { /* best effort */ }

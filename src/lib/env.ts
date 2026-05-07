@@ -29,6 +29,34 @@ const EnvSchema = z.object({
   // Braintrust (observability)
   BRAINTRUST_API_KEY: z.string().optional(),
 
+  // U0 spike: gates the /api/internal/wdk-spike/* driver routes. Set on
+  // preview deployments only; production should have it unset so the spike
+  // routes 404. The shared secret is required so the spike isn't an open
+  // workflow-run-creation endpoint accessible to anyone who finds the
+  // preview URL.
+  WDK_SPIKE_TOKEN: z.string().optional(),
+
+  // --- U4 dispatch toggles (per-trigger; default off until each entry
+  //     point's migration unit ships and its 48h soak passes).
+  //
+  // Strict on/off — Zod rejects unknown values at parse time so a typo
+  // at deploy fails the build rather than silently disabling. Per-tenant
+  // override via tenants.workflow_dispatch_overrides JSONB is read by
+  // shouldUseWorkflow() and wins over the global toggle. ---
+  WORKFLOW_DISPATCH_API: z.enum(["on", "off"]).default("off"),
+  WORKFLOW_DISPATCH_SCHEDULE: z.enum(["on", "off"]).default("off"),
+  WORKFLOW_DISPATCH_WEBHOOK: z.enum(["on", "off"]).default("off"),
+  WORKFLOW_DISPATCH_A2A: z.enum(["on", "off"]).default("off"),
+  WORKFLOW_DISPATCH_CLEANUP: z.enum(["on", "off"]).default("off"),
+  WORKFLOW_DISPATCH_ADMIN: z.enum(["on", "off"]).default("off"),
+
+  // U10a glass-break: when set to 'on', forces the legacy dispatcher path
+  // even when the matching WORKFLOW_DISPATCH_* toggle is on. One-deploy
+  // revert lever for long-tail workflow regressions discovered after
+  // U10a's retirement merge. Removed in a follow-up cleanup PR roughly
+  // 2 weeks after U10a ships.
+  LEGACY_DISPATCH_GLASS_BREAK: z.enum(["on", "off"]).default("off"),
+
   // Runtime
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
 });

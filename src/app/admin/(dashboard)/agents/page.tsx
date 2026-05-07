@@ -75,7 +75,7 @@ export default async function AgentsPage() {
           <Th>Model</Th>
           <Th>Connectors</Th>
           <Th>Schedule</Th>
-          <Th align="right">Executions</Th>
+          <Th align="right">Runs</Th>
           <Th>Last Message</Th>
           <Th align="right" />
         </AdminTableHead>

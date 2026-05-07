@@ -18,7 +18,12 @@ import {
   A2AError,
 } from "@a2a-js/sdk/server";
 import { getHttpClient } from "@/db";
-import { dispatchSessionMessage, cancelSession } from "@/lib/dispatcher";
+import { cancelSession } from "@/lib/dispatcher";
+import { dispatchOrWorkflowDispatch } from "@/lib/workflows/dispatch-shim";
+import { consumeWorkflowStreamAsA2A } from "@/lib/workflows/render-a2a";
+import { WORKFLOW_RUN_ID_PREFIX } from "@/lib/types";
+import { queryOne as queryOneDb } from "@/db";
+import { z as zodA2a } from "zod";
 import { findSessionByContextId } from "@/lib/sessions";
 import { ConcurrencyLimitError, BudgetExceededError } from "@/lib/errors";
 import type { CallbackData } from "@/lib/mcp";
@@ -641,9 +646,12 @@ export class SandboxAgentExecutor implements AgentExecutor {
       }
 
       // --- Dispatch via the unified chokepoint ---
+      // U9: dispatchOrWorkflowDispatch picks workflow vs legacy based on
+      // shouldUseWorkflow('a2a', tenantId) AND the by-row coexistence
+      // rule (existing sessions stay on whichever path they started).
       let dispatch;
       try {
-        dispatch = await dispatchSessionMessage({
+        dispatch = await dispatchOrWorkflowDispatch({
           tenantId,
           agentId: agent.id as AgentId,
           sessionId: reuseSessionId,
@@ -692,10 +700,32 @@ export class SandboxAgentExecutor implements AgentExecutor {
         final: false,
       } as TaskStatusUpdateEvent);
 
-      // Drain the dispatcher's NDJSON stream — pull events, surface assistant
-      // text + result artifacts on the A2A bus, and let finalize hooks run.
-      const lineIterator = ndjsonLines(dispatch.stream);
-      await consumeA2aLogStream(lineIterator, eventBus, liveTaskId, effectiveContextId);
+      // U9: Pick the stream-consumption shape based on whether the dispatch
+      // landed on the workflow path. If session.workflow_run_id was just
+      // set by the workflow's reserve step, consume via consumeWorkflowStreamAsA2A
+      // (reads durable WDK stream with getTailIndex bounding); else use
+      // the legacy NDJSON line iterator from dispatch.stream.
+      const sessionRunIdRow = await queryOneDb(
+        zodA2a.object({ workflow_run_id: zodA2a.string().nullable() }),
+        "SELECT workflow_run_id FROM sessions WHERE id = $1 AND tenant_id = $2",
+        [dispatch.sessionId, this.deps.tenantId],
+      );
+      const workflowRunId = sessionRunIdRow?.workflow_run_id ?? null;
+
+      if (workflowRunId && workflowRunId.startsWith(WORKFLOW_RUN_ID_PREFIX)) {
+        const rawRunId = workflowRunId.slice(WORKFLOW_RUN_ID_PREFIX.length);
+        await consumeWorkflowStreamAsA2A({
+          runId: rawRunId,
+          eventBus,
+          taskId: liveTaskId,
+          contextId: effectiveContextId,
+        });
+      } else {
+        // Drain the legacy dispatcher's NDJSON stream — pull events, surface
+        // assistant text + result artifacts on the A2A bus.
+        const lineIterator = ndjsonLines(dispatch.stream);
+        await consumeA2aLogStream(lineIterator, eventBus, liveTaskId, effectiveContextId);
+      }
 
       // Read the finalized message status to emit the final A2A event with
       // the correct terminal state.

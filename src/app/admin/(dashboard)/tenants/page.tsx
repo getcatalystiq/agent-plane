@@ -45,7 +45,7 @@ export default async function TenantsPage() {
           <Th align="right">Budget</Th>
           <Th align="right">Spend</Th>
           <Th align="right">Agents</Th>
-          <Th align="right">Executions</Th>
+          <Th align="right">Runs</Th>
           <Th>Created</Th>
         </AdminTableHead>
         <tbody>

@@ -130,7 +130,7 @@ export function ExecutionCharts({ stats }: { stats: DailyAgentStat[] }) {
   return (
     <div className="grid grid-cols-2 gap-4">
       <AgentLineChart
-        title="Executions per day"
+        title="Runs per day"
         data={execData}
         agents={execAgents}
         valueFormatter={(v) => String(Math.round(v))}

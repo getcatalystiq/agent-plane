@@ -69,7 +69,12 @@ import {
 import type { TenantId, AgentId, RunTriggeredBy, WebhookSourceId } from "@/lib/types";
 
 const DEFAULT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-const MCP_REFRESH_TTL_MS = 30 * 60 * 1000;
+// OPT #2 — tighten the MCP-fresh window from 30min to 5min so individual
+// short-lived OAuth tokens can't expire silently inside the warm-cache skip
+// path. The warm-cache hit branch (below) uses this gate to skip both the
+// `buildMcpConfig` round-trip AND the `updateMcpConfig` injection — relying
+// on the previously-injected MCP config the sandbox already has on disk.
+const MCP_REFRESH_TTL_MS = 5 * 60 * 1000;
 
 const EMPTY_PLUGINS: PluginFileSet = { skillFiles: [], agentFiles: [], warnings: [] };
 
@@ -203,7 +208,7 @@ export interface DispatchResult {
   response: () => Response;
 }
 
-interface PreparedExecution {
+export interface PreparedExecution {
   session: Session;
   agent: AgentInternal;
   messageId: string;
@@ -321,10 +326,31 @@ export async function dispatchSessionMessage(input: DispatchInput): Promise<Disp
  *  - `active`    → Mark active message `cancelled`, stop sandbox, CAS to `stopped`.
  *  - `idle`      → CAS to `stopped`, drop sandbox if any.
  *  - `stopped`   → Idempotent no-op; returns the existing row.
+ *
+ * **U5 — workflow-aware cancellation (SEC-001 hardening).** When the session
+ * has a non-null `workflow_run_id`, this function additionally signals the
+ * workflow run to cancel via `getRun(runId).cancel()`. Tenant ownership is
+ * verified by `getSession`'s tenant-scoped DB read BEFORE the WDK call —
+ * cross-tenant taskId attempts return NotFoundError (via getSession) and
+ * never reach WDK, even though WDK runIds are not tenant-scoped at the
+ * SDK level.
  */
 export async function cancelSession(sessionId: string, tenantId: TenantId): Promise<Session> {
   const session = await getSession(sessionId, tenantId);
   if (session.status === "stopped") return session;
+
+  // U5 — signal the workflow run if this session is workflow-backed. Done
+  // BEFORE the legacy DB CAS so the workflow's catch path can salvage
+  // and finalize naturally. The legacy DB CAS below is preserved as a
+  // belt-and-suspenders fallback (and for legacy sessions).
+  if (session.workflow_run_id) {
+    const cancelled = await cancelWorkflowRun(session.workflow_run_id, sessionId, tenantId);
+    if (cancelled) {
+      // Workflow's finalize step will run salvage-before-stop ordering and
+      // CAS the message + session through. Fall through to the DB CAS
+      // below for atomic visibility — both paths converge on `stopped`.
+    }
+  }
 
   // FIX #9 (partial): if a sandbox boot is in flight for this session, fire
   // its abort signal. The sandbox SDK call doesn't yet honor the signal
@@ -377,7 +403,20 @@ export async function cancelSession(sessionId: string, tenantId: TenantId): Prom
 // Internals
 // ---------------------------------------------------------------------------
 
-async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedExecution> {
+/**
+ * Reserve a session + message row for an incoming dispatch.
+ *
+ * Resolves or creates the session, atomically claims the active slot via
+ * CAS, runs budget + concurrency checks, and appends the `running`
+ * session_messages row in a single tenant-scoped transaction. Returns
+ * the prepared execution context for the streaming pipeline (or, in U2's
+ * workflow path, for the workflow's `reserve` step).
+ *
+ * Exported for U2: the `dispatchWorkflow`'s `reserve` step delegates to
+ * this body unchanged. Behavior is identical to the legacy dispatch
+ * path so characterization parity holds.
+ */
+export async function reserveSessionAndMessage(input: DispatchInput): Promise<PreparedExecution> {
   return withTenantTransaction(input.tenantId, async (tx) => {
     // FIX #3 (adv-001): TOCTOU-safe concurrency cap via tx-scoped advisory
     // lock keyed on tenant_id. The lock auto-releases on commit/rollback.
@@ -549,17 +588,52 @@ async function runMessageStream(
   // Spawn sandbox + builds in parallel (hot path — same shape as legacy
   // session-executor.prepareSessionSandbox).
   const effectiveRunner = resolveEffectiveRunner(agent.model, agent.runner);
-  const skipPluginRefresh = !!session.sandbox_id && isMcpFresh(session);
+  const mcpFresh = isMcpFresh(session);
+  const skipPluginRefresh = !!session.sandbox_id && mcpFresh;
+  // OPT #2 — when the session is warm AND inside the MCP_REFRESH_TTL_MS (5min)
+  // window we skip `buildMcpConfig` entirely on the warm-cache hit branch and
+  // on the disk-reconnect branch. The cache-miss/cold paths still rebuild.
+  // We compute `cachedHandleHit` upfront so we know whether the warm-cache
+  // branch is going to be taken (it depends on session.sandbox_id matching the
+  // cached entry's id and freshness; the eligibility check is duplicated below
+  // and stays the source of truth).
+  const cachedHandle = session.sandbox_id ? activeSessions.get(session.id) : undefined;
+  const cachedHandleHit =
+    !!cachedHandle &&
+    Date.now() - cachedHandle.lastTouchedMs < SANDBOX_HANDLE_FRESHNESS_MS &&
+    cachedHandle.instance.id === session.sandbox_id;
+  const skipMcpBuild = !!session.sandbox_id && mcpFresh && cachedHandleHit;
+  if (skipMcpBuild) {
+    logger.info("dispatcher: mcp refresh skipped", {
+      session_id: session.id,
+      tenant_id: input.tenantId,
+      reason: "warm_cache_fresh",
+    });
+  }
   // buildMcpConfig touches RLS-protected tables (agents UPDATE, mcp_connections
   // SELECT) — must run inside a tenant-scoped transaction so app.current_tenant_id
   // is set. Otherwise the agent UPDATE silently writes 0 rows and Composio MCP
   // never wires up.
-  const mcpPromise = withTenantTransaction(input.tenantId, () =>
-    buildMcpConfig(agent, input.tenantId),
-  );
-  const pluginPromise = skipPluginRefresh
+  const EMPTY_MCP: McpBuildResult = { servers: {}, errors: [] };
+  const mcpPromise: Promise<McpBuildResult> = skipMcpBuild
+    ? Promise.resolve(EMPTY_MCP)
+    : withTenantTransaction(input.tenantId, () => buildMcpConfig(agent, input.tenantId));
+  // OPT #3 — kick off plugin fetch as early as possible so its latency overlaps
+  // with whatever sandbox-provisioning work follows. `fetchPluginContent([])`
+  // is a no-op fast path inside @/lib/plugins, so the empty-plugins case stays
+  // cheap. Timing log lets us verify the overlap in production logs.
+  const pluginFetchStart = Date.now();
+  const pluginPromise: Promise<PluginFileSet> = skipPluginRefresh
     ? Promise.resolve(EMPTY_PLUGINS)
-    : fetchPluginContent(agent.plugins ?? []);
+    : fetchPluginContent(agent.plugins ?? []).then((result) => {
+        logger.info("dispatcher: plugin fetch complete", {
+          session_id: session.id,
+          tenant_id: input.tenantId,
+          duration_ms: Date.now() - pluginFetchStart,
+          plugin_count: agent.plugins?.length ?? 0,
+        });
+        return result;
+      });
   const authPromise = resolveSandboxAuth(input.tenantId, effectiveRunner);
 
   let sandbox: SessionSandboxInstance;
@@ -572,14 +646,10 @@ async function runMessageStream(
 
   if (session.sandbox_id) {
     // OPTIMIZATION A — hot-path cache check. Same-isolate back-to-back
-    // messages skip the `Sandbox.get()` RPC entirely. We still need to wire
-    // fresh MCP servers (tokens may have rotated since the last touch).
-    const cachedHandle = activeSessions.get(session.id);
-    if (
-      cachedHandle &&
-      Date.now() - cachedHandle.lastTouchedMs < SANDBOX_HANDLE_FRESHNESS_MS &&
-      cachedHandle.instance.id === session.sandbox_id
-    ) {
+    // messages skip the `Sandbox.get()` RPC entirely. The eligibility booleans
+    // were precomputed above (`cachedHandle`, `cachedHandleHit`) so the MCP
+    // build promise already knows whether to short-circuit.
+    if (cachedHandleHit && cachedHandle) {
       const [mcpResult, pluginResult, auth] = await Promise.all([
         mcpPromise,
         pluginPromise,
@@ -591,20 +661,32 @@ async function runMessageStream(
       void pluginResult;
       void auth;
 
-      if (Object.keys(mcpResult.servers).length > 0) {
-        cachedHandle.instance.updateMcpConfig(mcpResult.servers, mcpResult.errors);
+      // OPT #2 — when `skipMcpBuild` was true, mcpResult is the EMPTY_MCP
+      // sentinel and the sandbox already holds the previously-injected MCP
+      // config. Skip both `updateMcpConfig` AND `recordMcpRefresh` so we don't
+      // bump the session's mcp_refreshed_at on a non-refresh.
+      if (!skipMcpBuild) {
+        if (Object.keys(mcpResult.servers).length > 0) {
+          cachedHandle.instance.updateMcpConfig(mcpResult.servers, mcpResult.errors);
+        }
+        recordMcpRefresh(session.id, input.tenantId);
       }
       cachedHandle.lastTouchedMs = Date.now();
       // Re-insert to push to LRU tail.
       activeSessions.delete(session.id);
       activeSessions.set(session.id, cachedHandle);
-      recordMcpRefresh(session.id, input.tenantId);
       sandbox = cachedHandle.instance;
     } else {
       // Cache miss / stale entry — fall through to DB-backed reconnect.
       // (Drop stale entries proactively so we never pick them up later.)
       if (cachedHandle) activeSessions.delete(session.id);
 
+      // Disk-reconnect branch always rebuilds MCP. `reconnectSessionSandbox`
+      // constructs a fresh SessionSandboxInstance wrapper on every call —
+      // MCP config lives on the wrapper, not on the underlying Vercel Sandbox,
+      // so a previous-message wrapper's state does not survive the new wrap.
+      // (The warm-cache hit branch above CAN skip the rebuild because it
+      // reuses the same wrapper instance.)
       // Reconnect path: race reconnect against MCP/plugin fetch.
       const auth = await authPromise;
       const [reconnectResult, mcpResult, pluginResult] = await Promise.all([
@@ -642,7 +724,7 @@ async function runMessageStream(
       } else {
         // Sandbox went missing — drop any cached handle (it's dead) and cold start.
         activeSessions.delete(session.id);
-        sandbox = await coldStartSandbox({
+        sandbox = (await coldStartSandbox({
           agent,
           tenantId: input.tenantId,
           sessionId: session.id,
@@ -656,7 +738,7 @@ async function runMessageStream(
           callbackData: input.callbackData,
           effectiveBudget,
           effectiveMaxTurns,
-        });
+        })).sandbox;
         // NOTE: do NOT cache cold-start sandboxes here; the DB row will be
         // updated by coldStartSandbox and the next message will reconnect
         // through the normal path (which DOES cache after success).
@@ -665,7 +747,7 @@ async function runMessageStream(
   } else {
     // Cold path: pure new-sandbox.
     const [mcpResult, pluginResult, auth] = await Promise.all([mcpPromise, pluginPromise, authPromise]);
-    sandbox = await coldStartSandbox({
+    sandbox = (await coldStartSandbox({
       agent,
       tenantId: input.tenantId,
       sessionId: session.id,
@@ -679,7 +761,7 @@ async function runMessageStream(
       callbackData: input.callbackData,
       effectiveBudget,
       effectiveMaxTurns,
-    });
+    })).sandbox;
   }
 
   // Sandbox is up; we no longer need the boot abort controller for this session.
@@ -761,19 +843,46 @@ async function runMessageStream(
 
   let detached = false;
   async function* streamWithFinalize() {
-    for await (const line of logIterator) {
-      yield line;
+    let finalized = false;
+    const runFinalize = async () => {
+      if (finalized || detached) return;
+      finalized = true;
+      try {
+        await finalizeMessage({
+          messageId,
+          tenantId: input.tenantId,
+          session,
+          sandbox,
+          sdkSessionId: sdkSessionIdRef.value,
+          transcriptChunks,
+          effectiveBudget,
+        });
+      } catch (err) {
+        logger.error("streamWithFinalize: finalize threw, giving up", {
+          message_id: messageId,
+          session_id: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
+    try {
+      for await (const line of logIterator) {
+        yield line;
+      }
+      // Normal end-of-stream finalization. Run inside try so `finally` won't
+      // double-fire (the `finalized` guard is the source of truth).
+      await runFinalize();
+    } finally {
+      // Iterator errored, generator was abandoned mid-stream, or consumer
+      // called `.return()`. Without this, an iterator throw before the
+      // post-loop `runFinalize` swallows the message in `running` — the
+      // streaming.ts catch closes the controller cleanly so the consumer
+      // sees `{ done: true }`, the schedule cron's drain exits normally, and
+      // the message is only rescued by the outer `schedule_no_terminal_event`
+      // fallback. Finalize-via-finally narrows that to a real bug instead of
+      // the common path.
+      await runFinalize();
     }
-    if (detached) return;
-    await finalizeMessage({
-      messageId,
-      tenantId: input.tenantId,
-      session,
-      sandbox,
-      sdkSessionId: sdkSessionIdRef.value,
-      transcriptChunks,
-      effectiveBudget,
-    });
   }
 
   return createNdjsonStream({
@@ -799,7 +908,7 @@ async function runMessageStream(
   });
 }
 
-interface ColdStartArgs {
+export interface ColdStartArgs {
   agent: AgentInternal;
   tenantId: TenantId;
   sessionId: string;
@@ -815,7 +924,29 @@ interface ColdStartArgs {
   effectiveMaxTurns: number;
 }
 
-async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSandboxInstance> {
+/**
+ * Provision a fresh sandbox for a session (cold-start path).
+ *
+ * Restores the SDK session blob backup if present so a stopped session
+ * can resume conversation history. Records the sandbox id on the session
+ * row + bumps the MCP refresh timestamp.
+ *
+ * Exported for U2: the `dispatchWorkflow`'s `ensureSandbox` step calls
+ * this body when no warm handle exists for the session.
+ */
+export interface ColdStartResult {
+  sandbox: SessionSandboxInstance;
+  /**
+   * The serializable POJO config used to provision the sandbox, returned so
+   * that callers crossing serialization boundaries (the WDK workflow) can
+   * later `reconnectSessionSandbox(sandboxId, sandboxConfig)` without having
+   * to reconstruct it. The legacy in-process dispatcher path ignores this
+   * field — only `sandbox` is needed there.
+   */
+  sandboxConfig: SessionSandboxConfig;
+}
+
+export async function coldStartSandbox(args: ColdStartArgs): Promise<ColdStartResult> {
   if (args.mcpResult.errors.length > 0) {
     logger.warn("MCP config errors for session", {
       session_id: args.sessionId,
@@ -843,10 +974,10 @@ async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSandboxInst
   if (args.sdkSessionId && args.sessionBlobUrl) {
     await restoreSessionFile(sandbox, args.sessionBlobUrl, args.sdkSessionId);
   }
-  return sandbox;
+  return { sandbox, sandboxConfig };
 }
 
-interface FinalizeArgs {
+export interface FinalizeArgs {
   messageId: string;
   tenantId: TenantId;
   session: Session;
@@ -869,8 +1000,12 @@ interface FinalizeArgs {
  *
  * Idempotency: short-circuits if the runner-driven internal-upload route
  * already finalized the message (status != 'running').
+ *
+ * Exported so the U2 characterization test suite (and U2's workflow steps,
+ * which delegate to this body) can pin its behavior without re-implementing
+ * the legacy lifecycle.
  */
-async function finalizeMessage(args: FinalizeArgs): Promise<void> {
+export async function finalizeMessage(args: FinalizeArgs): Promise<void> {
   const { messageId, tenantId, session, sandbox, sdkSessionId, transcriptChunks, effectiveBudget } = args;
 
   try {
@@ -899,6 +1034,24 @@ async function finalizeMessage(args: FinalizeArgs): Promise<void> {
         },
         { expectedMaxBudgetUsd: effectiveBudget },
       );
+    } else if (!alreadyFinalized && transcriptChunks.length === 0) {
+      // The stream closed without any non-text_delta events from the runner —
+      // typically a sandbox spawn that exited before emitting `session_info`,
+      // or a runner that crashed before its first non-text_delta yield. There
+      // is no transcript to upload; mark the message failed so the schedule
+      // cron's outer `schedule_no_terminal_event` fallback isn't doing
+      // double-duty for this dispatcher gap.
+      logger.warn("finalizeMessage: stream closed with empty transcript", {
+        message_id: messageId,
+        session_id: session.id,
+      });
+      await transitionMessageStatus(messageId, tenantId, "running", "failed", {
+        completed_at: new Date().toISOString(),
+        error_type: "empty_stream",
+        error_messages: [
+          "Runner produced no non-text_delta events before the stream closed.",
+        ],
+      });
     } else if (alreadyFinalized) {
       logger.info("finalizeMessage: runner already finalized message, skipping", {
         message_id: messageId,
@@ -940,7 +1093,7 @@ async function finalizeMessage(args: FinalizeArgs): Promise<void> {
   }
 }
 
-interface SessionTailArgs {
+export interface SessionTailArgs {
   sessionId: string;
   tenantId: TenantId;
   sandbox: SessionSandboxInstance;
@@ -948,7 +1101,16 @@ interface SessionTailArgs {
   ephemeral: boolean;
 }
 
-async function sessionTail(args: SessionTailArgs): Promise<void> {
+/**
+ * Session-tail transitions after a message reaches a terminal state.
+ *
+ * Persistent: backupSessionFile + transition active→idle (with
+ * session_blob_url + sdk_session_id persisted). Ephemeral: casToStopped
+ * + sandbox.stop + invalidateSandboxHandle.
+ *
+ * Exported for U2: the `dispatchWorkflow`'s `tail` step delegates here.
+ */
+export async function sessionTail(args: SessionTailArgs): Promise<void> {
   const { sessionId, tenantId, sandbox, sdkSessionId, ephemeral } = args;
 
   await incrementMessageCount(sessionId, tenantId);
@@ -997,6 +1159,55 @@ async function sessionTail(args: SessionTailArgs): Promise<void> {
           : {}),
       },
     );
+  }
+}
+
+/**
+ * Cancel the WDK workflow run for a session, if one is registered.
+ *
+ * Tenant ownership is verified by the caller's prior `getSession` —
+ * this function takes the (already-validated) workflow_run_id and only
+ * fires the `getRun(runId).cancel()` call. If WDK throws (run already
+ * terminal, runId stale, runtime hiccup), we log + return false so the
+ * caller's legacy DB CAS path can still drive the session to `stopped`.
+ *
+ * Imported lazily to avoid pulling the `workflow/api` runtime into
+ * code paths that never touch workflow-backed sessions.
+ */
+async function cancelWorkflowRun(
+  prefixedRunId: string,
+  sessionId: string,
+  tenantId: TenantId,
+): Promise<boolean> {
+  const PREFIX = "wdk_v1_";
+  if (!prefixedRunId.startsWith(PREFIX)) {
+    logger.warn("cancelWorkflowRun: unexpected runId format; skipping WDK call", {
+      session_id: sessionId,
+      tenant_id: tenantId,
+      stored_run_id: prefixedRunId,
+    });
+    return false;
+  }
+  const rawRunId = prefixedRunId.slice(PREFIX.length);
+  try {
+    const { getRun } = await import("workflow/api");
+    await getRun(rawRunId).cancel();
+    logger.info("cancelSession: workflow run cancelled", {
+      session_id: sessionId,
+      tenant_id: tenantId,
+      run_id: rawRunId,
+    });
+    return true;
+  } catch (err) {
+    // Known-OK errors: run already terminal, runId stale (post-rollback).
+    // Log + fall through; the legacy CAS path will drive the row to stopped.
+    logger.warn("cancelSession: workflow cancel failed (best-effort)", {
+      session_id: sessionId,
+      tenant_id: tenantId,
+      run_id: rawRunId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
   }
 }
 

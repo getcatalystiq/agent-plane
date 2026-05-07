@@ -13,8 +13,17 @@ export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ marketplaceId: string }> };
 
+const UuidSchema = z.string().uuid();
+
+function ensureUuid(id: string) {
+  if (!UuidSchema.safeParse(id).success) {
+    throw new NotFoundError("Plugin marketplace not found");
+  }
+}
+
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const { marketplaceId } = await (context as RouteContext).params;
+  ensureUuid(marketplaceId);
   const tenantId = request.nextUrl.searchParams.get("tenant_id");
 
   let marketplace;
@@ -38,6 +47,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
 
 export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   const { marketplaceId } = await (context as RouteContext).params;
+  ensureUuid(marketplaceId);
   const tenantId = request.nextUrl.searchParams.get("tenant_id");
 
   let marketplace;
@@ -101,6 +111,7 @@ const AgentRefCount = z.object({ count: z.coerce.number() });
 
 export const DELETE = withErrorHandler(async (request: NextRequest, context) => {
   const { marketplaceId } = await (context as RouteContext).params;
+  ensureUuid(marketplaceId);
   const tenantId = request.nextUrl.searchParams.get("tenant_id");
 
   // Verify marketplace exists (and optionally belongs to tenant)
