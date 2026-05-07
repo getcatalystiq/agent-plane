@@ -195,6 +195,179 @@ The cleanup-sessions cron runs every 5 min; sweeps surface in the
 structured log line `chat_event_dedupe sweep` (with
 `stale_placeholders_deleted` + `expired_filled_deleted` counters).
 
+## Cutover deployment (rounds 5–6)
+
+Migrations 038 + 039 land alongside the round-5/6 workflow refactors.
+This section is the Go/No-Go checklist; pair it with "Migration 037
+deploy gate" above when 037 has not yet shipped on the target
+environment.
+
+### Pre-deploy gates (read-only)
+
+```sql
+-- (a) Confirm 038/039 not yet applied (exit if these return rows).
+SELECT 1 FROM information_schema.columns
+ WHERE table_name='tenants' AND column_name='bot_platform_caps';
+SELECT 1 FROM information_schema.columns
+ WHERE table_name='chat_event_dedupe' AND column_name='steal_attempts';
+SELECT conname FROM pg_constraint
+ WHERE conrelid='tenants'::regclass AND conname='bot_platform_caps_shape_valid';
+
+-- (b) Snapshot tenant + bot baselines for post-deploy comparison.
+SELECT COUNT(*) AS tenants_total FROM tenants;
+SELECT platform, COUNT(*) FILTER (WHERE enabled) AS enabled_count
+  FROM platform_bot_configs GROUP BY platform;
+
+-- (c) CRITICAL — confirm no in-flight chat workflow is mid-step.
+-- Round-6 changes the partial-state shape. If non-zero AND not all
+-- sweep-eligible, wait one cleanup cycle (5–15 min) before deploying.
+SELECT COUNT(*) AS pre_deploy_partials,
+       COUNT(*) FILTER (WHERE claimed_at < now() - INTERVAL '15 minutes')
+         AS sweep_eligible
+  FROM chat_event_dedupe
+ WHERE inner_run_id IS NULL
+   AND (session_id IS NOT NULL OR message_id IS NOT NULL);
+
+-- (d) Confirm no tenant currently exceeds the 10-bot platform cap
+-- (round-5 #1 cap is hardcoded default; tenants beyond it will be
+-- blocked from new connects post-deploy). If any: notify the tenant
+-- before deploy or set tenants.bot_platform_caps after migration 038
+-- applies.
+SELECT tenant_id, platform, COUNT(*) AS enabled_count
+  FROM platform_bot_configs
+ WHERE enabled = true
+ GROUP BY tenant_id, platform
+HAVING COUNT(*) > 10
+ ORDER BY enabled_count DESC;
+```
+
+### Deploy
+
+1. Push commit; Vercel build runs `npm run migrate` automatically.
+2. Watch build logs for `apply 038_tenant_bot_caps.sql` and
+   `apply 039_bot_platform_caps_check.sql`. Migration 039's CHECK
+   constraint validates every existing row — if any tenant has
+   pre-existing corrupt JSONB in `bot_platform_caps` (no API path
+   writes today, so this is a defensive fail) the migration aborts
+   the deploy.
+3. If a checksum mismatch fires on 037 (round-5 follow-up), set
+   `MIGRATIONS_RECONCILE_CHECKSUMS=true` in the Vercel project env
+   for THIS deploy only, redeploy, then **unset** immediately after.
+
+### Post-deploy verification (within 5 minutes)
+
+```sql
+-- (a) Schema converged.
+SELECT column_name, is_nullable, data_type
+  FROM information_schema.columns
+ WHERE (table_name='tenants' AND column_name='bot_platform_caps')
+    OR (table_name='chat_event_dedupe' AND column_name='steal_attempts');
+-- Expected: bot_platform_caps | YES | jsonb
+--           steal_attempts    | NO  | integer
+
+-- (b) bot_platform_caps NULL on all existing tenants (no override yet).
+SELECT COUNT(*) FILTER (WHERE bot_platform_caps IS NOT NULL)
+         AS overrides_set
+  FROM tenants;
+-- Expected: 0 (operator may set per-tenant overrides later via SQL).
+
+-- (c) steal_attempts populated with default 0.
+SELECT COUNT(*) FILTER (WHERE steal_attempts IS NULL) AS null_count,
+       MAX(steal_attempts) AS max_attempts
+  FROM chat_event_dedupe;
+-- Expected: null_count=0, max_attempts=0 immediately post-deploy.
+
+-- (d) Bot count per platform unchanged from baseline.
+SELECT platform, COUNT(*) FILTER (WHERE enabled) AS enabled_count
+  FROM platform_bot_configs GROUP BY platform;
+```
+
+### Smoke tests (post-deploy, manual)
+
+- Send a real chat-bot mention end-to-end. Confirm reply lands and
+  `chat_event_dedupe` row reaches `inner_run_id IS NOT NULL` within
+  a few seconds. Confirm `steal_attempts = 0`.
+- Attempt to connect a Discord bot at exactly the cap (10 by default).
+  Admin UI shows: *"You're at 10/10 discord bots — disable one in the
+  list above before connecting another."* HTTP body includes
+  `error.code = "tenant_bot_cap_exceeded"`, `error.platform`,
+  `error.limit`.
+- Override one tenant via `UPDATE tenants SET bot_platform_caps =
+  '{"discord": 25}'::jsonb WHERE id = '<tenant>'` and confirm next
+  connect succeeds past 10.
+
+### 24-hour monitoring
+
+Search Vercel structured logs for these new round-5/6 lines:
+
+| Log line | Severity | Healthy threshold |
+|---|---|---|
+| `chatDispatchWorkflow: continuing with orphan placeholder` | warn | < 1/h sustained |
+| `claim recovery abandoned after circuit-breaker threshold` | error | 0; > 0 → page |
+| `markBotErrorStep: failed to write last_error` | error | 0; DB write availability concern |
+| `finalizeChatStep: failed to write last_event` | error | 0; same as above |
+| `startInnerDispatchStep: failed to fill inner_run_id after retries; placeholder orphaned` | error | < 1/h; > 0 sustained → investigate Neon connectivity |
+| `stole stale claim; promoting to new winner` | warn | < 1/h; spike → cold-sandbox tail exceeding 90s threshold |
+| `chat_event_dedupe sweep` | info | every 5 min when non-zero |
+
+SQL spot-checks at +1h / +4h / +24h:
+
+```sql
+-- Steal-attempt distribution. MAX should never exceed 6
+-- (5 = circuit-breaker threshold; 6 = the increment that trips it).
+SELECT MAX(steal_attempts) AS max_attempts,
+       COUNT(*) FILTER (WHERE steal_attempts > 5) AS abandoned_rows
+  FROM chat_event_dedupe;
+-- Expected: max_attempts ≤ 6, abandoned_rows = 0 in steady state.
+
+-- Round-6 partial-state — sweep_overdue MUST be 0.
+SELECT COUNT(*) FILTER (WHERE claimed_at <  now() - INTERVAL '15 minutes')
+         AS sweep_overdue
+  FROM chat_event_dedupe
+ WHERE session_id IS NOT NULL AND message_id IS NOT NULL
+   AND inner_run_id IS NULL;
+-- Expected: 0. Non-zero means cleanup cron is broken or backlogged.
+```
+
+### Rollback
+
+Both 038 and 039 are forward-only and additive. Code rollback is
+always safe (round-5 code reads the new columns through optional
+fallbacks; reverting to round-4 ignores them). Schema rollback is
+two-stage:
+
+**Stage A** — code revert (preferred):
+```bash
+git revert c00dcd8..HEAD   # or redeploy the prior round-4 commit
+```
+Schema unchanged. Behavior reverts. Any tenant that set a
+`bot_platform_caps` override before the revert silently loses the
+override (the column is still there, just unread); coordinate with
+affected tenants first.
+
+**Stage B** — drop columns (only if Stage A doesn't resolve):
+```sql
+-- After Stage A is live and stable:
+ALTER TABLE tenants
+  DROP CONSTRAINT IF EXISTS bot_platform_caps_shape_valid,
+  DROP COLUMN IF EXISTS bot_platform_caps;
+ALTER TABLE chat_event_dedupe DROP COLUMN IF EXISTS steal_attempts;
+-- Then update _migrations to mark 038/039 rolled back.
+```
+
+**Round-6 partial-state caveat**: the 2-stage placeholder fill
+produces dedupe rows shaped (session_id+message_id NOT NULL,
+inner_run_id NULL) that are LEGAL under round-6 but look like
+corruption under round-4. Before reverting code:
+
+1. Pause chat ingress (disable affected `platform_bot_configs.enabled`).
+2. Wait ≥ 15 min for the cleanup-sessions sweep to reap any in-flight
+   partial rows.
+3. Confirm: `SELECT COUNT(*) FROM chat_event_dedupe WHERE session_id
+   IS NOT NULL AND message_id IS NOT NULL AND inner_run_id IS NULL;`
+   must be 0.
+4. Revert code; re-enable bots.
+
 ## Telemetry
 
 Counters emitted as structured logs (Vercel Logs query: `metric_name=...`):
