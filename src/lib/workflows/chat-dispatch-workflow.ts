@@ -507,6 +507,20 @@ async function startInnerDispatchStep(
     );
   });
 
+  // DIAG: log immediately before + after start() so we can correlate
+  // the inner runId in Vercel logs and confirm the inner workflow's
+  // first step actually fires. The chat path has been observed to
+  // produce no /.well-known/workflow/v1/flow POST for the inner run
+  // even though start() resolves successfully — narrowing whether the
+  // bug is inside start() or downstream (subscription / step replay).
+  logger.info("startInnerDispatchStep: calling start(dispatchWorkflow)", {
+    tenant_id: input.tenantId,
+    agent_id: input.agentId,
+    platform: input.platform,
+    event_id: input.eventId,
+    session_id: prepared.session.id,
+    message_id: prepared.messageId,
+  });
   const run = await start(
     dispatchWorkflow as unknown as (
       input: DispatchInput,
@@ -514,6 +528,15 @@ async function startInnerDispatchStep(
     ) => Promise<DispatchWorkflowOutput>,
     [dispatchInput, prepared],
   );
+  logger.info("startInnerDispatchStep: start(dispatchWorkflow) returned", {
+    tenant_id: input.tenantId,
+    agent_id: input.agentId,
+    platform: input.platform,
+    event_id: input.eventId,
+    session_id: prepared.session.id,
+    message_id: prepared.messageId,
+    inner_run_id: run.runId,
+  });
 
   const filled = await retryPlaceholderInnerRunUpdate(input, run.runId);
   return filled

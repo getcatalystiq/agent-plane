@@ -237,9 +237,26 @@ export async function prepareSandboxAndLaunchStep(
   runId: string,
 ): Promise<SandboxRef> {
   "use step";
+  // DIAG: first thing the inner workflow's first step does is log so
+  // we can correlate by run_id. If chat path's start() schedules the
+  // inner run but this log never fires, the inner is hanging before
+  // step entry (bug is in WDK scheduling, not in our step body). If
+  // it does fire, the bug is inside the step's actual work.
+  logger.info("prepareSandboxAndLaunchStep: entered", {
+    run_id: runId,
+    triggered_by: input.triggeredBy,
+    session_id: prepared.session.id,
+    message_id: prepared.messageId,
+  });
   await setWorkflowRunId(prepared.session.id, input.tenantId, `wdk_v1_${runId}`);
   const sandboxRef = await ensureSandboxImpl(input, prepared);
   await launchRunnerImpl(input, prepared, sandboxRef);
+  logger.info("prepareSandboxAndLaunchStep: complete", {
+    run_id: runId,
+    triggered_by: input.triggeredBy,
+    session_id: prepared.session.id,
+    sandbox_id: sandboxRef.sandboxId,
+  });
   return sandboxRef;
 }
 
