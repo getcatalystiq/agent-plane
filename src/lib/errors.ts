@@ -54,6 +54,20 @@ export class ValidationError extends AppError {
   }
 }
 
+/**
+ * Thrown when the prompt-injection scanner blocks a dispatch (enforce mode +
+ * external trigger + high confidence) or a write-time gate (always-enforce on
+ * high confidence). The message and code are constants — the constructor
+ * deliberately does not accept patterns or confidence so those details cannot
+ * leak into the response body. Pattern data routes to structured logs and
+ * persisted audit columns only.
+ */
+export class PromptRejectedError extends AppError {
+  constructor(message = "Prompt rejected by safety check") {
+    super("prompt_rejected", 400, message);
+  }
+}
+
 export class ConflictError extends AppError {
   constructor(message: string) {
     super("conflict", 409, message);

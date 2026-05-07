@@ -9,6 +9,7 @@ import {
   ValidationError,
   ConflictError,
   RateLimitError,
+  PromptRejectedError,
 } from "@/lib/errors";
 
 describe("Error Hierarchy", () => {
@@ -75,5 +76,47 @@ describe("Error Hierarchy", () => {
     const err = new RateLimitError(60);
     expect(err.statusCode).toBe(429);
     expect(err.code).toBe("rate_limited");
+  });
+
+  describe("PromptRejectedError", () => {
+    it("has 400 status and prompt_rejected code", () => {
+      const err = new PromptRejectedError();
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("prompt_rejected");
+    });
+
+    it("defaults to a constant safety-check message", () => {
+      const err = new PromptRejectedError();
+      expect(err.message).toBe("Prompt rejected by safety check");
+    });
+
+    it("accepts an optional message override but no pattern/confidence args", () => {
+      const err = new PromptRejectedError("custom");
+      expect(err.message).toBe("custom");
+      // The constructor signature does not accept extra args; this is the
+      // structural guarantee that pattern names cannot leak into the body.
+      // Function.length is 0 because `message` has a default value — only
+      // *required* params count toward .length. The shape we care about is
+      // "no second positional argument exists."
+      // @ts-expect-error — verify a second arg is rejected by TS at compile time
+      const err2 = new PromptRejectedError("custom", "patterns-leak");
+      expect(err2.message).toBe("custom");
+    });
+
+    it("toJSON returns only code and message — no patterns, no confidence", () => {
+      const err = new PromptRejectedError();
+      expect(err.toJSON()).toEqual({
+        error: {
+          code: "prompt_rejected",
+          message: "Prompt rejected by safety check",
+        },
+      });
+    });
+
+    it("is an AppError instance so withErrorHandler catches it generically", () => {
+      const err = new PromptRejectedError();
+      expect(err).toBeInstanceOf(AppError);
+      expect(err).toBeInstanceOf(Error);
+    });
   });
 });
