@@ -22,6 +22,7 @@ import { withErrorHandler } from "@/lib/api";
 import { logger } from "@/lib/logger";
 import {
   upsertBotConfig,
+  TenantBotCapExceededError,
   getBotConfig,
   disableBotConfig,
   AttestationGateError,
@@ -154,6 +155,19 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
           },
         },
         { status: 400 },
+      );
+    }
+    if (err instanceof TenantBotCapExceededError) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "tenant_bot_cap_exceeded",
+            message: err.message,
+            platform: err.platform,
+            limit: err.limit,
+          },
+        },
+        { status: 409 },
       );
     }
     throw err;

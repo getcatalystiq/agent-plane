@@ -374,6 +374,45 @@ async function getTenantThreshold(tx: TxClient, tenantId: TenantId): Promise<num
   return row?.max_trusted_members ?? 100;
 }
 
+// Round-4 residual: per-tenant per-platform enabled-bot cap. The Discord
+// gateway listener holds one DB pool client for ~700s per enabled bot,
+// so unbounded enablement on a single tenant can starve the shared pool
+// (max=20). 10 per platform per tenant fits with comfortable headroom
+// even when one tenant runs the maximum on Discord (10) plus background
+// cron sweeps (~3) plus chat ingress (~5). Slack uses the same cap for
+// symmetry though Slack doesn't long-hold connections.
+const MAX_ENABLED_BOTS_PER_TENANT_PER_PLATFORM = 10;
+
+const EnabledBotCountRow = z.object({ count: z.coerce.number().int().nonnegative() });
+
+async function countEnabledBots(
+  tx: TxClient,
+  tenantId: TenantId,
+  agentId: AgentId,
+  platform: ChatPlatform,
+): Promise<number> {
+  // Count enabled rows for this tenant+platform, EXCLUDING the agent we
+  // are upserting (UPSERT on the same agent should not count itself
+  // against the cap).
+  const row = await tx.queryOne(
+    EnabledBotCountRow,
+    `SELECT COUNT(*) AS count FROM platform_bot_configs
+      WHERE tenant_id = $1 AND platform = $2 AND enabled = true
+        AND agent_id <> $3`,
+    [tenantId, platform, agentId],
+  );
+  return row?.count ?? 0;
+}
+
+export class TenantBotCapExceededError extends Error {
+  constructor(public readonly platform: ChatPlatform, public readonly limit: number) {
+    super(
+      `Tenant has reached the maximum of ${limit} enabled ${platform} bots. Disable an existing bot before connecting a new one.`,
+    );
+    this.name = "TenantBotCapExceededError";
+  }
+}
+
 export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<PlatformBotConfigPublic> {
   // 1. Validate credentials (cheap) + run attestation gate (probes platform).
   const validation = await validateCredentials(input.tenantId, input.credentials);
@@ -382,6 +421,21 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
   }
 
   const probe = await withTenantTransaction(input.tenantId, async (tx) => {
+    // Per-tenant cap check — runs BEFORE the attestation gate so a
+    // tenant at the cap doesn't waste a probe API call against the
+    // platform.
+    const enabledCount = await countEnabledBots(
+      tx,
+      input.tenantId,
+      input.agentId,
+      input.credentials.platform,
+    );
+    if (enabledCount >= MAX_ENABLED_BOTS_PER_TENANT_PER_PLATFORM) {
+      throw new TenantBotCapExceededError(
+        input.credentials.platform,
+        MAX_ENABLED_BOTS_PER_TENANT_PER_PLATFORM,
+      );
+    }
     const threshold = await getTenantThreshold(tx, input.tenantId);
     return enforceAttestationGate({
       tenantId: input.tenantId,

@@ -516,36 +516,56 @@ async function sweepOrphans(): Promise<number> {
 // chat_event_dedupe sweep. Two cohorts:
 //   (a) STALE PLACEHOLDERS — winner crashed between INSERT and UPDATE.
 //       claimed_at is older than the workflow step's max wall clock.
-//       Round-4 review #3: bumped 5min → 15min so a cold sandbox boot
+//       Round-4 review #3: 15min so a cold sandbox boot
 //       (snapshot miss + npm install + heavy MCP refresh + plugin sync)
 //       cannot be reaped mid-start. Above 15min the active-watchdog
 //       (per-agent max_runtime + 120s grace, default 720s) has already
 //       fired, so the placeholder is genuinely orphaned.
 //   (b) FILLED ROWS PAST 7-DAY TTL — long-tail cleanup. The 7-day
 //       window is the workflow body's max useful idempotency horizon
-//       (inner workflow runs are gone well before then). Without this
-//       sweep filled rows accumulate forever.
+//       (inner workflow runs are gone well before then).
 //
-// Round-4 review #8: returns a single integer total to match sibling
-// sweeps. Per-cohort counts surface in the structured log line below.
+// Both DELETEs are CTID-batched (round-4 residual #4): an unbatched
+// DELETE on a multi-million-row catch-up scenario (e.g., after a
+// prolonged cleanup-cron outage) takes a single ACCESS EXCLUSIVE lock
+// for the whole transaction and blocks INSERT traffic on the dedupe
+// table. Batched DELETE caps each iteration at SWEEP_BATCH_SIZE rows
+// and runs ≤ SWEEP_MAX_BATCHES iterations per tick. Steady-state
+// (< batch size) finishes in one iteration; backlog drains across
+// successive 5-minute cron ticks.
+const SWEEP_BATCH_SIZE = 5_000;
+const SWEEP_MAX_BATCHES = 20;
+
+async function sweepDedupeBatched(predicate: string): Promise<number> {
+  let total = 0;
+  for (let i = 0; i < SWEEP_MAX_BATCHES; i++) {
+    const result = await execute(
+      `DELETE FROM chat_event_dedupe
+        WHERE ctid IN (
+          SELECT ctid FROM chat_event_dedupe
+          WHERE ${predicate}
+          LIMIT $1
+        )`,
+      [SWEEP_BATCH_SIZE],
+    );
+    total += result.rowCount;
+    if (result.rowCount < SWEEP_BATCH_SIZE) break;
+  }
+  return total;
+}
+
 async function sweepChatEventDedupe(): Promise<number> {
-  const stalePromise = execute(
-    `DELETE FROM chat_event_dedupe
-      WHERE inner_run_id IS NULL
-        AND claimed_at < now() - INTERVAL '15 minutes'`,
-  );
-  const expiredPromise = execute(
-    `DELETE FROM chat_event_dedupe
-      WHERE created_at < now() - INTERVAL '7 days'`,
-  );
-  const [stale, expired] = await Promise.all([stalePromise, expiredPromise]);
-  if (stale.rowCount > 0 || expired.rowCount > 0) {
+  const [stale, expired] = await Promise.all([
+    sweepDedupeBatched("inner_run_id IS NULL AND claimed_at < now() - INTERVAL '15 minutes'"),
+    sweepDedupeBatched("created_at < now() - INTERVAL '7 days'"),
+  ]);
+  if (stale > 0 || expired > 0) {
     logger.info("chat_event_dedupe sweep", {
-      stale_placeholders_deleted: stale.rowCount,
-      expired_filled_deleted: expired.rowCount,
+      stale_placeholders_deleted: stale,
+      expired_filled_deleted: expired,
     });
   }
-  return stale.rowCount + expired.rowCount;
+  return stale + expired;
 }
 
 export const GET = withErrorHandler(async (request: NextRequest) => {

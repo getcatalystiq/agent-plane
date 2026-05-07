@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TenantId } from "@/lib/types";
+import type { TenantId, AgentId } from "@/lib/types";
 
 vi.mock("@/lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -59,7 +59,7 @@ vi.mock("@/lib/mcp-connections", () => ({
   getCallbackBaseUrl: vi.fn(() => "http://test.local"),
 }));
 
-import { __testing } from "@/lib/workflows/chat-dispatch-workflow";
+import { __testing, StaleClaimError } from "@/lib/workflows/chat-dispatch-workflow";
 
 const tenantId = "00000000-0000-0000-0000-000000000001" as TenantId;
 
@@ -173,5 +173,143 @@ describe("pollForDedupeFill", () => {
     // exact backoff arithmetic.
     expect(withTenantTransactionMock.mock.calls.length).toBeLessThan(30);
     expect(withTenantTransactionMock.mock.calls.length).toBeGreaterThan(5);
+  });
+});
+
+describe("recoverLostClaim", () => {
+  // recoverLostClaim is the round-3-fix recovery branch: poll → steal → re-poll → throw.
+  // It uses withTenantTransaction for both the poll SELECT and the steal UPDATE.
+  // Tests drive both via withTenantTransactionMock — order matters:
+  //   poll calls return DedupeRow shape ({ session_id, message_id, inner_run_id })
+  //   steal calls return { rowCount } from tx.execute
+
+  const triggerInput = {
+    tenantId,
+    agentId: "00000000-0000-0000-0000-000000000099" as AgentId,
+    platform: "discord" as const,
+    threadKey: "discord:g:c:t",
+    channelId: "C123",
+    prompt: "hi",
+    authorId: "U1",
+    authorDisplayName: "alice",
+    eventId: "evt-1",
+  };
+
+  it("returns 'attached' when the initial poll observes a filled row", async () => {
+    const filled = { session_id: "s1", message_id: "m1", inner_run_id: "run-1" };
+    withTenantTransactionMock.mockResolvedValueOnce(filled);
+
+    const result = await __testing.recoverLostClaim(triggerInput);
+
+    expect(result).toEqual({ kind: "attached", innerRunId: "run-1" });
+    // Only one tx for the poll; steal should not run.
+    expect(withTenantTransactionMock).toHaveBeenCalledOnce();
+  });
+
+  // Helper: drain enough fake-timer budget for ONE pollForDedupeFill cycle
+  // to exhaust. Each iteration fires whatever setTimeout the poll loop
+  // just installed.
+  async function drainPollBudget(): Promise<void> {
+    for (let elapsed = 0; elapsed < __testing.POLL_MAX_DURATION_MS + 1000; elapsed += __testing.POLL_INTERVAL_CAP_MS) {
+      await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_CAP_MS);
+    }
+  }
+
+  // Reset the mock between tests so mockResolvedValueOnce queues don't
+  // leak. (vi.clearAllMocks clears history but not pending implementations.)
+  beforeEach(() => {
+    withTenantTransactionMock.mockReset();
+  });
+
+  // Mock that distinguishes poll calls (return DedupeRow shape) from
+  // steal/UPDATE calls (return rowCount shape). Detection is by the SQL
+  // text of the callback's first execute/queryOne — we wrap the production
+  // tx with a probe.
+  function mockTxByCallType(opts: {
+    pollResponses: Array<{ session_id: string | null; message_id: string | null; inner_run_id: string | null }>;
+    stealResponse: { rowCount: number };
+    rePollResponses?: Array<{ session_id: string | null; message_id: string | null; inner_run_id: string | null }>;
+  }) {
+    const empty = { session_id: null, message_id: null, inner_run_id: null };
+    let pollIdx = 0;
+    let stealCalled = false;
+    let rePollIdx = 0;
+    withTenantTransactionMock.mockImplementation(async (_tenantId: string, cb: (tx: unknown) => Promise<unknown>) => {
+      // Probe the callback by passing a tx that records the SQL it sees
+      // and returns the appropriate canned response.
+      let observedSql = "";
+      const probeTx = {
+        queryOne: async (_schema: unknown, sql: string) => {
+          observedSql = sql;
+          // queryOne is used by pollForDedupeFill on SELECT.
+          if (!stealCalled) {
+            const r = opts.pollResponses[pollIdx] ?? empty;
+            pollIdx += 1;
+            return r;
+          }
+          // After the steal has fired, additional SELECTs are the re-poll.
+          const r = opts.rePollResponses?.[rePollIdx] ?? empty;
+          rePollIdx += 1;
+          return r;
+        },
+        execute: async (sql: string) => {
+          observedSql = sql;
+          // execute is called by recoverLostClaim's atomic-steal UPDATE.
+          stealCalled = true;
+          return opts.stealResponse;
+        },
+        query: async () => [],
+      };
+      const result = await cb(probeTx);
+      // Sanity: every callback must have actually executed something.
+      if (!observedSql) throw new Error("test mock: callback didn't invoke tx");
+      return result;
+    });
+  }
+
+  it("returns 'promoted' when poll times out and steal UPDATEs one row", async () => {
+    mockTxByCallType({
+      pollResponses: [], // every call falls through to empty default
+      stealResponse: { rowCount: 1 }, // steal succeeds
+    });
+
+    const promise = __testing.recoverLostClaim(triggerInput);
+    await drainPollBudget();
+    const result = await promise;
+
+    expect(result).toEqual({ kind: "promoted" });
+  });
+
+  it("returns 'attached' when steal lost the race but the row filled in the steal window", async () => {
+    const filled = { session_id: "s2", message_id: "m2", inner_run_id: "run-2" };
+    mockTxByCallType({
+      pollResponses: [],
+      stealResponse: { rowCount: 0 }, // someone else stole it
+      rePollResponses: [filled], // re-poll observes the filled row
+    });
+
+    const promise = __testing.recoverLostClaim(triggerInput);
+    await drainPollBudget();
+    const result = await promise;
+
+    expect(result).toEqual({ kind: "attached", innerRunId: "run-2" });
+  });
+
+  it("throws when both poll and steal fail (caller hands off to WDK retry)", async () => {
+    mockTxByCallType({
+      pollResponses: [],
+      stealResponse: { rowCount: 0 },
+      rePollResponses: [], // re-poll never observes a fill either
+    });
+
+    const promise = __testing.recoverLostClaim(triggerInput);
+    // Catch eagerly so vitest doesn't flag the rejection as unhandled
+    // while we drain the second poll budget.
+    const settled = promise.catch((err) => err);
+    await drainPollBudget(); // initial poll exhausts → steal fires
+    await drainPollBudget(); // re-poll exhausts → throw
+    const err = await settled;
+    expect(err).toBeInstanceOf(StaleClaimError);
+    expect((err as Error).message).toMatch(/claim race lost and steal failed/);
   });
 });

@@ -492,6 +492,30 @@ type ClaimRecovery =
   | { kind: "promoted" };
 
 /**
+ * Thrown by recoverLostClaim when both the poll and the atomic-steal
+ * fail. Distinct from generic Error so the workflow body / WDK runtime
+ * can recognize the retryable claim-race outcome and back off
+ * accordingly.
+ *
+ * Retry budget reasoning: a thrown StaleClaimError is bounded by the
+ * cleanup-sessions cron, which sweeps stale placeholders every 5 min
+ * (cron tick) using a 15-min staleness predicate. A WDK retry of this
+ * step that fires AFTER the placeholder is swept will INSERT cleanly
+ * (no ON CONFLICT) and become a fresh winner. Worst-case latency for
+ * the loser: 15 min staleness + 5 min cron interval = ~20 min before
+ * recovery is unblocked. The user-visible reply is delayed; nothing
+ * is dropped.
+ */
+export class StaleClaimError extends Error {
+  constructor(eventId: string) {
+    super(
+      `startInnerDispatchStep: claim race lost and steal failed for event ${eventId}; will retry via WDK after cleanup sweep frees the placeholder`,
+    );
+    this.name = "StaleClaimError";
+  }
+}
+
+/**
  * Recovery branch for the loser of the claim-then-reserve race. Three
  * possible outcomes:
  *   1. Poll observes the winner's UPDATE → attach to that runId.
@@ -534,9 +558,7 @@ async function recoverLostClaim(input: ChatTriggerInput): Promise<ClaimRecovery>
       });
       return { kind: "attached", innerRunId: reFilled.inner_run_id };
     }
-    throw new Error(
-      `startInnerDispatchStep: claim race lost and steal failed for event ${input.eventId}; will retry via WDK`,
-    );
+    throw new StaleClaimError(input.eventId);
   }
   logger.warn("startInnerDispatchStep: stole stale claim; promoting to new winner", {
     tenant_id: input.tenantId,
@@ -771,6 +793,7 @@ function parseNdjsonLine(raw: string): ParsedEvent | null {
 export const __testing = {
   parseNdjsonLine,
   pollForDedupeFill,
+  recoverLostClaim,
   POLL_INTERVAL_MS,
   POLL_INTERVAL_CAP_MS,
   POLL_MAX_DURATION_MS,
