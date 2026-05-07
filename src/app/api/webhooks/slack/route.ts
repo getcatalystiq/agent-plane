@@ -89,11 +89,12 @@ async function verifySlackV0(
   return constantTimeEqualHex(provided, expected);
 }
 
-const unhandledResponse = (): Response =>
-  new Response(JSON.stringify({ status: "unhandled" }), {
+function unhandledResponse(): Response {
+  return new Response(JSON.stringify({ status: "unhandled" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+}
 
 async function maybeHandleFirstTimeChallenge(
   rawBody: string,

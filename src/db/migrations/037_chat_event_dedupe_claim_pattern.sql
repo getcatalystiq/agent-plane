@@ -1,13 +1,32 @@
 -- Convert chat_event_dedupe to a claim-then-reserve placeholder pattern.
 --
--- Plan reference: REL-R2-01 follow-up for review run 20260507-000226-14dd9f0a
--- (round-3 P0 #2 — migration safety).
---
 -- Round-3 originally modified 036 in place to add the placeholder shape.
 -- That edit is invisible to the migration runner (filename + sha256 keyed)
 -- on environments that already ran the prior 036, leaving them schema-skewed.
 -- This 037 explicitly applies the same deltas as ALTER TABLE statements so
 -- every environment converges to the placeholder shape on next deploy.
+--
+-- =============================================================================
+-- DEPLOY-TIME REQUIREMENT (round-4 review #1):
+-- =============================================================================
+-- Environments that previously ran the round-2 in-place 036 (placeholder
+-- shape) have a stored sha256 that no longer matches the current 036
+-- (reverted to its c02f40b shape). The migration runner aborts with
+-- exit(1) on checksum mismatch UNLESS `MIGRATIONS_RECONCILE_CHECKSUMS=true`.
+--
+-- For the cutover deploy ONLY:
+--   1. Set MIGRATIONS_RECONCILE_CHECKSUMS=true in the Vercel project env.
+--   2. Deploy this branch. The runner reconciles 036's stored checksum
+--      (without re-executing the SQL) and then applies 037 normally.
+--   3. UNSET MIGRATIONS_RECONCILE_CHECKSUMS immediately after the deploy
+--      completes. Leaving it set is unsafe — future in-place edits to
+--      applied migrations would silently pass without re-running SQL,
+--      reintroducing the exact failure mode this 037 exists to fix.
+--
+-- Production is unaffected (main never had 036 of any shape) — main
+-- applies 036 fresh + 037 cleanly without the env var. The reconcile
+-- requirement is dev/preview only.
+-- =============================================================================
 --
 -- Deltas:
 --   1. Drop NOT NULL on session_id, message_id, inner_run_id (placeholder

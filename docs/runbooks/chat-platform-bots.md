@@ -146,6 +146,55 @@ When Slack events don't arrive:
    `stale_timestamp`, or `unhandled` returns.
 3. Confirm the bot is invited to the channel where the @mention happens.
 
+## Migration 037 deploy gate
+
+Migration `037_chat_event_dedupe_claim_pattern.sql` lands the placeholder
+pattern via `ALTER TABLE`. Round-2 originally landed the same shape by
+modifying 036 in place; round-3 reverted 036 and added 037. On any
+environment that ran the round-2 in-place 036, the stored sha256 for
+036 no longer matches the on-disk file, so the migration runner aborts
+the deploy.
+
+For the cutover deploy ONLY, set `MIGRATIONS_RECONCILE_CHECKSUMS=true`
+on the Vercel project env. The runner reconciles 036's stored checksum
+(without re-executing the SQL) and applies 037 cleanly. **Unset the
+env var immediately after the deploy completes.** Leaving it set is
+unsafe — future in-place edits to applied migrations would silently
+pass without re-running SQL.
+
+Production is unaffected (main never had 036 of any shape); the
+reconcile requirement applies only to dev/preview environments where
+round-2 already deployed.
+
+## Stale-claim recovery observability
+
+`startInnerDispatchStep` emits these log lines for the claim-then-reserve
+flow:
+
+- `lost claim race; attaching to winner` — common, expected on retry-after-success.
+- `claim filled during steal window; attaching` — uncommon benign race.
+- `stole stale claim; promoting to new winner` — RARE; indicates a
+  winner crashed mid-dispatch and a retry took over. Should be
+  < 1/hour at steady state. >> normal frequency → escalate (likely
+  cold-sandbox tail latency exceeding `STALE_CLAIM_THRESHOLD_SECONDS`,
+  currently `POLL_MAX_DURATION_MS / 1000 + 60s`).
+- `claim race lost and steal failed for event …` thrown error → WDK
+  retries; spike indicates concurrent-stealer contention.
+
+Spot-check stalled placeholders (orphans the 15-min cleanup sweep
+will reap):
+
+```sql
+SELECT COUNT(*) AS stuck
+FROM chat_event_dedupe
+WHERE inner_run_id IS NULL
+  AND claimed_at < now() - INTERVAL '5 minutes';
+```
+
+The cleanup-sessions cron runs every 5 min; sweeps surface in the
+structured log line `chat_event_dedupe sweep` (with
+`stale_placeholders_deleted` + `expired_filled_deleted` counters).
+
 ## Telemetry
 
 Counters emitted as structured logs (Vercel Logs query: `metric_name=...`):
