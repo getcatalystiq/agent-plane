@@ -6,7 +6,7 @@ import { AgentRowInternal, TenantRow, ScheduleRow } from "@/lib/validation";
 import { dispatchSessionMessage } from "@/lib/dispatcher";
 import { findWarmScheduleSession, casActiveToIdle } from "@/lib/sessions";
 import { transitionMessageStatus } from "@/lib/session-messages";
-import { BudgetExceededError, ConcurrencyLimitError } from "@/lib/errors";
+import { BudgetExceededError, ConcurrencyLimitError, PromptRejectedError } from "@/lib/errors";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
 import { shouldUseWorkflow } from "@/lib/workflows/toggle";
@@ -193,6 +193,20 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
       });
       return jsonResponse({ status: "skipped", reason });
     }
+    if (err instanceof PromptRejectedError) {
+      // The schedule trigger never blocks under the per-trigger matrix, so
+      // hitting this branch means a future policy change started blocking
+      // schedule prompts. Treat it as `skipped`, NOT `dispatch_error` —
+      // mapping it to the generic failed branch would (a) swallow the
+      // scanner's intent and (b) cause the orchestrator to count this as a
+      // successful trigger.
+      logger.warn("Scheduled run dispatch skipped", {
+        schedule_id,
+        agent_id: agent.id,
+        reason: "prompt_rejected",
+      });
+      return jsonResponse({ status: "skipped", reason: "prompt_rejected" });
+    }
     logger.error("Scheduled run dispatch failed", {
       schedule_id,
       agent_id: agent.id,
@@ -343,6 +357,13 @@ async function runViaWorkflow(input: {
         error: err.message,
       });
       return jsonResponse({ status: "skipped", reason });
+    }
+    if (err instanceof PromptRejectedError) {
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: input.schedule_id,
+        reason: "prompt_rejected",
+      });
+      return jsonResponse({ status: "skipped", reason: "prompt_rejected" });
     }
     logger.error("Scheduled run (workflow) failed", {
       schedule_id: input.schedule_id,

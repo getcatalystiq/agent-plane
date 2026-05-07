@@ -59,6 +59,7 @@ import {
 import { uploadTranscript } from "@/lib/transcripts";
 import { createNdjsonStream, ndjsonHeaders } from "@/lib/streaming";
 import { getIdempotentResponse, setIdempotentResponse } from "@/lib/idempotency";
+import { INJECTION_SCANNER_VERSION } from "@/lib/safety/injection-scanner";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
 import {
@@ -197,6 +198,20 @@ export interface DispatchInput {
     maxTurns?: number;
     maxBudgetUsd?: number;
   };
+  /**
+   * Prompt-injection scan verdict, set by the dispatch shim *before* this
+   * function runs. The verdict is persisted on the session_messages row's
+   * audit columns. The shim is the only writer of this field — direct
+   * callers of `dispatchSessionMessage` (test harnesses, future code) can
+   * safely omit it; reserveSessionAndMessage will write the default
+   * (false, NULL, NULL) tuple.
+   */
+  injectionScan?: import("@/lib/safety/injection-scanner").ScanResult;
+  /**
+   * The tenant's `injection_enforce_mode` resolved at scan time. Mixed into
+   * the idempotency cache key so a mode flip invalidates cached verdicts.
+   */
+  injectionEnforceMode?: import("@/lib/safety/policy").InjectionEnforceMode;
 }
 
 export interface DispatchResult {
@@ -283,8 +298,13 @@ export async function dispatchSessionMessage(input: DispatchInput): Promise<Disp
   // 1. Idempotency short-circuit (process-memory store). SEC: cache key MUST
   // be tenant-namespaced or Tenant A's key collides with Tenant B's, leaking
   // message_ids across tenants. Mirrors the A2A pattern in the JSON-RPC route.
+  //
+  // The key also mixes in INJECTION_SCANNER_VERSION + the resolved tenant
+  // enforce_mode so that:
+  //  (a) a deliberate scanner pattern-set bump invalidates cached verdicts,
+  //  (b) a tenant flipping log_only ↔ enforce takes effect immediately.
   const idempCacheKey = input.idempotencyKey
-    ? `dispatch:${input.tenantId}:${input.idempotencyKey}`
+    ? `dispatch:${input.tenantId}:${INJECTION_SCANNER_VERSION}:${input.injectionEnforceMode ?? "log_only"}:${input.idempotencyKey}`
     : null;
   const cachedHit = idempCacheKey ? await readIdempotentHit(idempCacheKey, input) : null;
   if (cachedHit) return cachedHit;
@@ -547,11 +567,17 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
     const effectiveMaxTurns = input.overrides?.maxTurns ?? agent.max_turns;
     const effectiveBudget = input.overrides?.maxBudgetUsd ?? agent.max_budget_usd;
 
+    const scan = input.injectionScan;
+    const injectionDetected = scan?.detected === true;
+    const injectionConfidence = injectionDetected ? scan!.confidence : null;
+    const injectionPatterns =
+      injectionDetected && scan!.patterns.length > 0 ? scan!.patterns : null;
     const messageRow = await tx.queryOne(
       SessionMessageRow,
       `INSERT INTO session_messages
-         (session_id, tenant_id, prompt, status, triggered_by, runner, webhook_source_id, created_by_key_id, started_at)
-       VALUES ($1, $2, $3, 'running', $4, $5, $6, $7, NOW())
+         (session_id, tenant_id, prompt, status, triggered_by, runner, webhook_source_id, created_by_key_id, started_at,
+          injection_detected, injection_confidence, injection_patterns)
+       VALUES ($1, $2, $3, 'running', $4, $5, $6, $7, NOW(), $8, $9, $10)
        RETURNING *`,
       [
         session.id,
@@ -561,6 +587,9 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
         effectiveRunner,
         input.webhookSourceId ?? null,
         input.callerKeyId ?? null,
+        injectionDetected,
+        injectionConfidence,
+        injectionPatterns,
       ],
     );
     if (!messageRow) {

@@ -34,6 +34,14 @@ import { renderRest, renderRestHeaders } from "@/lib/workflows/render-rest";
 import { shouldUseWorkflow } from "@/lib/workflows/toggle";
 import { logger } from "@/lib/logger";
 import type { RunTriggeredBy } from "@/lib/types";
+import { scanForInjection } from "@/lib/safety/injection-scanner";
+import {
+  applyInjectionPolicy,
+  getTenantInjectionEnforceMode,
+} from "@/lib/safety/policy";
+import { PromptRejectedError } from "@/lib/errors";
+
+const INJECTION_BLOCK_JITTER_MS = 100;
 
 /**
  * Dispatch via workflow when the toggle is on for `(triggeredBy, tenantId)`
@@ -45,10 +53,54 @@ export async function dispatchOrWorkflowDispatch(
 ): Promise<DispatchResult> {
   const trigger = input.triggeredBy as RunTriggeredBy;
 
+  // STEP 0 — prompt-injection scan. Runs BEFORE the legacy/workflow branch
+  // decision so workflow-enabled tenants are covered too. The verdict (and
+  // the resolved tenant enforce_mode) are threaded through DispatchInput so
+  // both branches' INSERT into session_messages can persist them.
+  const enforceMode = await getTenantInjectionEnforceMode(input.tenantId);
+  const scan = scanForInjection(input.prompt);
+  const decision = applyInjectionPolicy(scan, trigger, enforceMode);
+
+  if (decision === "block") {
+    logger.warn("injection_scan_blocked", {
+      tenant_id: input.tenantId,
+      triggered_by: trigger,
+      confidence: scan.confidence,
+      patterns: scan.patterns,
+      prompt_length: input.prompt.length,
+      enforce_mode: enforceMode,
+    });
+    // Constant jitter to dampen the latency oracle. Not a literal floor —
+    // see Key Technical Decisions in the plan for why.
+    await new Promise((resolve) =>
+      setTimeout(resolve, INJECTION_BLOCK_JITTER_MS),
+    );
+    throw new PromptRejectedError();
+  }
+
+  if (scan.detected) {
+    logger.info("injection_scan_logged", {
+      tenant_id: input.tenantId,
+      triggered_by: trigger,
+      confidence: scan.confidence,
+      patterns: scan.patterns,
+      prompt_length: input.prompt.length,
+      enforce_mode: enforceMode,
+    });
+  }
+
+  // Thread the verdict + mode through to the downstream branches so the
+  // INSERT picks them up and the cache key incorporates them.
+  const scannedInput: DispatchInput = {
+    ...input,
+    injectionScan: scan,
+    injectionEnforceMode: enforceMode,
+  };
+
   // Existing session: pick the fastest path that's still safe.
-  if (input.sessionId) {
+  if (scannedInput.sessionId) {
     try {
-      const session = await getSession(input.sessionId, input.tenantId);
+      const session = await getSession(scannedInput.sessionId, scannedInput.tenantId);
 
       // PERF — warm follow-up bypass: when a session already has a live
       // sandbox AND isn't stopped, the legacy in-process path is strictly
@@ -67,7 +119,7 @@ export async function dispatchOrWorkflowDispatch(
       // that's not actually orchestrating this message.
       if (session.sandbox_id && session.status !== "stopped") {
         if (session.workflow_run_id) {
-          await clearWorkflowRunId(session.id, input.tenantId).catch((err) => {
+          await clearWorkflowRunId(session.id, scannedInput.tenantId).catch((err) => {
             logger.warn(
               "dispatchOrWorkflowDispatch: clearWorkflowRunId failed (best-effort)",
               {
@@ -77,7 +129,7 @@ export async function dispatchOrWorkflowDispatch(
             );
           });
         }
-        return await dispatchSessionMessage(input);
+        return await dispatchSessionMessage(scannedInput);
       }
 
       // Cold session that's already workflow-pinned (no live sandbox, but
@@ -85,20 +137,20 @@ export async function dispatchOrWorkflowDispatch(
       // toggle is now off, so the runner registered with the existing
       // hook keeps working.
       if (session.workflow_run_id) {
-        return await dispatchViaWorkflow(input);
+        return await dispatchViaWorkflow(scannedInput);
       }
       // Cold legacy-pinned session: stay on legacy path.
-      return await dispatchSessionMessage(input);
+      return await dispatchSessionMessage(scannedInput);
     } catch {
       // Session lookup failed → fall through to toggle-based decision; the
       // legacy dispatcher will surface 404/410 if appropriate.
     }
   }
 
-  if (await shouldUseWorkflow(trigger, input.tenantId)) {
-    return await dispatchViaWorkflow(input);
+  if (await shouldUseWorkflow(trigger, scannedInput.tenantId)) {
+    return await dispatchViaWorkflow(scannedInput);
   }
-  return await dispatchSessionMessage(input);
+  return await dispatchSessionMessage(scannedInput);
 }
 
 async function dispatchViaWorkflow(

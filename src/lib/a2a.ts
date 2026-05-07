@@ -25,7 +25,7 @@ import { WORKFLOW_RUN_ID_PREFIX } from "@/lib/types";
 import { queryOne as queryOneDb } from "@/db";
 import { z as zodA2a } from "zod";
 import { findSessionByContextId } from "@/lib/sessions";
-import { ConcurrencyLimitError, BudgetExceededError } from "@/lib/errors";
+import { ConcurrencyLimitError, BudgetExceededError, PromptRejectedError } from "@/lib/errors";
 import type { CallbackData } from "@/lib/mcp";
 import { IDENTITY_METADATA_KEY, IDENTITY_METADATA_KEY_V2 } from "@/lib/identity";
 import { logger } from "@/lib/logger";
@@ -674,6 +674,15 @@ export class SandboxAgentExecutor implements AgentExecutor {
         }
         if (err instanceof BudgetExceededError) {
           throw new A2AError(-32001, "Monthly budget exceeded");
+        }
+        if (err instanceof PromptRejectedError) {
+          // Mirror the REST envelope's human-readable message exactly. Use
+          // the generic JSON-RPC `Invalid params` code (-32602) — NOT a
+          // unique numeric code — so A2A peers cannot distinguish a
+          // prompt-rejection from generic argument validation by code
+          // alone, which would give A2A peers a sharper detection oracle
+          // than REST callers.
+          throw new A2AError(-32602, err.message);
         }
         throw err;
       }

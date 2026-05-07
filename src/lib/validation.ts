@@ -580,6 +580,14 @@ export const SessionMessageRow = z.object({
   // step so workflow replay finds non-null and skips re-spawn. NULL on legacy
   // path messages.
   runner_started_at: z.coerce.string().nullable().default(null),
+  // Prompt-injection scanner verdict, written at INSERT time by the dispatch
+  // shim. injection_detected is non-null (defaults to false in DB);
+  // injection_confidence and injection_patterns are non-null only when the
+  // scanner detected something. See migration 035 and U4 of
+  // docs/plans/2026-05-06-002-feat-prompt-injection-scanner-plan.md.
+  injection_detected: z.boolean().default(false),
+  injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
+  injection_patterns: z.array(z.string()).nullable().default(null),
   started_at: z.coerce.string().nullable(),
   completed_at: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
