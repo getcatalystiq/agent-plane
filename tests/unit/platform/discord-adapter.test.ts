@@ -8,26 +8,18 @@
  *   - returns false for plain channel messages with neither isMention nor matching id
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-// We can't test the registered handlers without a fake Chat instance;
-// extract messageMentionsBot via re-export. (This test file imports the
-// module's internals so the filter logic is exercised in isolation.)
+// Mock the bridge so importing the discord adapter module doesn't drag
+// the workflow dependency tree into the test surface.
+vi.mock("@/lib/platform/bridge", () => ({
+  triggerChatWorkflow: vi.fn(),
+}));
+vi.mock("@/lib/logger", () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
 
-// Inline copy of the helper to keep this test self-contained without
-// adding an export ceremony to the production file. The actual logic
-// lives at src/lib/platform/adapters/discord.ts:messageMentionsBot.
-function messageMentionsBot(
-  m: { isMention?: boolean; mentions?: Array<string | { userId?: string }> },
-  botUserId: string | null,
-): boolean {
-  if (m.isMention === true) return true;
-  if (!botUserId || !Array.isArray(m.mentions)) return false;
-  return m.mentions.some((entry) => {
-    if (typeof entry === "string") return entry === botUserId;
-    return entry?.userId === botUserId;
-  });
-}
+import { messageMentionsBot } from "@/lib/platform/adapters/discord";
 
 describe("messageMentionsBot", () => {
   it("returns true when isMention is explicitly true", () => {

@@ -83,19 +83,28 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
 
     try {
       const startPromises = bots.map(async (cached: CachedBot) => {
-        // Acquire per-bot advisory lock. pg_try_advisory_lock returns
-        // false immediately if held; that's the signal that another
-        // cron tick is already running this listener.
-        // Connection-typed loosely because @neondatabase/serverless's
-        // PoolClient export shape varies; the runtime contract
-        // (connect/query/release) is stable.
-        const lockClient = await getPool().connect() as unknown as {
+        // REL-R2-06 fix (review run 20260506-232400-round2): pool.connect()
+        // can throw on connection-pool exhaustion or transient Neon
+        // unavailability. Earlier rev placed it BEFORE try/catch, so a
+        // throw bubbled to Promise.allSettled and the bot silently had
+        // no listener until the next 9-min cron tick. Move connect
+        // inside try so the catch logs and the next tick retries.
+        let lockClient: {
           query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }>;
           release: () => void;
-        };
+        } | null = null;
         try {
+          lockClient = (await getPool().connect()) as unknown as {
+            query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }>;
+            release: () => void;
+          };
+          // SEC-R2-003 fix (review run 20260506-232400-round2): use
+          // hashtextextended (64-bit) instead of hashtext (32-bit) so
+          // birthday collisions stay vanishingly unlikely at any tenant
+          // scale. Seed with a fixed nonzero value so the hash is
+          // deterministic across processes.
           const lockKeyResult = await lockClient.query<{ ok: boolean }>(
-            "SELECT pg_try_advisory_lock(hashtext($1)) AS ok",
+            "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS ok",
             [`discord-gateway:${cached.agentId}`],
           );
           if (!lockKeyResult.rows[0]?.ok) {
@@ -130,15 +139,19 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
             });
           }
         } finally {
-          // Release the advisory lock before returning the client.
-          try {
-            await lockClient.query("SELECT pg_advisory_unlock(hashtext($1))", [
-              `discord-gateway:${cached.agentId}`,
-            ]);
-          } catch {
-            // Lock auto-releases on connection close; ignore errors here.
+          // Release the advisory lock before returning the client. The
+          // null-check guards the pool.connect() throw path where
+          // lockClient was never assigned.
+          if (lockClient) {
+            try {
+              await lockClient.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [
+                `discord-gateway:${cached.agentId}`,
+              ]);
+            } catch {
+              // Lock auto-releases on connection close; ignore.
+            }
+            lockClient.release();
           }
-          lockClient.release();
         }
       });
       await Promise.allSettled(startPromises);

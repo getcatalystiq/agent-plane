@@ -36,7 +36,9 @@ interface MentionLikeMessage {
   author?: { userId?: string; userName?: string; isBot?: boolean; isMe?: boolean };
 }
 
-function messageMentionsBot(m: MentionLikeMessage, botUserId: string | null): boolean {
+// Exported for the discord-adapter unit test (testing-006). Production
+// code uses it via the registered handlers below.
+export function messageMentionsBot(m: MentionLikeMessage, botUserId: string | null): boolean {
   if (m.isMention === true) return true;
   if (!botUserId || !Array.isArray(m.mentions)) return false;
   return m.mentions.some((entry) => {

@@ -21,3 +21,17 @@ export const PLATFORM_LIMITS: Record<ChatPlatform, PlatformLimit> = {
 };
 
 export const DEFAULT_EDIT_GATE_MS = 1500;
+
+// Approximate runner chunk inter-arrival under typical agent generation.
+// Used to translate WDK-deterministic chunk counts into wall-clock
+// estimates (CHUNKS_PER_FLUSH × this ≈ user-visible edit cadence).
+export const APPROX_CHUNK_INTERVAL_MS = 250;
+
+// Target wall-clock interval between platform edits during streaming.
+// Combined with APPROX_CHUNK_INTERVAL_MS, gives the chunk-count gate.
+export const EDIT_FLUSH_INTERVAL_MS = 1000;
+
+// Cap on how many chunks the chat workflow skips after a 429 before
+// retrying. Keeps the loop responsive on slow models and bounds
+// stream-buffer accumulation.
+export const MAX_RATE_LIMITED_BACKOFF_CHUNKS = 12;

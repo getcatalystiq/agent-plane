@@ -380,15 +380,27 @@ async function ensureSandboxImpl(
 
       // U7 chat-attachments warm path: re-stage attachments on follow-up
       // turns. writeFiles overwrites by path so re-running on a session
-      // that already has the file is idempotent. SessionSandboxInstance
-      // exposes writeFiles via its underlying sandboxRef.
+      // that already has the file is idempotent. C-R2-3 (review run
+      // 20260506-232400-round2): mirror the cold path's 30s timeout +
+      // size cap so warm and cold guards are symmetric.
       if (input.preInjectFiles && input.preInjectFiles.length > 0) {
         await Promise.allSettled(
           input.preInjectFiles.map(async (f) => {
             try {
-              const res = await fetch(f.signedReadUrl, { redirect: "error" });
+              const ctl = new AbortController();
+              const tm = setTimeout(() => ctl.abort(), 30_000);
+              let res: Response;
+              try {
+                res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+              } finally {
+                clearTimeout(tm);
+              }
               if (!res.ok) throw new Error(`http_${res.status}`);
-              const buf = Buffer.from(await res.arrayBuffer());
+              const ab = await res.arrayBuffer();
+              if (ab.byteLength > f.sizeBytes + 1024) {
+                throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
+              }
+              const buf = Buffer.from(ab);
               await reconnectResult.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
             } catch (err) {
               logger.warn("preInjectFiles (warm): stage failed (fail-open)", {

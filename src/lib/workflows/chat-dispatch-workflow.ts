@@ -41,7 +41,12 @@ import {
   type PostOrEditResult,
 } from "@/lib/platform/callback";
 import { formatForPlatform } from "@/lib/platform/format";
-import { PLATFORM_LIMITS } from "@/lib/platform/limits";
+import {
+  PLATFORM_LIMITS,
+  APPROX_CHUNK_INTERVAL_MS,
+  EDIT_FLUSH_INTERVAL_MS,
+  MAX_RATE_LIMITED_BACKOFF_CHUNKS,
+} from "@/lib/platform/limits";
 import { tryConsumeChannelToken, drainChannelToken } from "@/lib/platform/redis-bucket";
 import {
   getOrCreateBot,
@@ -164,12 +169,11 @@ export async function chatDispatchWorkflow(
   const limits = PLATFORM_LIMITS[input.platform];
   const SEAL_SUFFIX_OVERHEAD = 4;
   const maxPerMessage = limits.maxPerMessage - SEAL_SUFFIX_OVERHEAD;
-  // Flush every CHUNKS_PER_FLUSH text_delta accumulations. With ~50 tokens
-  // per second of agent generation and the runner coalescing several
-  // tokens per chunk, this gives roughly 1 edit per 1.5–2 seconds without
-  // depending on Date.now().
-  const CHUNKS_PER_FLUSH = 4;
-  const MAX_RATE_LIMITED_BACKOFF_CHUNKS = 12;
+  // Flush every CHUNKS_PER_FLUSH text_delta accumulations. Derived from
+  // EDIT_FLUSH_INTERVAL_MS / APPROX_CHUNK_INTERVAL_MS so the wall-clock
+  // intent (~1 edit/sec) is documented at the source rather than encoded
+  // in arithmetic. Tuning either constant in limits.ts adjusts the cadence.
+  const CHUNKS_PER_FLUSH = Math.max(1, Math.ceil(EDIT_FLUSH_INTERVAL_MS / APPROX_CHUNK_INTERVAL_MS));
 
   let responseText = "";
   let committedLength = 0;
@@ -233,10 +237,13 @@ export async function chatDispatchWorkflow(
 
       if (!result.ok) {
         if (result.rateLimited) {
-          // Translate retry-after into a chunk-count backoff. Most chunks
-          // arrive every few hundred ms, so 12 chunks ≈ several seconds.
-          // Cap to keep the loop responsive on slow models.
-          backoffChunks = Math.min(MAX_RATE_LIMITED_BACKOFF_CHUNKS, Math.max(2, Math.ceil(result.retryAfterMs / 250)));
+          // Translate retry-after into a chunk-count backoff using the
+          // documented APPROX_CHUNK_INTERVAL_MS so the wall-clock target
+          // is readable without re-derivation.
+          backoffChunks = Math.min(
+            MAX_RATE_LIMITED_BACKOFF_CHUNKS,
+            Math.max(2, Math.ceil(result.retryAfterMs / APPROX_CHUNK_INTERVAL_MS)),
+          );
         } else {
           postFailed = true;
           logger.error("chatDispatchWorkflow: post failed; sentinel set", {
@@ -326,11 +333,15 @@ interface StartedDispatch {
   innerRunId: string;
 }
 
+// Placeholder rows have all three nullable until the winner UPDATEs.
 const DedupeRow = z.object({
-  session_id: z.string(),
-  message_id: z.string(),
-  inner_run_id: z.string(),
+  session_id: z.string().nullable(),
+  message_id: z.string().nullable(),
+  inner_run_id: z.string().nullable(),
 });
+
+const POLL_INTERVAL_MS = 100;
+const POLL_MAX_DURATION_MS = 30_000;
 
 async function startInnerDispatchStep(
   input: ChatTriggerInput,
@@ -338,32 +349,53 @@ async function startInnerDispatchStep(
 ): Promise<StartedDispatch> {
   "use step";
 
-  // A6 (run 20260506-221948-2402b0ed) + C-R2-1 fix (run 20260506-232400-round2):
-  // WDK retries an entire step on transient failure. The dedupe table
-  // ensures user-visible correctness (one bot reply per event id) — but
-  // does NOT prevent the loser of the SELECT/INSERT race from running
-  // reserveSessionAndMessage + start(dispatchWorkflow) before discovering
-  // it lost. That leaves orphan session_messages and inner workflow runs
-  // until the cleanup-sessions cron reclaims them. Acceptable trade-off
-  // because WDK retries are rare (transient errors only).
-  //
-  // The fast path: SELECT first; if a winner exists, return its runId.
-  const existing = await withTenantTransaction(input.tenantId, async (tx) => {
-    return tx.queryOne(
+  // A6 + REL-R2-01 fix (review runs 20260506-221948-2402b0ed and
+  // 20260506-232400-round2): claim-then-reserve pattern. Two concurrent
+  // step retries race on the placeholder INSERT; only ONE winner runs
+  // reserveSessionAndMessage + start(dispatchWorkflow). The loser
+  // polls the placeholder until the winner's UPDATE fills in
+  // inner_run_id, then attaches to the same run. No orphan
+  // session_messages, no orphan inner workflow runs.
+  const claim = await withTenantTransaction(input.tenantId, async (tx) => {
+    // Returns the row ON success; null when ON CONFLICT swallows our INSERT.
+    const inserted = await tx.query(
+      DedupeRow,
+      `INSERT INTO chat_event_dedupe (tenant_id, platform, event_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, platform, event_id) DO NOTHING
+       RETURNING session_id, message_id, inner_run_id`,
+      [input.tenantId, input.platform, input.eventId],
+    );
+    if (inserted.length > 0) return { won: true, row: inserted[0] };
+    // Loser path — read the existing row.
+    const row = await tx.queryOne(
       DedupeRow,
       `SELECT session_id, message_id, inner_run_id FROM chat_event_dedupe
        WHERE tenant_id = $1 AND platform = $2 AND event_id = $3`,
       [input.tenantId, input.platform, input.eventId],
     );
+    return { won: false, row };
   });
-  if (existing) {
-    logger.info("startInnerDispatchStep: dedupe hit (replayed)", {
+
+  if (!claim.won) {
+    // Loser — poll the placeholder until the winner UPDATEs inner_run_id.
+    const filled = await pollForDedupeFill(input.tenantId, input.platform, input.eventId);
+    if (filled) {
+      logger.info("startInnerDispatchStep: lost claim race; attaching to winner", {
+        tenant_id: input.tenantId,
+        platform: input.platform,
+        event_id: input.eventId,
+        inner_run_id: filled.inner_run_id,
+      });
+      return { innerRunId: filled.inner_run_id! };
+    }
+    // Winner crashed before filling — fall through and re-attempt as if we won.
+    // The original placeholder row will be UPDATEd by us (the new "winner").
+    logger.warn("startInnerDispatchStep: lost claim but winner never filled; recovering", {
       tenant_id: input.tenantId,
       platform: input.platform,
       event_id: input.eventId,
-      inner_run_id: existing.inner_run_id,
     });
-    return { innerRunId: existing.inner_run_id };
   }
 
   const composedPrompt = `[${input.platform} message from ${input.authorDisplayName}]\n${input.prompt}${renderAttachmentPromptBlock(persisted)}`;
@@ -395,45 +427,48 @@ async function startInnerDispatchStep(
     [dispatchInput, prepared],
   );
 
-  // Persist dedupe entry. ON CONFLICT DO NOTHING handles the second-replay
-  // race where two concurrent step retries both pass the SELECT and both
-  // reserve+start. C-R2-1 fix: when ON CONFLICT swallows our INSERT, the
-  // *winner's* runId is in the row — return that instead of our own. If we
-  // returned run.runId on the loser side, the chat workflow body would
-  // read getRun(loser.runId).getReadable() which has no chunks (the runner
-  // wrote to the winner's hook).
-  const ourRunId = run.runId;
-  const winnerRunId = await withTenantTransaction(input.tenantId, async (tx) => {
-    // Use RETURNING to detect whether our INSERT won; null means
-    // ON CONFLICT swallowed it.
-    const insertedRows = await tx.query(
-      DedupeRow,
-      `INSERT INTO chat_event_dedupe (tenant_id, platform, event_id, session_id, message_id, inner_run_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (tenant_id, platform, event_id) DO NOTHING
-       RETURNING session_id, message_id, inner_run_id`,
-      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId, ourRunId],
+  // Fill in the placeholder row with the actual session/message/run ids.
+  // The unique constraint guarantees only one row exists per
+  // (tenant, platform, event_id), so this UPDATE is unconditionally safe.
+  await withTenantTransaction(input.tenantId, async (tx) => {
+    await tx.execute(
+      `UPDATE chat_event_dedupe
+       SET session_id = $4, message_id = $5, inner_run_id = $6
+       WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+         AND inner_run_id IS NULL`,
+      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId, run.runId],
     );
-    if (insertedRows.length > 0) return ourRunId;
-    // Loser path: re-read the winning row and use its runId.
-    const winner = await tx.queryOne(
-      DedupeRow,
-      `SELECT session_id, message_id, inner_run_id FROM chat_event_dedupe
-       WHERE tenant_id = $1 AND platform = $2 AND event_id = $3`,
-      [input.tenantId, input.platform, input.eventId],
-    );
-    if (!winner) return ourRunId; // Should not happen — ON CONFLICT means a row exists.
-    logger.info("startInnerDispatchStep: lost dedupe race; attaching to winner", {
-      tenant_id: input.tenantId,
-      platform: input.platform,
-      event_id: input.eventId,
-      our_run_id: ourRunId,
-      winner_run_id: winner.inner_run_id,
-    });
-    return winner.inner_run_id;
   });
 
-  return { innerRunId: winnerRunId };
+  return { innerRunId: run.runId };
+}
+
+/**
+ * Poll the dedupe row until the winner's UPDATE fills inner_run_id.
+ * Returns the filled row, or null when the poll times out (winner crashed
+ * before filling — caller should fall through and re-attempt as if it won).
+ */
+async function pollForDedupeFill(
+  tenantId: TenantId,
+  platform: ChatPlatform,
+  eventId: string,
+): Promise<{ session_id: string; message_id: string; inner_run_id: string } | null> {
+  const start = Date.now();
+  while (Date.now() - start < POLL_MAX_DURATION_MS) {
+    const row = await withTenantTransaction(tenantId, async (tx) => {
+      return tx.queryOne(
+        DedupeRow,
+        `SELECT session_id, message_id, inner_run_id FROM chat_event_dedupe
+         WHERE tenant_id = $1 AND platform = $2 AND event_id = $3`,
+        [tenantId, platform, eventId],
+      );
+    });
+    if (row && row.inner_run_id && row.session_id && row.message_id) {
+      return { session_id: row.session_id, message_id: row.message_id, inner_run_id: row.inner_run_id };
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+  return null;
 }
 
 async function persistAttachmentsStep(input: ChatTriggerInput): Promise<PersistedAttachment[]> {
@@ -620,3 +655,12 @@ function parseNdjsonLine(raw: string): ParsedEvent | null {
     return null;
   }
 }
+
+// Test-only re-exports. Internal helpers stay module-private; this object
+// gives tests a single entry point without expanding the public surface.
+export const __testing = {
+  parseNdjsonLine,
+  pollForDedupeFill,
+  POLL_INTERVAL_MS,
+  POLL_MAX_DURATION_MS,
+};

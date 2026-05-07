@@ -64,14 +64,25 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
   let disabledCount = 0;
   let probeFailures = 0;
 
-  for (const bot of bots) {
+  // REL-R2-04 fix (review run 20260506-232400-round2): batch in
+  // parallel groups of 10 so 50+ bots fit comfortably under the 300s
+  // maxDuration ceiling. Each batch is bounded by the slowest probe
+  // in the group (~5s timeout), so 100 bots ≈ 50s wall-clock instead
+  // of 500s serial.
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < bots.length; i += BATCH_SIZE) {
+    const batch = bots.slice(i, i + BATCH_SIZE);
+    await Promise.allSettled(batch.map(processOneBot));
+  }
+
+  async function processOneBot(bot: typeof bots[number]): Promise<void> {
     try {
       const tenantId = bot.tenant_id as TenantId;
       const agentId = bot.agent_id as AgentId;
       const platform: ChatPlatform = bot.platform;
 
       const creds = await getDecryptedCredentials(tenantId, agentId, platform);
-      if (!creds) continue;
+      if (!creds) return;
 
       // Use the same identity object stored at connect time. Probe
       // doesn't read from it — it's a forward-compat hook.
@@ -92,7 +103,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
           platform,
           reason: probe.reason,
         });
-        continue;
+        return;
       }
 
       // Read the per-tenant threshold (default 100 from the migration).

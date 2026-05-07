@@ -71,6 +71,30 @@ interface SlackEventBody {
   event?: { type?: string };
 }
 
+/**
+ * Verify a Slack v0 signature against the given secret. Constant-time
+ * compare. Returns true on match. Shared between the per-bot path and
+ * the first-time url_verification fallback (maint-2 refactor).
+ */
+async function verifySlackV0(
+  rawBody: string,
+  ts: number,
+  sigHeader: string | null,
+  secret: string,
+): Promise<boolean> {
+  const match = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
+  if (!match) return false;
+  const provided = match[1].toLowerCase();
+  const expected = await hmacSha256Hex(secret, `v0:${ts}:${rawBody}`);
+  return constantTimeEqualHex(provided, expected);
+}
+
+const UNHANDLED_RESPONSE = (): Response =>
+  new Response(JSON.stringify({ status: "unhandled" }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
 async function maybeHandleFirstTimeChallenge(
   rawBody: string,
   ts: number,
@@ -78,41 +102,17 @@ async function maybeHandleFirstTimeChallenge(
 ): Promise<Response> {
   const env = getEnv();
   const fallback = env.SLACK_SIGNING_SECRET;
-  // Without a global fallback secret, treat as unhandled — the operator
-  // hasn't enabled first-time setup support yet.
-  if (!fallback) {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  const match = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
-  if (!match) {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  const provided = match[1].toLowerCase();
-  const expected = await hmacSha256Hex(fallback, `v0:${ts}:${rawBody}`);
-  if (!constantTimeEqualHex(provided, expected)) {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!fallback) return UNHANDLED_RESPONSE();
+  if (!(await verifySlackV0(rawBody, ts, sigHeader, fallback))) return UNHANDLED_RESPONSE();
 
   // Signature valid against the global fallback. Only respond to
   // url_verification — anything else gets unhandled (we don't want to
-  // accept real events on the global secret bypass).
+  // accept real events on the global secret bypass per SEC-R2-001).
   let parsed: SlackEventBody;
   try {
     parsed = JSON.parse(rawBody) as SlackEventBody;
   } catch {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return UNHANDLED_RESPONSE();
   }
   if (parsed.type === "url_verification" && typeof parsed.challenge === "string") {
     logger.info("slack-webhook: first-time url_verification accepted via global fallback secret");
@@ -121,10 +121,7 @@ async function maybeHandleFirstTimeChallenge(
       headers: { "Content-Type": "text/plain" },
     });
   }
-  return new Response(JSON.stringify({ status: "unhandled" }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return UNHANDLED_RESPONSE();
 }
 
 export const POST = withErrorHandler(async (req: NextRequest) => {
@@ -169,6 +166,14 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     // and respond with the challenge so the portal handshake completes.
     // After credentials are saved, the per-bot signing secret takes
     // over for real events.
+    //
+    // SEC-R2-002 (review run 20260506-232400-round2): timing channel.
+    // The known-team-id branch runs DB+decrypt+HMAC; the unknown-team-id
+    // branch runs zero or one HMAC. To uniformize latency, run a no-op
+    // HMAC against a 32-byte zero-secret in this branch — same algorithm,
+    // same input shape, comparable wall-clock. Cost is negligible and
+    // closes the side channel that team_ids are registered.
+    await hmacSha256Hex("0".repeat(64), `v0:${ts}:${rawBody}`);
     return await maybeHandleFirstTimeChallenge(rawBody, ts, req.headers.get("x-slack-signature"));
   }
 
@@ -215,22 +220,8 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
   //    unhandled — the same status the unknown-team_id branch returns —
   //    to close the timing/registration oracle (P2 #18).
   const sigHeader = req.headers.get("x-slack-signature");
-  const match = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
-  if (!match) {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  const provided = match[1].toLowerCase();
-  const expected = await hmacSha256Hex(signingSecret, `v0:${ts}:${rawBody}`);
-  const verified = constantTimeEqualHex(provided, expected);
-  if (!verified) {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  const verified = await verifySlackV0(rawBody, ts, sigHeader, signingSecret);
+  if (!verified) return UNHANDLED_RESPONSE();
 
   // 6. Parse body — now safe.
   let parsed: SlackEventBody;
