@@ -461,7 +461,6 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={hasContent ? 3 : 12}
-          disabled={running}
           className="font-mono text-sm resize-none"
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSend();
