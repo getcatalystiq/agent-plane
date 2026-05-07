@@ -1211,12 +1211,15 @@ async function cancelWorkflowRun(
   }
 }
 
-function isMcpFresh(session: Session): boolean {
+export const SESSION_TIMEOUT_MS = DEFAULT_SESSION_TIMEOUT_MS;
+export const SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS = 5 * 60 * 1000;
+
+export function isMcpFresh(session: Session): boolean {
   if (!session.mcp_refreshed_at) return false;
   return Date.now() - new Date(session.mcp_refreshed_at).getTime() < MCP_REFRESH_TTL_MS;
 }
 
-function recordMcpRefresh(sessionId: string, tenantId: TenantId): void {
+export function recordMcpRefresh(sessionId: string, tenantId: TenantId): void {
   updateSessionMcpRefreshedAt(sessionId, tenantId).catch((err) => {
     logger.warn("Failed to update mcp_refreshed_at", {
       session_id: sessionId,

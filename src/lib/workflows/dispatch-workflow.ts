@@ -53,6 +53,10 @@ import {
   coldStartSandbox,
   finalizeMessage,
   sessionTail,
+  isMcpFresh,
+  recordMcpRefresh,
+  SESSION_TIMEOUT_MS,
+  SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS,
   type DispatchInput,
   type DispatchResult,
   type PreparedExecution,
@@ -207,22 +211,117 @@ export async function ensureSandboxStep(
   prepared: PreparedExecution,
 ): Promise<SandboxRef> {
   "use step";
-  // U2 v1: cold-start path only. The legacy runMessageStream has extensive
-  // warm-handle cache + parallel MCP/plugin/auth optimization that we'll
-  // port in a follow-up. For now, every workflow run does a fresh
-  // sandbox provision per-message.
-  //
-  // TODO(U2-followup): port the warm-cache + parallel-builds optimization
-  // from legacy runMessageStream so workflow-backed sessions get the same
-  // hot-path latency as legacy. Tracked separately to keep U2 reviewable.
+  // Mirrors the legacy runMessageStream optimization layout (dispatcher.ts:
+  // 590–765) so workflow-backed follow-up messages don't pay the full cold-
+  // start cost on every turn. The hot-path process-local cache (activeSessions)
+  // is intentionally not ported — workflow steps may run on different function
+  // instances and a per-instance cache wouldn't reliably hit. The warm
+  // reconnect path is the big win: skips ~3s of sandbox provisioning when
+  // the session already has a live sandbox.
   const env = getEnv();
   const { agent, session, effectiveBudget, effectiveMaxTurns } = prepared;
   const effectiveRunner = resolveEffectiveRunner(agent.model, agent.runner);
 
+  // skipPluginRefresh: the existing sandbox already has plugin files on disk
+  // (reconnectSessionSandbox doesn't re-inject — see "OPTIMIZATION B" comment
+  // in sandbox.ts). MCP freshness is the proxy for "the sandbox state is still
+  // valid"; if MCP refreshed within the TTL, skip the plugin GitHub fetch too.
+  const mcpFresh = isMcpFresh(session);
+  const skipPluginRefresh = !!session.sandbox_id && mcpFresh;
+
+  // Kick off all three builds in parallel — they overlap with reconnect or
+  // cold-start work below. fetchPluginContent on an empty plugin list is a
+  // no-op fast path; resolveSandboxAuth is one cached DB read.
+  const mcpPromise = withTenantTransaction(
+    input.tenantId,
+    () => buildMcpConfig(agent, input.tenantId),
+  ) as Promise<McpBuildResult>;
+  const pluginPromise = (skipPluginRefresh
+    ? Promise.resolve<PluginFileSet>({ skillFiles: [], agentFiles: [], warnings: [] })
+    : fetchPluginContent(agent.plugins ?? [])) as Promise<PluginFileSet>;
+  const authPromise = resolveSandboxAuth(input.tenantId, effectiveRunner);
+
+  // Warm path: the session already has a sandbox_id. Try reconnecting to
+  // the live sandbox (saves ~3s of fresh provision). Race the reconnect
+  // against the parallel builds so MCP/plugin work overlaps with the
+  // Sandbox.get() RPC.
+  if (session.sandbox_id) {
+    const auth = await authPromise;
+    // Build the FULL sandbox config now so the SandboxRef returned to
+    // subsequent steps carries everything they need — they reconnect via
+    // reconnectSessionSandbox(sandboxId, sandboxConfig) on every step.
+    // Legacy passes mcpServers=undefined to reconnect, then calls
+    // updateMcpConfig on the same wrapper instance — that pattern doesn't
+    // translate to workflow steps because each step rebuilds the wrapper.
+    // Here we wait for mcpPromise so the config is complete.
+    const [mcpResult, pluginResult] = await Promise.all([mcpPromise, pluginPromise]);
+    void pluginResult; // unused on reconnect path; existing sandbox has files
+
+    const sandboxConfig: SessionSandboxConfig = {
+      agent: { ...agent, max_budget_usd: effectiveBudget, max_turns: effectiveMaxTurns },
+      tenantId: input.tenantId,
+      sessionId: session.id,
+      platformApiUrl: input.platformApiUrl,
+      aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+      auth,
+      mcpServers: mcpResult.servers,
+      mcpErrors: mcpResult.errors,
+      pluginFiles: [],
+      maxIdleTimeoutMs: SESSION_TIMEOUT_MS,
+      callbackData: input.callbackData,
+    };
+
+    const reconnectResult = await reconnectSessionSandbox(
+      session.sandbox_id,
+      sandboxConfig,
+    );
+
+    if (reconnectResult) {
+      // Bump the sandbox idle timeout if it's been sitting for a while —
+      // mirror legacy's threshold (5 min idle → bump). Without this, a
+      // follow-up message on a session that idled past the sandbox's own
+      // timeout would race the sandbox going away mid-message.
+      const idleSinceMs = session.idle_since
+        ? Date.now() - new Date(session.idle_since).getTime()
+        : Infinity;
+      if (idleSinceMs > SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS) {
+        try {
+          await reconnectResult.extendTimeout(SESSION_TIMEOUT_MS);
+        } catch (err) {
+          logger.warn("ensureSandboxStep: extendTimeout failed (best-effort)", {
+            session_id: session.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      recordMcpRefresh(session.id, input.tenantId);
+      logger.info("ensureSandboxStep: warm reconnect", {
+        session_id: session.id,
+        sandbox_id: session.sandbox_id,
+        skip_plugin_refresh: skipPluginRefresh,
+      });
+      return { sandboxId: session.sandbox_id, sandboxConfig };
+    }
+    // Reconnect returned null → sandbox vanished (cleanup-cron stopped it,
+    // Vercel idle-killed it, etc.). Fall through to cold-start. The plugin
+    // promise we resolved with the fast path may have been wrong (we needed
+    // the full plugin content for cold-start); kick a fresh fetch since we
+    // skipped it on the assumption that the sandbox still had the files.
+    logger.info("ensureSandboxStep: reconnect failed → cold start", {
+      session_id: session.id,
+      stale_sandbox_id: session.sandbox_id,
+    });
+  }
+
+  // Cold path: either no prior sandbox, or reconnect failed. Provision fresh.
+  // Re-fetch plugin content if we skipped it earlier on the warm-path
+  // assumption.
   const [mcpResult, pluginResult, auth] = await Promise.all([
-    withTenantTransaction(input.tenantId, () => buildMcpConfig(agent, input.tenantId)) as Promise<McpBuildResult>,
-    fetchPluginContent(agent.plugins ?? []) as Promise<PluginFileSet>,
-    resolveSandboxAuth(input.tenantId, effectiveRunner),
+    mcpPromise,
+    skipPluginRefresh
+      ? (fetchPluginContent(agent.plugins ?? []) as Promise<PluginFileSet>)
+      : pluginPromise,
+    authPromise,
   ]);
 
   const { sandbox, sandboxConfig } = await coldStartSandbox({
