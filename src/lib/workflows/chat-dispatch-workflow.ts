@@ -430,6 +430,18 @@ async function startInnerDispatchStep(
 ): Promise<StartedDispatch> {
   "use step";
 
+  // DIAG: very-first-line breadcrumb so we can confirm the step body
+  // is entered at all. If this log doesn't fire, WDK isn't running our
+  // step body (deploy/registration issue). If it fires but later logs
+  // don't, the step is throwing in one of the branches below.
+  logger.info("startInnerDispatchStep: ENTER", {
+    tenant_id: input.tenantId,
+    agent_id: input.agentId,
+    platform: input.platform,
+    event_id: input.eventId,
+    thread_key: input.threadKey,
+  });
+
   // A6 + REL-R2-01 fix (review runs 20260506-221948-2402b0ed and
   // 20260506-232400-round2): claim-then-reserve pattern. Two concurrent
   // step retries race on the placeholder INSERT; only ONE winner runs
@@ -450,9 +462,20 @@ async function startInnerDispatchStep(
     );
     return inserted.rowCount === 1;
   });
+  logger.info("startInnerDispatchStep: dedupe INSERT result", {
+    event_id: input.eventId,
+    won,
+  });
 
   if (!won) {
+    logger.info("startInnerDispatchStep: entering loser path", {
+      event_id: input.eventId,
+    });
     const recovered = await recoverLostClaim(input);
+    logger.info("startInnerDispatchStep: recoverLostClaim result", {
+      event_id: input.eventId,
+      kind: recovered.kind,
+    });
     if (recovered.kind === "attached") {
       return { kind: "started", innerRunId: recovered.innerRunId };
     }
@@ -495,7 +518,24 @@ async function startInnerDispatchStep(
   // double-dispatch. A single UPDATE after start() would race with
   // WDK retry: an UPDATE-failure → retry-step → poll → steal-after-90s
   // → second start() → duplicate inner workflow.
-  const prepared = await reserveSessionAndMessage(dispatchInput);
+  let prepared: PreparedExecution;
+  try {
+    prepared = await reserveSessionAndMessage(dispatchInput);
+    logger.info("startInnerDispatchStep: reserveSessionAndMessage OK", {
+      event_id: input.eventId,
+      session_id: prepared.session.id,
+      message_id: prepared.messageId,
+      session_status: prepared.session.status,
+    });
+  } catch (err) {
+    logger.error("startInnerDispatchStep: reserveSessionAndMessage threw", {
+      event_id: input.eventId,
+      thread_key: input.threadKey,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 
   await withTenantTransaction(input.tenantId, async (tx) => {
     await tx.execute(
