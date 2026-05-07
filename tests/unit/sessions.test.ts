@@ -144,6 +144,46 @@ describe("createSession", () => {
     expect(result.agent).toEqual(mockAgent);
     expect(result.remainingBudget).toBe(100);
   });
+
+  // U2 race fix: when INSERT...ON CONFLICT DO NOTHING returns no row AND a
+  // contextId is provided, re-fetch the existing non-stopped session for
+  // (tenant, agent, contextId). If found, attach to the race winner instead
+  // of throwing ConcurrencyLimitError. This is the cleanup-vs-create race
+  // where cleanup-cron commits 'stopped' while two events for the same
+  // thread arrive simultaneously.
+  it("attaches to existing session on contextId race (winner found via re-fetch)", async () => {
+    const winnerSession = { ...mockSession, status: "active" as const, context_id: "discord:G:C:T" };
+    mockTx.queryOne
+      .mockResolvedValueOnce(mockAgent) // agent lookup
+      .mockResolvedValueOnce({ status: "active", monthly_budget_usd: 100, current_month_spend: 0 }) // budget
+      .mockResolvedValueOnce(null) // INSERT returns null (ON CONFLICT swallowed by partial unique index)
+      .mockResolvedValueOnce(winnerSession); // re-fetch finds the race winner
+
+    const result = await createSession(tenantId, agentId, { contextId: "discord:G:C:T" });
+    expect(result.session).toEqual(winnerSession);
+    expect(result.agent).toEqual(mockAgent);
+  });
+
+  it("still throws ConcurrencyLimitError when contextId is set but no race winner exists (true cap exceeded)", async () => {
+    mockTx.queryOne
+      .mockResolvedValueOnce(mockAgent)
+      .mockResolvedValueOnce({ status: "active", monthly_budget_usd: 100, current_month_spend: 0 })
+      .mockResolvedValueOnce(null) // INSERT returns null
+      .mockResolvedValueOnce(null); // re-fetch finds nothing → cap genuinely exceeded
+    await expect(
+      createSession(tenantId, agentId, { contextId: "discord:G:C:T" }),
+    ).rejects.toThrow(ConcurrencyLimitError);
+  });
+
+  it("does not re-fetch when contextId is absent (cap-exceeded path unchanged)", async () => {
+    mockTx.queryOne
+      .mockResolvedValueOnce(mockAgent)
+      .mockResolvedValueOnce({ status: "active", monthly_budget_usd: 100, current_month_spend: 0 })
+      .mockResolvedValueOnce(null);
+    await expect(createSession(tenantId, agentId)).rejects.toThrow(ConcurrencyLimitError);
+    // Re-fetch SELECT was NOT issued (would have been a 4th queryOne call).
+    expect(mockTx.queryOne).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe("getSession", () => {
