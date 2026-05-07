@@ -12,12 +12,16 @@ export function Tabs({ tabs, defaultTab = 0 }: { tabs: Tab[]; defaultTab?: numbe
 
   return (
     <div>
-      <div className="flex gap-4">
+      {/* Horizontal scroll for narrow viewports — adding a 9th tab (Bots)
+          pushes the row past the viewport at <1280px on the agent detail
+          page. overflow-x-auto + whitespace-nowrap preserves the line-style
+          design and lets the user swipe to reveal hidden tabs. */}
+      <div className="flex gap-4 overflow-x-auto whitespace-nowrap">
         {tabs.map((tab, i) => (
           <button
             key={tab.label}
             onClick={() => setActive(i)}
-            className={`relative pb-2 text-sm font-medium transition-colors ${
+            className={`relative pb-2 text-sm font-medium transition-colors flex-shrink-0 ${
               active === i
                 ? "text-foreground"
                 : "text-muted-foreground hover:text-foreground"
