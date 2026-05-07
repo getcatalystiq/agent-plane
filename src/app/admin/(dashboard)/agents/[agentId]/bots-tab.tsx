@@ -126,7 +126,7 @@ export function BotsTab({ agentId, webhookBaseUrl }: BotsTabProps) {
 
 function ThreatModelBanner() {
   return (
-    <div className="rounded-md border border-yellow-700/40 bg-yellow-900/20 p-4 text-sm text-yellow-100">
+    <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-100">
       <strong className="font-semibold">Private / trusted workspaces only.</strong>{" "}
       Chat support is gated to workspaces ≤100 members at connect time. Do not
       connect agents with sensitive tool access (database writes, financial
@@ -240,7 +240,7 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
       )}
 
       {state === "token_rejected" && config?.last_error && (
-        <div className="rounded border border-red-700/40 bg-red-900/20 p-3 text-sm">
+        <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-700/50 dark:bg-red-950/20 dark:text-red-100">
           <strong>Token rejected:</strong> {config.last_error}
         </div>
       )}
@@ -314,11 +314,11 @@ function ConnectionChip({ state }: { state: ConnectionState }) {
   const colors: Record<ConnectionState, string> = {
     not_configured: "bg-muted text-muted-foreground",
     disabled: "bg-muted text-muted-foreground border border-dashed border-border",
-    connected: "bg-green-900/30 text-green-300",
-    no_events: "bg-yellow-900/30 text-yellow-300",
-    token_rejected: "bg-red-900/30 text-red-300",
-    pending_validation: "bg-blue-900/30 text-blue-300",
-    refreshing: "bg-blue-900/30 text-blue-300",
+    connected: "bg-emerald-100 text-emerald-900 dark:bg-emerald-900/30 dark:text-emerald-300",
+    no_events: "bg-amber-100 text-amber-900 dark:bg-amber-900/30 dark:text-amber-200",
+    token_rejected: "bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-300",
+    pending_validation: "bg-blue-100 text-blue-900 dark:bg-blue-900/30 dark:text-blue-300",
+    refreshing: "bg-blue-100 text-blue-900 dark:bg-blue-900/30 dark:text-blue-300",
   };
   const labels: Record<ConnectionState, string> = {
     not_configured: "Not configured",
@@ -349,13 +349,13 @@ function NoEventsHint({ platform }: { platform: Platform }) {
         label: "Open Slack app config",
       };
   return (
-    <div className="rounded border border-yellow-700/40 bg-yellow-900/15 p-3 text-sm space-y-1">
+    <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm space-y-1 text-amber-900 dark:border-amber-700/50 dark:bg-amber-950/20 dark:text-amber-100">
       <p>{text.msg}</p>
       <a
         href={text.href}
         target="_blank"
         rel="noreferrer"
-        className="text-yellow-200 underline text-xs"
+        className="text-amber-800 dark:text-amber-200 underline text-xs"
       >
         {text.label} →
       </a>
@@ -490,7 +490,7 @@ function ConnectForm({
         </span>
       </label>
       {error && (
-        <div className="text-xs text-red-300 bg-red-900/20 border border-red-700/40 p-2 rounded">{error}</div>
+        <div className="text-xs text-red-900 bg-red-50 border border-red-300 p-2 rounded dark:text-red-100 dark:bg-red-950/20 dark:border-red-700/50">{error}</div>
       )}
       <div className="flex gap-2">
         <button
