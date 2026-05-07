@@ -202,6 +202,11 @@ scripts/
   create-api-key.ts       # CLI to generate additional API keys for a tenant
 tests/
   unit/                   # Vitest unit tests
+docs/
+  solutions/              # documented solutions to past problems (bugs, architecture/design patterns, conventions), organized by category with YAML frontmatter (module, problem_type, tags) — relevant when implementing or debugging in documented areas
+  runbooks/               # operator guides for production features (chat-platform-bots, workflow-dispatch incidents)
+  plans/                  # ce-plan decision artifacts (one per feature/refactor)
+  brainstorms/            # ce-brainstorm requirements docs (upstream of plans)
 ```
 
 ## Database
