@@ -19,7 +19,7 @@
  * sessions with non-null `workflow_run_id` continue on workflow. The
  * toggle only affects NEW dispatches.
  */
-import { getSession, setWorkflowRunId } from "@/lib/sessions";
+import { getSession, setWorkflowRunId, clearWorkflowRunId } from "@/lib/sessions";
 import {
   dispatchSessionMessage,
   reserveSessionAndMessage,
@@ -45,16 +45,49 @@ export async function dispatchOrWorkflowDispatch(
 ): Promise<DispatchResult> {
   const trigger = input.triggeredBy as RunTriggeredBy;
 
-  // Coexistence rule: existing session pins the path.
+  // Existing session: pick the fastest path that's still safe.
   if (input.sessionId) {
     try {
       const session = await getSession(input.sessionId, input.tenantId);
+
+      // PERF — warm follow-up bypass: when a session already has a live
+      // sandbox AND isn't stopped, the legacy in-process path is strictly
+      // faster than any workflow path because it skips every WDK step
+      // boundary (reserve, prepare, write per batch, finalize). Each step
+      // costs ~100-500ms of cross-function overhead; for a chatty
+      // follow-up the workflow can pay 1-3s of overhead on top of the
+      // actual work. Legacy reuses the same warm sandbox via
+      // reconnectSessionSandbox in-process, so we get all of the
+      // warm-reconnect benefit with none of the WDK tax.
+      //
+      // Safety: each MESSAGE creates its own workflow run anyway, so
+      // dropping the workflow for one follow-up doesn't leave anything
+      // partially-orchestrated. We clear session.workflow_run_id (if any)
+      // so cancelSession / cleanup-cron don't try to WDK-cancel a run
+      // that's not actually orchestrating this message.
+      if (session.sandbox_id && session.status !== "stopped") {
+        if (session.workflow_run_id) {
+          await clearWorkflowRunId(session.id, input.tenantId).catch((err) => {
+            logger.warn(
+              "dispatchOrWorkflowDispatch: clearWorkflowRunId failed (best-effort)",
+              {
+                session_id: session.id,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            );
+          });
+        }
+        return await dispatchSessionMessage(input);
+      }
+
+      // Cold session that's already workflow-pinned (no live sandbox, but
+      // an in-flight workflow run): append via workflow even if the
+      // toggle is now off, so the runner registered with the existing
+      // hook keeps working.
       if (session.workflow_run_id) {
-        // Existing workflow-backed session: append a message via workflow
-        // path even if the toggle is now off.
         return await dispatchViaWorkflow(input);
       }
-      // Existing legacy-pinned session: stay on legacy path.
+      // Cold legacy-pinned session: stay on legacy path.
       return await dispatchSessionMessage(input);
     } catch {
       // Session lookup failed → fall through to toggle-based decision; the

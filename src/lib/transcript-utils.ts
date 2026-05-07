@@ -31,6 +31,11 @@ export const NO_TERMINAL_EVENT_FALLBACK: {
 
 // --- Secret Scrubbing ---
 export function scrubSecrets(text: string): string {
+  // Fast path: nothing to scrub if the literal Anthropic key prefix isn't
+  // even in the string. The vast majority of runner lines (text_delta,
+  // tool_result, mcp_status) never include keys; this lets us skip the
+  // regex scan entirely on those.
+  if (!text.includes("sk-ant-")) return text;
   // Broad pattern covers all Anthropic token prefixes (oat01, api03, sid01, future versions)
   return text.replace(/sk-ant-[a-z0-9]+-[A-Za-z0-9_-]+/g, "[REDACTED]");
 }
