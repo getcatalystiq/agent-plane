@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { formatForPlatform } from "@/lib/platform/format";
 
 describe("formatForPlatform — Discord", () => {
-  it("passes CommonMark through unchanged", () => {
+  it("passes CommonMark through unchanged with rawConsumed = full input", () => {
     const out = formatForPlatform("discord", "Hello **world**", { partial: false });
     expect(out.flushable).toBe("Hello **world**");
     expect(out.remainder).toBe("");
+    expect(out.rawConsumed).toBe("Hello **world**".length);
   });
 
   it("does not hold partial tokens for Discord", () => {
@@ -16,9 +17,15 @@ describe("formatForPlatform — Discord", () => {
 });
 
 describe("formatForPlatform — Slack mrkdwn", () => {
-  it("converts **bold** to *bold*", () => {
-    const out = formatForPlatform("slack", "Say **hello** now", { partial: false });
+  it("converts **bold** to *bold* and reports rawConsumed = raw input length", () => {
+    // Regression for C-R2-2 (review run 20260506-232400-round2): the chat
+    // workflow's committedLength tracks raw input. translated.length
+    // (15) is shorter than raw input length (17), so the chat workflow
+    // must advance by 17, not 15, to align the next slice correctly.
+    const raw = "Say **hello** now";
+    const out = formatForPlatform("slack", raw, { partial: false });
     expect(out.flushable).toBe("Say *hello* now");
+    expect(out.rawConsumed).toBe(raw.length);
   });
 
   it("converts __italic__ to _italic_", () => {

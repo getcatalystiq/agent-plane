@@ -447,17 +447,6 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
   });
 }
 
-export async function rotateBotCredentials(
-  tenantId: TenantId,
-  agentId: AgentId,
-  newCredentials: PlatformCredentials,
-  attestations: AttestationsInput,
-): Promise<PlatformBotConfigPublic> {
-  // Validation failure (or attestation failure) preserves prior config —
-  // upsertBotConfig only writes after both gates pass.
-  return upsertBotConfig({ tenantId, agentId, credentials: newCredentials, attestations });
-}
-
 export async function getBotConfig(
   tenantId: TenantId,
   agentId: AgentId,

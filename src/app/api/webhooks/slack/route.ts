@@ -198,17 +198,22 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     });
   }
 
-  // 5. HMAC verify. Try the per-bot signing secret first, then global
-  //    SLACK_SIGNING_SECRET / SLACK_SIGNING_SECRET_PREVIOUS as rotation
-  //    fallbacks (P2 #19 dual-accept window).
+  // 5. HMAC verify.
+  //
+  //    SEC-R2-001 fix (review run 20260506-232400-round2): the per-bot
+  //    secret is the ONLY secret that authorizes real events. The
+  //    global SLACK_SIGNING_SECRET / SLACK_SIGNING_SECRET_PREVIOUS env
+  //    vars are accepted only on the maybeHandleFirstTimeChallenge
+  //    path — i.e., url_verification challenges before per-bot
+  //    credentials are saved. Round-1 added the global fallback for
+  //    multi-bot rotation convenience, but that broke the per-bot
+  //    ownership model: anyone holding the global env value could
+  //    forge real events on any tenant's bot. Per-bot rotation via
+  //    `credentials_version` bump is the canonical rotation path.
   //
   //    Signature failures past the team_id-found branch return 200
   //    unhandled — the same status the unknown-team_id branch returns —
-  //    to close the timing/registration oracle (P2 #18). A real attacker
-  //    with a forged signature can still tell the route exists, but
-  //    can't tell which team_ids are registered just by toggling between
-  //    valid and forged signatures.
-  const env = getEnv();
+  //    to close the timing/registration oracle (P2 #18).
   const sigHeader = req.headers.get("x-slack-signature");
   const match = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
   if (!match) {
@@ -218,21 +223,8 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     });
   }
   const provided = match[1].toLowerCase();
-  const candidates = [signingSecret];
-  if (env.SLACK_SIGNING_SECRET && env.SLACK_SIGNING_SECRET !== signingSecret) {
-    candidates.push(env.SLACK_SIGNING_SECRET);
-  }
-  if (env.SLACK_SIGNING_SECRET_PREVIOUS) {
-    candidates.push(env.SLACK_SIGNING_SECRET_PREVIOUS);
-  }
-  let verified = false;
-  for (const secret of candidates) {
-    const expected = await hmacSha256Hex(secret, `v0:${ts}:${rawBody}`);
-    if (constantTimeEqualHex(provided, expected)) {
-      verified = true;
-      break;
-    }
-  }
+  const expected = await hmacSha256Hex(signingSecret, `v0:${ts}:${rawBody}`);
+  const verified = constantTimeEqualHex(provided, expected);
   if (!verified) {
     return new Response(JSON.stringify({ status: "unhandled" }), {
       status: 200,

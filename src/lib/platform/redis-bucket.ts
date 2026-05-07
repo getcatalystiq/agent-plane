@@ -43,8 +43,17 @@ async function getClient(): Promise<RedisClientType> {
   if (!sharedClient.isOpen) {
     if (!connectPromise) {
       // redis@5 returns the client from connect(); cast to void since we
-      // re-use the captured reference.
-      connectPromise = sharedClient.connect().then(() => undefined);
+      // re-use the captured reference. Clear the cached promise on
+      // failure so a transient outage doesn't poison the function
+      // instance's cache (REL-R2-03 fix in review run 20260506-232400-round2).
+      connectPromise = sharedClient
+        .connect()
+        .then(() => undefined)
+        .catch((err) => {
+          connectPromise = null;
+          sharedClient = null;
+          throw err;
+        });
     }
     await connectPromise;
     connectPromise = null;

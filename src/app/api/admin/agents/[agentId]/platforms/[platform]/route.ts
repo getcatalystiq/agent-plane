@@ -22,7 +22,6 @@ import { withErrorHandler } from "@/lib/api";
 import { logger } from "@/lib/logger";
 import {
   upsertBotConfig,
-  rotateBotCredentials,
   getBotConfig,
   disableBotConfig,
   AttestationGateError,

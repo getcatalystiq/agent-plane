@@ -251,9 +251,20 @@ export async function chatDispatchWorkflow(
       chunksSinceFlush = 0;
       hasPosted = true;
       if (overflow) {
-        // Seal the current message at exactly the chars we sent (capped).
-        // The remainder stays in the open buffer for the next message.
-        committedLength += capped.length;
+        // Seal the current message. C-R2-2 fix (review run 20260506-232400-round2):
+        // committedLength tracks RAW responseText positions, not translated
+        // output positions. On Slack, mrkdwn translation shrinks the text
+        // (`**bold**` → `*bold*`); advancing by capped.length would skip
+        // raw chars equal to the translation delta. Use rawConsumed
+        // (the boundary in raw input chars) when the formatter passed
+        // its full output through (no cap-truncation); otherwise fall
+        // back to capped.length as a conservative under-advance (the
+        // user sees the next message start with a small overlap rather
+        // than skipping content).
+        const sealedRaw = capped === formatted.flushable
+          ? formatted.rawConsumed
+          : capped.length;
+        committedLength += sealedRaw;
         messageId = null;
       } else {
         // Edit success: do NOT advance committedLength. The next tick will
@@ -327,11 +338,16 @@ async function startInnerDispatchStep(
 ): Promise<StartedDispatch> {
   "use step";
 
-  // A6 (review run 20260506-221948-2402b0ed P1 #13): WDK retries an
-  // entire step on transient failure; without dedup, reserveSessionAndMessage
-  // would re-run and double-create session_messages rows. The
-  // chat_event_dedupe table CAS-tracks the first successful run, so retry
-  // returns the cached innerRunId without invoking reserve.
+  // A6 (run 20260506-221948-2402b0ed) + C-R2-1 fix (run 20260506-232400-round2):
+  // WDK retries an entire step on transient failure. The dedupe table
+  // ensures user-visible correctness (one bot reply per event id) — but
+  // does NOT prevent the loser of the SELECT/INSERT race from running
+  // reserveSessionAndMessage + start(dispatchWorkflow) before discovering
+  // it lost. That leaves orphan session_messages and inner workflow runs
+  // until the cleanup-sessions cron reclaims them. Acceptable trade-off
+  // because WDK retries are rare (transient errors only).
+  //
+  // The fast path: SELECT first; if a winner exists, return its runId.
   const existing = await withTenantTransaction(input.tenantId, async (tx) => {
     return tx.queryOne(
       DedupeRow,
@@ -380,17 +396,44 @@ async function startInnerDispatchStep(
   );
 
   // Persist dedupe entry. ON CONFLICT DO NOTHING handles the second-replay
-  // race where two concurrent step retries both pass the SELECT.
-  await withTenantTransaction(input.tenantId, async (tx) => {
-    await tx.execute(
+  // race where two concurrent step retries both pass the SELECT and both
+  // reserve+start. C-R2-1 fix: when ON CONFLICT swallows our INSERT, the
+  // *winner's* runId is in the row — return that instead of our own. If we
+  // returned run.runId on the loser side, the chat workflow body would
+  // read getRun(loser.runId).getReadable() which has no chunks (the runner
+  // wrote to the winner's hook).
+  const ourRunId = run.runId;
+  const winnerRunId = await withTenantTransaction(input.tenantId, async (tx) => {
+    // Use RETURNING to detect whether our INSERT won; null means
+    // ON CONFLICT swallowed it.
+    const insertedRows = await tx.query(
+      DedupeRow,
       `INSERT INTO chat_event_dedupe (tenant_id, platform, event_id, session_id, message_id, inner_run_id)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (tenant_id, platform, event_id) DO NOTHING`,
-      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId, run.runId],
+       ON CONFLICT (tenant_id, platform, event_id) DO NOTHING
+       RETURNING session_id, message_id, inner_run_id`,
+      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId, ourRunId],
     );
+    if (insertedRows.length > 0) return ourRunId;
+    // Loser path: re-read the winning row and use its runId.
+    const winner = await tx.queryOne(
+      DedupeRow,
+      `SELECT session_id, message_id, inner_run_id FROM chat_event_dedupe
+       WHERE tenant_id = $1 AND platform = $2 AND event_id = $3`,
+      [input.tenantId, input.platform, input.eventId],
+    );
+    if (!winner) return ourRunId; // Should not happen — ON CONFLICT means a row exists.
+    logger.info("startInnerDispatchStep: lost dedupe race; attaching to winner", {
+      tenant_id: input.tenantId,
+      platform: input.platform,
+      event_id: input.eventId,
+      our_run_id: ourRunId,
+      winner_run_id: winner.inner_run_id,
+    });
+    return winner.inner_run_id;
   });
 
-  return { innerRunId: run.runId };
+  return { innerRunId: winnerRunId };
 }
 
 async function persistAttachmentsStep(input: ChatTriggerInput): Promise<PersistedAttachment[]> {

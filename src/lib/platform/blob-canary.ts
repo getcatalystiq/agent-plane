@@ -22,8 +22,11 @@ import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
 let canaryResult: Promise<void> | null = null;
+let canaryResultExpiresAt = 0;
 
 const CANARY_TIMEOUT_MS = 10_000;
+const CANARY_SUCCESS_TTL_MS = 60 * 60 * 1000; // 1h: re-canary on rotation
+const CANARY_FAILURE_RETRY_MS = 60_000;
 
 async function runCanary(): Promise<void> {
   const env = getEnv();
@@ -90,25 +93,42 @@ async function runCanary(): Promise<void> {
  * first put(). Subsequent calls return the cached promise.
  */
 export async function ensurePrivateBlobStore(): Promise<void> {
-  if (!canaryResult) {
-    canaryResult = runCanary().catch((err) => {
-      // Reset the cache on failure so the next attempt can re-run after
-      // an operator fixes the configuration. Log once per failure.
+  // REL-R2-02 fix (review run 20260506-232400-round2): success has a
+  // TTL so an env rotation (BLOB_PRIVATE_READ_WRITE_TOKEN swap) re-runs
+  // the canary instead of trusting the stale verification for the rest
+  // of the function-instance lifetime.
+  const now = Date.now();
+  if (canaryResult && now < canaryResultExpiresAt) {
+    return canaryResult;
+  }
+
+  canaryResult = runCanary()
+    .then(() => {
+      canaryResultExpiresAt = Date.now() + CANARY_SUCCESS_TTL_MS;
+    })
+    .catch((err) => {
       logger.error("blob_canary: failed", {
         error: err instanceof Error ? err.message : String(err),
       });
-      // Wait briefly before allowing a retry so a transient outage doesn't
+      // Brief cool-off before next retry so a transient outage doesn't
       // hammer the canary path.
-      setTimeout(() => {
-        canaryResult = null;
-      }, 60_000);
+      canaryResultExpiresAt = Date.now() + CANARY_FAILURE_RETRY_MS;
+      // Clear the cache so the cool-off elapsing triggers a fresh attempt.
+      const handle = setTimeout(() => {
+        if (canaryResult) {
+          canaryResult = null;
+          canaryResultExpiresAt = 0;
+        }
+      }, CANARY_FAILURE_RETRY_MS);
+      // Don't keep Node alive on this timer in tests / serverless.
+      handle.unref?.();
       throw err;
     });
-  }
   return canaryResult;
 }
 
 /** Test-only: reset the cached canary result. */
 export function _resetBlobCanaryForTests(): void {
   canaryResult = null;
+  canaryResultExpiresAt = 0;
 }
