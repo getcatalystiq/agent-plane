@@ -138,6 +138,28 @@ export async function chatDispatchWorkflow(
     return;
   }
 
+  // Round-6 review #B fix: abandonment sentinel. recoverLostClaim has
+  // already called markBotError; we just need to bail without entering
+  // the stream-consumption path (which would call getRun(undefined)).
+  if ("abandoned" in started) {
+    return;
+  }
+  // Round-6 review #A fix: orphan sentinel. The inner workflow IS
+  // running but the dedupe row's inner_run_id never persisted (DB
+  // connectivity blip during the placeholder UPDATE). Continue to
+  // stream consumption — the user gets their reply this turn — but
+  // log the orphan so ops can see it. The cleanup-sessions sweep
+  // reaps the placeholder at the 15-min TTL, and any subsequent retry
+  // for the same event_id will INSERT cleanly.
+  if ("orphan" in started) {
+    logger.warn("chatDispatchWorkflow: continuing with orphan placeholder", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      inner_run_id: started.innerRunId,
+    });
+  }
+
   // 4. Stream consumption — read the inner dispatcher's NDJSON chunks via
   //    getRun().getReadable(). WDK's WorkflowReadableStream is a plain
   //    ReadableStream — pump via getReader() rather than for-await (the
@@ -379,9 +401,16 @@ export async function chatDispatchWorkflow(
 // Steps
 // ---------------------------------------------------------------------------
 
-interface StartedDispatch {
-  innerRunId: string;
-}
+// Round-6 review #A+#B fix: StartedDispatch is now a discriminated union
+// so startInnerDispatchStep can return graceful sentinels instead of
+// throwing in cases where the recovery path has already done all
+// possible cleanup (markBotError + extensive logging). WDK retries any
+// thrown Error from a step — throwing here meant the abandonment + the
+// retry-exhaustion paths re-fired forever instead of bailing once.
+type StartedDispatch =
+  | { innerRunId: string }
+  | { abandoned: true }
+  | { orphan: true; innerRunId: string };
 
 // Placeholder rows have all three nullable until the winner UPDATEs.
 const DedupeRow = z.object({
@@ -439,14 +468,17 @@ async function startInnerDispatchStep(
       return { innerRunId: recovered.innerRunId };
     }
     if (recovered.kind === "abandoned") {
-      // Round-5 review #12: surface the abandonment as a bot error so
-      // operators see it. The caller (workflow body) should not call
-      // start() — throw a descriptive error that bypasses WDK retry.
+      // Round-5 review #12 + Round-6 review #B fix: surface the
+      // abandonment as a bot error AND return a sentinel instead of
+      // throwing. WDK retries on any thrown error from a step, which
+      // would re-enter recoverLostClaim and re-throw indefinitely.
+      // markBotError is the user-visible signal; cleanup sweep frees
+      // the placeholder so a future legitimate retry can succeed.
       await markBotErrorStep(
         input,
         `claim recovery abandoned after ${recovered.attempts} steal attempts; cleanup sweep will free the placeholder shortly`,
       );
-      throw new ClaimAbandonedError(input.eventId, recovered.attempts);
+      return { abandoned: true };
     }
     // recovered.kind === "promoted" — fall through to the winner path
     // with the stolen claim.
@@ -512,17 +544,36 @@ async function startInnerDispatchStep(
     [dispatchInput, prepared],
   );
 
-  await retryPlaceholderInnerRunUpdate(input, run.runId);
+  const filled = await retryPlaceholderInnerRunUpdate(input, run.runId);
+
+  // Round-6 review #A fix: if the inner_run_id UPDATE failed after all
+  // retries, the inner workflow IS running but the dedupe row is now
+  // an orphan placeholder. Returning the orphan sentinel lets the
+  // workflow body proceed with stream consumption (so the user gets
+  // their reply this turn) while flagging the orphan for ops. The
+  // cleanup-sessions sweep reaps the placeholder at the 15-min TTL.
+  if (!filled) {
+    return { orphan: true, innerRunId: run.runId };
+  }
 
   return { innerRunId: run.runId };
 }
 
 const PLACEHOLDER_UPDATE_BACKOFFS_MS = [100, 250, 500] as const;
 
+// Round-6 review #A fix: returns true on success, false on retry
+// exhaustion. The prior code re-threw the last error, which WDK
+// interpreted as "retry the whole step" — so a transient DB blip
+// during the placeholder UPDATE caused the entire reserve+start
+// sequence to re-run, producing a duplicate inner workflow once the
+// 90s steal threshold elapsed. The new contract: if all retries fail,
+// the inner workflow is already running; we surrender the dedupe-row
+// invariant (the placeholder is now orphaned) but let the user get
+// their reply on this attempt. The cleanup sweep reaps the orphan.
 async function retryPlaceholderInnerRunUpdate(
   input: ChatTriggerInput,
   innerRunId: string,
-): Promise<void> {
+): Promise<boolean> {
   let lastErr: unknown;
   for (let i = 0; i <= PLACEHOLDER_UPDATE_BACKOFFS_MS.length; i++) {
     try {
@@ -535,7 +586,7 @@ async function retryPlaceholderInnerRunUpdate(
           [input.tenantId, input.platform, input.eventId, innerRunId],
         );
       });
-      return;
+      return true;
     } catch (err) {
       lastErr = err;
       if (i < PLACEHOLDER_UPDATE_BACKOFFS_MS.length) {
@@ -543,10 +594,7 @@ async function retryPlaceholderInnerRunUpdate(
       }
     }
   }
-  // All retries failed. Inner workflow is running; placeholder has
-  // session_id + message_id but no inner_run_id. The cleanup-sessions
-  // sweep will reap this orphan after 15min. Log loudly so ops knows.
-  logger.error("startInnerDispatchStep: failed to fill inner_run_id after retries", {
+  logger.error("startInnerDispatchStep: failed to fill inner_run_id after retries; placeholder orphaned", {
     tenant_id: input.tenantId,
     agent_id: input.agentId,
     platform: input.platform,
@@ -554,7 +602,7 @@ async function retryPlaceholderInnerRunUpdate(
     inner_run_id: innerRunId,
     error: lastErr instanceof Error ? lastErr.message : String(lastErr),
   });
-  throw lastErr;
+  return false;
 }
 
 type ClaimRecovery =
@@ -586,21 +634,10 @@ export class StaleClaimError extends Error {
   }
 }
 
-/**
- * Round-5 review #12: thrown by recoverLostClaim when the steal-attempts
- * counter crosses MAX_STEAL_ATTEMPTS. Distinct from StaleClaimError so
- * the workflow body can recognize "give up" vs "retry" semantics. The
- * caller should NOT retry on this — markBotError has already been
- * stamped and the cleanup sweep will free the placeholder.
- */
-export class ClaimAbandonedError extends Error {
-  constructor(eventId: string, public readonly attempts: number) {
-    super(
-      `startInnerDispatchStep: claim recovery abandoned for event ${eventId} after ${attempts} steal attempts; cleanup sweep will free the placeholder`,
-    );
-    this.name = "ClaimAbandonedError";
-  }
-}
+// Round-6 review #B fix: ClaimAbandonedError was removed. The
+// abandonment path now returns `{ abandoned: true }` from
+// startInnerDispatchStep so WDK doesn't retry past the explicit bail
+// signal. markBotError has already been stamped at the bail site.
 
 // Round-5 review #12: circuit breaker. Each steal attempt increments
 // chat_event_dedupe.steal_attempts (atomic with the steal UPDATE). If

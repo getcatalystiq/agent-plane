@@ -409,6 +409,24 @@ const TenantBotCapsRow = z.object({
   bot_platform_caps: z.record(z.string(), z.number().int().positive()).nullable(),
 });
 
+// Round-6 review #D: extracted helper so the lock key string is
+// constructed in one place. Two call sites (probe tx + UPSERT tx)
+// must use the same key for the lock to actually serialize.
+function botCapLockKey(tenantId: TenantId, platform: ChatPlatform): string {
+  return `bot-cap:${tenantId}:${platform}`;
+}
+
+async function acquireBotCapLock(
+  tx: TxClient,
+  tenantId: TenantId,
+  platform: ChatPlatform,
+): Promise<void> {
+  await tx.execute(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+    [botCapLockKey(tenantId, platform)],
+  );
+}
+
 async function getTenantBotCap(
   tx: TxClient,
   tenantId: TenantId,
@@ -453,23 +471,16 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
     throw new CredentialValidationError(validation);
   }
 
-  // Round-5 review #1 fix: serialize concurrent upserts on the same
-  // (tenant, platform) via pg_advisory_xact_lock. withTenantTransaction
-  // runs at READ COMMITTED, so the prior count-then-check pattern was
-  // TOCTOU-racy: two concurrent admin connects on different agents could
-  // both observe count=9 (each excluding self) and both pass the < 10
-  // gate. The advisory lock auto-releases at COMMIT/ROLLBACK and is keyed
-  // on a 64-bit hash of `bot-cap:<tenant>:<platform>` so distinct
-  // (tenant, platform) pairs don't contend.
-  const probe = await withTenantTransaction(input.tenantId, async (tx) => {
-    await tx.execute(
-      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-      [`bot-cap:${input.tenantId}:${input.credentials.platform}`],
-    );
-    // Per-tenant cap check — runs BEFORE the attestation gate so a
-    // tenant at the cap doesn't waste a probe API call against the
-    // platform. With the advisory lock held, COUNT(*) is now serialized
-    // against concurrent upserts on the same (tenant, platform).
+  // Round-6 review #E fix: split the cap pre-check from the probe. The
+  // probe is a 5s HTTP call to Slack/Discord; if held inside a tx with
+  // the advisory lock, it pins both a pool client AND the lock for that
+  // duration. Under concurrent admin connects, this serialized 5s
+  // probes one at a time and saturated the pool. Now: take the lock
+  // briefly for the pre-check (cheap SQL only), release at COMMIT,
+  // run the probe with no resources held, then re-take the lock in the
+  // UPSERT transaction (which re-checks the cap to close the window).
+  await withTenantTransaction(input.tenantId, async (tx) => {
+    await acquireBotCapLock(tx, input.tenantId, input.credentials.platform);
     const cap = await getTenantBotCap(tx, input.tenantId, input.credentials.platform);
     const enabledCount = await countEnabledBots(
       tx,
@@ -480,14 +491,20 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
     if (enabledCount >= cap) {
       throw new TenantBotCapExceededError(input.credentials.platform, cap);
     }
-    const threshold = await getTenantThreshold(tx, input.tenantId);
-    return enforceAttestationGate({
-      tenantId: input.tenantId,
-      credentials: input.credentials,
-      identity: validation.identity,
-      attestations: input.attestations,
-      maxTrustedMembers: threshold,
-    });
+  });
+
+  // Probe runs OUTSIDE the lock now so the pool client + advisory lock
+  // are released before the network call. Threshold is read in its own
+  // tiny transaction.
+  const threshold = await withTenantTransaction(input.tenantId, async (tx) => {
+    return getTenantThreshold(tx, input.tenantId);
+  });
+  const probe = await enforceAttestationGate({
+    tenantId: input.tenantId,
+    credentials: input.credentials,
+    identity: validation.identity,
+    attestations: input.attestations,
+    maxTrustedMembers: threshold,
   });
 
   // 2. Encrypt credentials.
@@ -513,10 +530,7 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
   // INSERT. Re-check the cap inside this transaction to close the window
   // where attestation/probe completed for two concurrent connects.
   return withTenantTransaction(input.tenantId, async (tx) => {
-    await tx.execute(
-      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-      [`bot-cap:${input.tenantId}:${input.credentials.platform}`],
-    );
+    await acquireBotCapLock(tx, input.tenantId, input.credentials.platform);
     const cap = await getTenantBotCap(tx, input.tenantId, input.credentials.platform);
     const enabledCount = await countEnabledBots(
       tx,

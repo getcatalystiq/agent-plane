@@ -327,4 +327,38 @@ describe("recoverLostClaim", () => {
     expect(err).toBeInstanceOf(StaleClaimError);
     expect((err as Error).message).toMatch(/claim race lost and steal failed/);
   });
+
+  it("returns 'abandoned' once steal_attempts crosses MAX_STEAL_ATTEMPTS", async () => {
+    // Round-6 review #B fix: the abandonment branch now returns
+    // `{ kind: "abandoned", attempts }` instead of throwing. This
+    // test exercises that branch via a custom mock that reports
+    // steal_attempts: 6 (above the threshold of 5).
+    const empty = { session_id: null, message_id: null, inner_run_id: null };
+    withTenantTransactionMock.mockImplementation(async (_tenantId: string, cb: (tx: TxClient) => Promise<unknown>) => {
+      let observed = false;
+      const probeTx: TxClient = {
+        queryOne: async (_schema, sql) => {
+          observed = true;
+          if (sql.toUpperCase().includes("UPDATE")) {
+            return { steal_attempts: 6, stole: false } as never;
+          }
+          return empty as never;
+        },
+        execute: async () => {
+          observed = true;
+          return { rowCount: 0 };
+        },
+        query: async () => [],
+      };
+      const result = await cb(probeTx);
+      if (!observed) throw new Error("test mock: callback didn't invoke tx");
+      return result;
+    });
+
+    const promise = __testing.recoverLostClaim(triggerInput);
+    await drainPollBudget(); // initial poll exhausts → steal returns rowCount=0 + attempts=6
+    await drainPollBudget(); // re-poll exhausts → returns abandoned (no throw)
+    const result = await promise;
+    expect(result).toEqual({ kind: "abandoned", attempts: 6 });
+  });
 });
