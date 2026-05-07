@@ -377,6 +377,29 @@ async function ensureSandboxImpl(
         }
       }
       recordMcpRefresh(session.id, input.tenantId);
+
+      // U7 chat-attachments warm path: re-stage attachments on follow-up
+      // turns. writeFiles overwrites by path so re-running on a session
+      // that already has the file is idempotent. SessionSandboxInstance
+      // exposes writeFiles via its underlying sandboxRef.
+      if (input.preInjectFiles && input.preInjectFiles.length > 0) {
+        await Promise.allSettled(
+          input.preInjectFiles.map(async (f) => {
+            try {
+              const res = await fetch(f.signedReadUrl, { redirect: "error" });
+              if (!res.ok) throw new Error(`http_${res.status}`);
+              const buf = Buffer.from(await res.arrayBuffer());
+              await reconnectResult.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
+            } catch (err) {
+              logger.warn("preInjectFiles (warm): stage failed (fail-open)", {
+                path: f.path,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }),
+        );
+      }
+
       logger.info("ensureSandboxStep: warm reconnect", {
         session_id: session.id,
         sandbox_id: session.sandbox_id,
@@ -436,6 +459,31 @@ async function ensureSandboxImpl(
   // Idempotent CAS: noop on warm-reuse paths where the session was already
   // 'active' coming out of reserveStep.
   await casCreatingToActive(session.id, input.tenantId, { sandbox_id: sandbox.id });
+
+  // U7 chat-attachments: pre-inject staged files BEFORE the runner spawns.
+  // The chat workflow passes signed-URL handoff metadata in
+  // input.preInjectFiles; we fetch each URL server-side and write to the
+  // sandbox FS. Bytes never cross a WDK step boundary because the fetch +
+  // write happens inside this single step. Per-attachment fail-open (a
+  // failed download / 404 logs and skips; the text message still
+  // dispatches with the agent prompt's `## Attachments` block intact).
+  if (input.preInjectFiles && input.preInjectFiles.length > 0) {
+    await Promise.allSettled(
+      input.preInjectFiles.map(async (f) => {
+        try {
+          const res = await fetch(f.signedReadUrl, { redirect: "error" });
+          if (!res.ok) throw new Error(`http_${res.status}`);
+          const buf = Buffer.from(await res.arrayBuffer());
+          await sandbox.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
+        } catch (err) {
+          logger.warn("preInjectFiles: stage failed (fail-open)", {
+            path: f.path,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }),
+    );
+  }
 
   // Return a serializable ref (sandboxId + the POJO config used to provision
   // it). Subsequent steps reconnect via reconnectSessionSandbox(sandboxId, cfg)

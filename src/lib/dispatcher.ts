@@ -188,6 +188,22 @@ export interface DispatchInput {
   callbackData?: CallbackData;
   /** Extra hostnames for the sandbox network policy. */
   extraAllowedHostnames?: string[];
+  /**
+   * Files to pre-inject into the sandbox before the runner spawns. Used by
+   * the chat workflow (U7) to stage attachments. Bytes are NEVER included
+   * — only signed-URL handoff metadata. `ensureSandboxStep` (or the warm-
+   * reconnect branch) fetches each `signedReadUrl` server-side and writes
+   * to `path` via `sandbox.writeFiles`. This shape is JSON-serializable so
+   * it survives WDK step boundaries.
+   */
+  preInjectFiles?: Array<{
+    /** Sandbox path, e.g. `/vercel/sandbox/attachments/<id>.<ext>`. */
+    path: string;
+    /** 10-minute signed URL the dispatcher fetches inside ensureSandboxStep. */
+    signedReadUrl: string;
+    contentType: string;
+    sizeBytes: number;
+  }>;
   platformApiUrl: string;
   /**
    * Per-message overrides for the agent's defaults. `maxTurns` is capped to
