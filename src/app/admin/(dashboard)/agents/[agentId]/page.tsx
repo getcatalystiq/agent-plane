@@ -105,7 +105,6 @@ export default async function AgentDetailPage({
         bots={
           <BotsTab
             agentId={agent.id}
-            agentSlug={agent.slug}
             webhookBaseUrl={getCallbackBaseUrl()}
           />
         }

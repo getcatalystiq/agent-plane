@@ -61,11 +61,10 @@ function deriveState(config: BotConfig | null, refreshing: boolean): ConnectionS
 
 interface BotsTabProps {
   agentId: string;
-  agentSlug: string;
   webhookBaseUrl: string;
 }
 
-export function BotsTab({ agentId, agentSlug, webhookBaseUrl }: BotsTabProps) {
+export function BotsTab({ agentId, webhookBaseUrl }: BotsTabProps) {
   const [discord, setDiscord] = useState<BotConfig | null>(null);
   const [slack, setSlack] = useState<BotConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -101,8 +100,6 @@ export function BotsTab({ agentId, agentSlug, webhookBaseUrl }: BotsTabProps) {
     const timer = setInterval(load, 30_000);
     return () => clearInterval(timer);
   }, [discord, slack, load]);
-
-  void agentSlug;
 
   return (
     <div className="space-y-6">

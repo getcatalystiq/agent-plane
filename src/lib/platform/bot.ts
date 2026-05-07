@@ -293,11 +293,3 @@ export async function forceRefresh(): Promise<void> {
   await refreshBots();
 }
 
-// ---------------------------------------------------------------------------
-// Test-only utilities
-// ---------------------------------------------------------------------------
-
-export function _resetBotCacheForTests(): void {
-  botCache.clear();
-  sharedState = null;
-}

@@ -16,8 +16,14 @@ describe("parseRateLimit", () => {
     expect(parseRateLimit(err)).toBe(2500);
   });
 
-  it("treats values >= 50 as already-ms (some SDKs normalize that way)", () => {
-    expect(parseRateLimit({ status: 429, retryAfter: 1500 })).toBe(1500);
+  it("treats Slack Retry-After: 60 as 60 seconds (60_000 ms), not 60 ms", () => {
+    // Regression: review run 20260506-221948-2402b0ed P1 #7 — earlier
+    // heuristic mis-scaled Slack-style Retry-After ≥ 50 to ms.
+    expect(parseRateLimit({ status: 429, retryAfter: 60 })).toBe(60_000);
+  });
+
+  it("treats large retry_after values as seconds even when ≥ 50", () => {
+    expect(parseRateLimit({ status: 429, retryAfter: 120 })).toBe(120_000);
   });
 
   it("falls back to 1000ms when 429 with no retry-after header", () => {

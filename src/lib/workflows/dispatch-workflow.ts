@@ -471,9 +471,25 @@ async function ensureSandboxImpl(
     await Promise.allSettled(
       input.preInjectFiles.map(async (f) => {
         try {
-          const res = await fetch(f.signedReadUrl, { redirect: "error" });
+          // 30s timeout + size cap — review run 20260506-221948-2402b0ed
+          // P2 #23 (no timeout) and correctness #11 (no size cap). Cap at
+          // sizeBytes from the persisted record (already capped at 25 MB
+          // upstream); reject larger to prevent OOM via attacker-controlled
+          // blob.
+          const ctl = new AbortController();
+          const tm = setTimeout(() => ctl.abort(), 30_000);
+          let res: Response;
+          try {
+            res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+          } finally {
+            clearTimeout(tm);
+          }
           if (!res.ok) throw new Error(`http_${res.status}`);
-          const buf = Buffer.from(await res.arrayBuffer());
+          const ab = await res.arrayBuffer();
+          if (ab.byteLength > f.sizeBytes + 1024) {
+            throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
+          }
+          const buf = Buffer.from(ab);
           await sandbox.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
         } catch (err) {
           logger.warn("preInjectFiles: stage failed (fail-open)", {

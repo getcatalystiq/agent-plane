@@ -30,7 +30,19 @@ interface MentionLikeMessage {
   id?: string;
   text?: string;
   isMention?: boolean;
+  /** Discord raw mentions array (user IDs). The Chat SDK's abstracted
+   *  Message preserves this when MESSAGE_CONTENT intent delivers it. */
+  mentions?: Array<string | { userId?: string }>;
   author?: { userId?: string; userName?: string; isBot?: boolean; isMe?: boolean };
+}
+
+function messageMentionsBot(m: MentionLikeMessage, botUserId: string | null): boolean {
+  if (m.isMention === true) return true;
+  if (!botUserId || !Array.isArray(m.mentions)) return false;
+  return m.mentions.some((entry) => {
+    if (typeof entry === "string") return entry === botUserId;
+    return entry?.userId === botUserId;
+  });
 }
 
 interface ThreadLike {
@@ -94,13 +106,20 @@ export function registerDiscordHandlers(bot: Chat, input: DiscordHandlerInput): 
       // for actual Discord threads.
       if (!isDiscordThread(t)) return;
 
-      // Defense in depth: if bot user id is known, only dispatch when the
-      // event explicitly mentions the bot OR is in a thread the bot has
-      // subscribed to via a prior @mention. The SDK's filter already handles
-      // most cases; this drops anything that slips through.
-      if (input.botUserId && m.isMention === false) {
-        // Subscribed thread + non-mention message: this is a continuation,
-        // dispatch it. The bot is conversing in this thread.
+      // P1 #11 (review run 20260506-221948-2402b0ed): MESSAGE_CONTENT
+      // intent delivers every visible-channel message. In a subscribed
+      // thread the bot is "in conversation," so non-mention messages from
+      // humans count as continuations — dispatch them. But we explicitly
+      // log the path so production telemetry can confirm the filter is
+      // doing what we expect; if a thread silently fans out for hours,
+      // the log is the signal to bound it.
+      if (!messageMentionsBot(m, input.botUserId)) {
+        logger.info("discord onSubscribedMessage continuation (non-mention)", {
+          tenant_id: input.tenantId,
+          agent_id: input.agentId,
+          thread_id: t.id,
+          author_id: m.author?.userId,
+        });
       }
 
       await triggerChatWorkflow({

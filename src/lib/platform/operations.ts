@@ -28,7 +28,7 @@
  */
 
 import { z } from "zod";
-import { withTenantTransaction, queryOne, type TxClient } from "@/db";
+import { withTenantTransaction, type TxClient } from "@/db";
 import { encrypt, decrypt, hashApiKey } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
@@ -72,8 +72,7 @@ export interface PlatformBotConfigPublic {
   tenantId: TenantId;
   agentId: AgentId;
   platform: ChatPlatform;
-  // Masked secret summary — last4 of the bot token. Never returns plaintext.
-  kind: ChatPlatform;
+  /** Masked secret summary — last4 of the bot token. Never returns plaintext. */
   last4: string;
   credentialsVersion: number;
   platformIdentity: Record<string, unknown>;
@@ -176,7 +175,6 @@ async function rowToPublic(row: PlatformBotConfigRow): Promise<PlatformBotConfig
     tenantId: row.tenant_id as TenantId,
     agentId: row.agent_id as AgentId,
     platform: row.platform,
-    kind: row.platform,
     last4: mask,
     credentialsVersion: row.credentials_version,
     platformIdentity: row.platform_identity,
@@ -566,6 +564,3 @@ export async function markBotError(
 export function _resetValidationDebounceForTests(): void {
   validationDebounce.clear();
 }
-
-// Re-export for test convenience (avoids cross-file mocking gymnastics).
-export { queryOne as _queryOneForTests };

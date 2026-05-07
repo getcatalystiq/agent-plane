@@ -561,20 +561,54 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
       // Concurrency cap (TOCTOU-safe). Same atomic INSERT-WHERE-COUNT
       // pattern as the legacy MAX_CONCURRENT_RUNS guard. `idle` does NOT
       // count toward the cap.
+      //
+      // ON CONFLICT (tenant_id, agent_id, context_id) WHERE status NOT IN
+      // ('stopped') AND context_id IS NOT NULL DO NOTHING — matches the
+      // partial unique index `idx_sessions_context_id_active`. The chat
+      // ingress race (cleanup-cron commits 'stopped' while two events for
+      // the same thread arrive simultaneously) lands here. P1 #14 in
+      // review run 20260506-221948-2402b0ed: createSession got this fix
+      // but reserveSessionAndMessage didn't — chat dispatch goes through
+      // this path, so the race fix had to live here too.
       const created = await tx.queryOne(
         SessionRowSchema,
         `INSERT INTO sessions (tenant_id, agent_id, status, context_id, ephemeral, idle_ttl_seconds, expires_at)
          SELECT $1, $2, 'creating', $4, $5, $6, NOW() + INTERVAL '${SESSION_EXPIRES_AFTER_INTERVAL}'
          WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active')) < $3
+         ON CONFLICT (tenant_id, agent_id, context_id)
+           WHERE status NOT IN ('stopped') AND context_id IS NOT NULL
+           DO NOTHING
          RETURNING *`,
         [input.tenantId, input.agentId, MAX_CONCURRENT_ACTIVE_SESSIONS, input.contextId ?? null, ephemeral, idleTtlSeconds],
       );
       if (!created) {
-        throw new ConcurrencyLimitError(
-          `Maximum of ${MAX_CONCURRENT_ACTIVE_SESSIONS} concurrent active sessions per tenant`,
-        );
+        // Either cap exceeded OR ON CONFLICT swallowed a partial-unique-index
+        // hit. When contextId is set, prefer the race-winner re-fetch so the
+        // chat workflow attaches to the existing session instead of throwing.
+        if (input.contextId) {
+          const existing = await tx.queryOne(
+            SessionRowSchema,
+            `SELECT * FROM sessions
+             WHERE tenant_id = $1 AND agent_id = $2 AND context_id = $3
+               AND status NOT IN ('stopped')
+             LIMIT 1`,
+            [input.tenantId, input.agentId, input.contextId],
+          );
+          if (existing) {
+            session = existing;
+          } else {
+            throw new ConcurrencyLimitError(
+              `Maximum of ${MAX_CONCURRENT_ACTIVE_SESSIONS} concurrent active sessions per tenant`,
+            );
+          }
+        } else {
+          throw new ConcurrencyLimitError(
+            `Maximum of ${MAX_CONCURRENT_ACTIVE_SESSIONS} concurrent active sessions per tenant`,
+          );
+        }
+      } else {
+        session = created;
       }
-      session = created;
     }
 
     // d) Append the session_messages row in `running` state. The runner

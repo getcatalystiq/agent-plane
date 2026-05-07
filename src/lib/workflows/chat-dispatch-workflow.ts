@@ -34,7 +34,6 @@ import {
 import { reserveSessionAndMessage, type PreparedExecution } from "@/lib/dispatcher";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
-import { setWorkflowRunId } from "@/lib/sessions";
 import {
   ChannelTokenBucket,
   postOrEdit,
@@ -68,7 +67,9 @@ import type { TenantId, AgentId } from "@/lib/types";
 // ---------------------------------------------------------------------------
 
 export interface StartChatDispatchOptions {
-  idempotencyKey: string;
+  /** Set when the bridge's inline rate-limit check tripped — surface a
+   *  generic busy reply and exit without invoking the dispatcher. The
+   *  string distinguishes per-agent vs per-user limit for telemetry. */
   rateLimited: "agent" | "user" | null;
 }
 
@@ -131,16 +132,32 @@ export async function chatDispatchWorkflow(
   }
 
   // 4. Stream consumption — read the inner dispatcher's NDJSON chunks via
-  //    getRun().getReadable() so resumption-after-recycle re-attaches
-  //    at the right offset. WDK's WorkflowReadableStream is a plain
+  //    getRun().getReadable(). WDK's WorkflowReadableStream is a plain
   //    ReadableStream — pump via getReader() rather than for-await (the
   //    async-iterator surface isn't on the WDK type).
+  //
+  // STATE MACHINE (post-review-fix):
+  //   responseText     — accumulated full agent reply.
+  //   committedLength  — chars sealed into PRIOR (rolled-over) messages.
+  //                      Advances ONLY on rollover, never on edit. The
+  //                      open (current) message displays
+  //                      responseText.slice(committedLength).
+  //   messageId        — id of the open message (null = no open message,
+  //                      next post creates one). Goes null on rollover.
+  //
+  // Edit flow: editMessage REPLACES the message text wholesale, so we
+  // pass the FULL current-message text (responseText.slice(committedLength))
+  // not the incremental delta. Earlier rev passed only the delta, which
+  // caused the message to shrink on every edit (P0 #2 in review run
+  // 20260506-221948-2402b0ed).
   const readable = getRun<string>(started.innerRunId).getReadable<string>();
   const reader = readable.getReader();
   const limits = PLATFORM_LIMITS[input.platform];
+  // Reserve a few chars for the rollover " …" suffix when sealing.
+  const SEAL_SUFFIX_OVERHEAD = 4;
+  const maxPerMessage = limits.maxPerMessage - SEAL_SUFFIX_OVERHEAD;
 
   let responseText = "";
-  let pendingRemainder = "";
   let committedLength = 0;
   let messageId: string | null = null;
   let editGateMs = DEFAULT_EDIT_GATE_MS;
@@ -154,24 +171,18 @@ export async function chatDispatchWorkflow(
       const { value: ndjsonLine, done } = await reader.read();
       if (done) break;
       if (typeof ndjsonLine !== "string") continue;
-      // Each chunk is a JSON line written by the dispatcher's writeChunkStep.
-      // Parse, extract text_delta if present, and accumulate.
       const evt = parseNdjsonLine(ndjsonLine);
       if (!evt) continue;
 
       if (evt.type === "text_delta" && typeof evt.text === "string") {
         responseText += evt.text;
       } else if (evt.type === "error") {
-        // Dispatcher hit an error mid-stream. Post the partial response
-        // with a suffix so the user sees what was generated.
+        // Dispatcher hit an error mid-stream. Post the partial response so
+        // the user sees what was generated.
         if (!postFailed) {
-          await flushAndFinishStep({
-            input,
-            text: responseText.slice(committedLength) + " (agent stopped early)",
-            existingMessageId: messageId,
-            committedLength,
-            error: evt.message ?? "agent_error",
-          });
+          const tail = responseText.slice(committedLength);
+          const tailWithError = `${tail}\n\n_(agent stopped early: ${evt.message ?? "error"})_`;
+          await flushAndFinishStep({ input, text: tailWithError, existingMessageId: messageId });
         }
         await markBotErrorStep(input, evt.message ?? "agent_error");
         return;
@@ -180,41 +191,51 @@ export async function chatDispatchWorkflow(
       }
 
       const now = Date.now();
-      const overflow = responseText.length - committedLength > limits.maxPerMessage;
-      const gateElapsed = now - lastEditAt >= editGateMs;
-      const channelHasBudget = channelBucket.tryConsume();
-
+      const openMessageLength = responseText.length - committedLength;
+      const overflow = openMessageLength > maxPerMessage;
+      // Gate gating uses both editGateMs (back-pressure on 429) AND the
+      // channel bucket (Discord per-channel ceiling). Overflow rolls over
+      // immediately regardless of gate; rate-limit retry advances lastEditAt
+      // so the gate actually backs off (P1 #9).
       if (postFailed) continue;
-      if (!overflow && !(gateElapsed && channelHasBudget)) continue;
+      if (!overflow) {
+        if (now - lastEditAt < editGateMs) continue;
+        if (!channelBucket.tryConsume()) continue;
+      } else if (!channelBucket.tryConsume()) {
+        // Overflow + bucket empty — we still need to flush, but we delay.
+        continue;
+      }
 
-      const slice = responseText.slice(committedLength);
-      const formatted = formatForPlatform(input.platform, slice, { partial: !overflow });
-      // partial-token holdback: the format remainder is held until the next
-      // tick. We track pendingRemainder for visibility but the workflow body
-      // re-derives slice from responseText each iteration so the holdback is
-      // implicit (un-flushed chars stay in slice next time).
-      pendingRemainder = formatted.remainder;
+      // For an EDIT: pass the full open-message text. For a POST after
+      // rollover: pass a clean slice up to maxPerMessage (the sealed
+      // chunk goes into the just-rolled message).
+      const openText = responseText.slice(committedLength);
+      const formatted = formatForPlatform(input.platform, openText, { partial: !overflow });
       if (formatted.flushable.length === 0 && !overflow) continue;
+
+      // Cap to maxPerMessage so we never exceed the platform hard limit
+      // even when the formatter produces a slightly larger output (P0 #5).
+      const capped = formatted.flushable.length > maxPerMessage
+        ? formatted.flushable.slice(0, maxPerMessage)
+        : formatted.flushable;
 
       const result = await postOrEditStep({
         tenantId: input.tenantId,
         agentId: input.agentId,
         platform: input.platform,
-        channelId: input.channelId,
-        text: formatted.flushable,
+        threadId: input.threadKey,
+        text: capped,
         existingMessageId: messageId,
         seal: overflow,
         continuation: hasPosted && !messageId,
-        replyToMessageId: hasPosted ? undefined : input.replyToMessageId,
       });
 
       if (!result.ok) {
         if (result.rateLimited) {
           editGateMs = Math.max(editGateMs, result.retryAfterMs);
           channelBucket.drain();
-          // Don't move committedLength — this slice gets re-flushed next tick.
+          lastEditAt = now; // P1 #9: actually back off the gate next iteration
         } else {
-          // Non-429 error: stop trying to post.
           postFailed = true;
           logger.error("chatDispatchWorkflow: post failed; sentinel set", {
             tenant_id: input.tenantId,
@@ -225,15 +246,18 @@ export async function chatDispatchWorkflow(
         continue;
       }
 
-      // Success — advance committedLength.
       lastEditAt = now;
       hasPosted = true;
       if (overflow) {
-        committedLength += formatted.flushable.length;
-        messageId = null; // seal current; next iteration starts fresh
+        // Seal the current message at exactly the chars we sent (capped).
+        // The remainder stays in the open buffer for the next message.
+        committedLength += capped.length;
+        messageId = null;
       } else {
+        // Edit success: do NOT advance committedLength. The next tick will
+        // re-read responseText.slice(committedLength) — the same open
+        // message extended with new text.
         messageId = result.messageId;
-        committedLength = responseText.length - pendingRemainder.length;
       }
     }
   } catch (err) {
@@ -246,21 +270,23 @@ export async function chatDispatchWorkflow(
     return;
   }
 
-  // 5. Final flush — any remaining unsent text after the loop exits.
+  // 5. Final flush — flush any remaining open-message text.
   if (!postFailed && responseText.length > committedLength) {
     const tail = responseText.slice(committedLength);
     const formatted = formatForPlatform(input.platform, tail, { partial: false });
     if (formatted.flushable.trim().length > 0) {
+      const capped = formatted.flushable.length > maxPerMessage
+        ? formatted.flushable.slice(0, maxPerMessage)
+        : formatted.flushable;
       await postOrEditStep({
         tenantId: input.tenantId,
         agentId: input.agentId,
         platform: input.platform,
-        channelId: input.channelId,
-        text: formatted.flushable,
+        threadId: input.threadKey,
+        text: capped,
         existingMessageId: messageId,
         seal: false,
         continuation: hasPosted && !messageId,
-        replyToMessageId: hasPosted ? undefined : input.replyToMessageId,
       });
     }
   }
@@ -273,8 +299,6 @@ export async function chatDispatchWorkflow(
 // ---------------------------------------------------------------------------
 
 interface StartedDispatch {
-  sessionId: string;
-  messageId: string;
   innerRunId: string;
 }
 
@@ -316,13 +340,15 @@ async function startInnerDispatchStep(
     ) => Promise<DispatchWorkflowOutput>,
     [dispatchInput, prepared],
   );
-  await setWorkflowRunId(prepared.session.id, input.tenantId as TenantId, `wdk_v1_${run.runId}`).catch(() => {});
-
-  return {
-    sessionId: prepared.session.id,
-    messageId: prepared.messageId,
-    innerRunId: run.runId,
-  };
+  // NOTE: we deliberately do NOT call setWorkflowRunId here with run.runId.
+  // The inner dispatchWorkflow's body persists its own runId via its
+  // prepareSandboxAndLaunchStep. Overwriting from outside would race with
+  // the inner workflow and stamp the chat session with the wrong run id
+  // (P2 #16 in review run 20260506-221948-2402b0ed). Cancellation of the
+  // chat workflow goes through its own runId (read via
+  // getWorkflowMetadata().workflowRunId from the outer body if needed).
+  void prepared;
+  return { innerRunId: run.runId };
 }
 
 async function persistAttachmentsStep(input: ChatTriggerInput): Promise<PersistedAttachment[]> {
@@ -354,38 +380,44 @@ interface PostOrEditStepInput {
   tenantId: TenantId;
   agentId: AgentId;
   platform: ChatPlatform;
-  channelId: string;
+  /** Encoded thread id (e.g. `discord:guildId:channelId:threadId`). */
+  threadId: string;
   text: string;
   existingMessageId: string | null;
   seal: boolean;
   continuation: boolean;
-  replyToMessageId?: string;
+}
+
+async function resolveCachedBot(
+  tenantId: TenantId,
+  agentId: AgentId,
+  platform: ChatPlatform,
+): Promise<CachedBot | null> {
+  const config = await getBotConfig(tenantId, agentId, platform);
+  if (!config) return null;
+  return getOrCreateBot({
+    tenantId,
+    agentId,
+    platform,
+    credentialsVersion: config.credentialsVersion,
+    platformIdentity: config.platformIdentity,
+  });
 }
 
 async function postOrEditStep(input: PostOrEditStepInput): Promise<PostOrEditResult> {
   "use step";
 
-  const config = await getBotConfig(input.tenantId, input.agentId, input.platform);
-  if (!config) {
+  const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
+  if (!cached) {
     return { ok: false, rateLimited: false, error: "bot_config_missing" };
   }
-
-  const cached: CachedBot = await getOrCreateBot({
-    tenantId: input.tenantId,
-    agentId: input.agentId,
-    platform: input.platform,
-    credentialsVersion: config.credentialsVersion,
-    platformIdentity: config.platformIdentity,
-  });
-
   return postOrEdit({
     bot: cached,
-    channelId: input.channelId,
+    threadId: input.threadId,
     text: input.text,
     existingMessageId: input.existingMessageId ?? undefined,
     seal: input.seal,
     continuation: input.continuation,
-    replyToMessageId: input.replyToMessageId,
   });
 }
 
@@ -396,23 +428,10 @@ async function postBusyReplyStep(input: ChatTriggerInput, which: "agent" | "user
     ? "I'm rate-limited for you specifically — wait a minute before retrying."
     : "I'm currently busy across the board — wait a few minutes before retrying.";
 
-  const config = await getBotConfig(input.tenantId, input.agentId, input.platform);
-  if (!config) return;
-
   try {
-    const cached = await getOrCreateBot({
-      tenantId: input.tenantId,
-      agentId: input.agentId,
-      platform: input.platform,
-      credentialsVersion: config.credentialsVersion,
-      platformIdentity: config.platformIdentity,
-    });
-    await postOrEdit({
-      bot: cached,
-      channelId: input.channelId,
-      text,
-      replyToMessageId: input.replyToMessageId,
-    });
+    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
+    if (!cached) return;
+    await postOrEdit({ bot: cached, threadId: input.threadKey, text });
   } catch (err) {
     logger.warn("postBusyReplyStep: failed", {
       tenant_id: input.tenantId,
@@ -426,25 +445,15 @@ async function flushAndFinishStep(opts: {
   input: ChatTriggerInput;
   text: string;
   existingMessageId: string | null;
-  committedLength: number;
-  error: string;
 }): Promise<void> {
   "use step";
-  void opts.committedLength;
-  const config = await getBotConfig(opts.input.tenantId, opts.input.agentId, opts.input.platform);
-  if (!config) return;
   try {
-    const cached = await getOrCreateBot({
-      tenantId: opts.input.tenantId,
-      agentId: opts.input.agentId,
-      platform: opts.input.platform,
-      credentialsVersion: config.credentialsVersion,
-      platformIdentity: config.platformIdentity,
-    });
+    const cached = await resolveCachedBot(opts.input.tenantId, opts.input.agentId, opts.input.platform);
+    if (!cached) return;
     const formatted = formatForPlatform(opts.input.platform, opts.text, { partial: false });
     await postOrEdit({
       bot: cached,
-      channelId: opts.input.channelId,
+      threadId: opts.input.threadKey,
       text: formatted.flushable,
       existingMessageId: opts.existingMessageId ?? undefined,
     });

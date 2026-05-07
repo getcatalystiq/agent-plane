@@ -6,7 +6,12 @@ import { timingSafeEqual } from "@/lib/crypto";
 // Paths that don't require authentication.
 // NOTE: Uses prefix matching via startsWith — any new routes under these
 // prefixes will also bypass auth. Cron routes use CRON_SECRET verification instead.
-const PUBLIC_PATHS = ["/api/health", "/api/cron/", "/api/internal/"];
+// `/api/discord/gateway` is a cron route in everything but URL prefix —
+// it runs on a `*/9 * * * *` schedule and authenticates with `CRON_SECRET`
+// via verifyCronSecret. Bypassing API-key auth here so verifyCronSecret
+// can run; the route itself enforces the secret check before doing any
+// work. Same applies to `/api/discord/**` future cron-shaped routes.
+const PUBLIC_PATHS = ["/api/health", "/api/cron/", "/api/internal/", "/api/discord/"];
 const A2A_AGENT_CARD_RE = /^\/api\/a2a\/[^/]+\/[^/]+\/\.well-known\/agent-card\.json$/;
 const A2A_AGENTS_RE = /^\/api\/a2a\/[^/]+\/\.well-known\/agents\.json$/;
 const COMPOSIO_CALLBACK_RE = /^\/api\/agents\/[^/]+\/connectors\/[^/]+\/callback$/;

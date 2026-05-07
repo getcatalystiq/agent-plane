@@ -1,16 +1,32 @@
 /**
- * Platform callback wrappers — wraps Chat SDK adapter posts/edits and
- * surfaces 429 + Retry-After cleanly so the workflow's edit-gate can lengthen.
+ * Platform callback wrappers — uses the Chat SDK's actual `Adapter.postMessage`
+ * (threadId: string, AdapterPostableMessage) and `Adapter.editMessage`
+ * (threadId: string, messageId: string, AdapterPostableMessage) APIs.
  *
  * Plan reference: U6 in
  * docs/plans/2026-05-06-001-feat-chat-platform-bots-discord-slack-plan.md
+ *
+ * Earlier revisions of this file invented a `(channelId, text, opts)` API
+ * via a duck-type cast — that didn't match the real Chat SDK surface and
+ * would have failed at runtime on the first chat reply. Code review caught
+ * it; this is the corrected wiring (see review run 20260506-221948-2402b0ed,
+ * P0 #4 and P2 #22 / API timeout).
+ *
+ * Surfaces 429 + Retry-After cleanly so the workflow's edit-gate can
+ * lengthen. POST_TIMEOUT_MS bounds slow Discord/Slack shards from wedging
+ * the workflow loop indefinitely.
  */
 
 import type { CachedBot } from "@/lib/platform/bot";
 
+const POST_TIMEOUT_MS = 10_000;
+
 export interface PostOrEditInput {
   bot: CachedBot;
-  channelId: string;
+  /** Encoded thread id, e.g. `discord:guildId:channelId:threadId` or
+   *  `slack:teamId:channelId:thread_ts`. The Chat SDK's adapter parses
+   *  this string into the platform-specific thread shape internally. */
+  threadId: string;
   text: string;
   /** When set, edit the existing message instead of posting a new one. */
   existingMessageId?: string;
@@ -18,8 +34,6 @@ export interface PostOrEditInput {
   seal?: boolean;
   /** When true, prefix `[continued] ` to a freshly-posted continuation. */
   continuation?: boolean;
-  /** Reply-to id for first post in a Discord thread. */
-  replyToMessageId?: string;
 }
 
 export type PostOrEditResult =
@@ -27,9 +41,22 @@ export type PostOrEditResult =
   | { ok: false; rateLimited: true; retryAfterMs: number }
   | { ok: false; rateLimited: false; error: string };
 
-interface MessagePostable {
-  postMessage?: (text: string, opts?: { replyToMessageId?: string }) => Promise<{ id: string } | string>;
-  editMessage?: (messageId: string, text: string) => Promise<void>;
+interface AdapterPostMessageShape {
+  postMessage: (threadId: string, message: string) => Promise<{ id: string }>;
+  editMessage: (threadId: string, messageId: string, message: string) => Promise<{ id: string }>;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((err) => {
+      clearTimeout(t);
+      reject(err);
+    });
+  });
 }
 
 /**
@@ -38,30 +65,31 @@ interface MessagePostable {
  */
 export async function postOrEdit(input: PostOrEditInput): Promise<PostOrEditResult> {
   const text = composeText(input);
-  // The Chat SDK exposes per-channel post/edit on the adapter instance.
-  // The exact surface varies by adapter; wrap in any-cast and pattern-match.
-  const adapter = input.bot.adapter as unknown as {
-    postMessage?: (channelId: string, text: string, opts?: Record<string, unknown>) => Promise<{ id: string } | string>;
-    editMessage?: (channelId: string, messageId: string, text: string) => Promise<void>;
-    channels?: Record<string, MessagePostable>;
-  };
+  // Adapter.postMessage / editMessage are the documented Chat SDK surface
+  // (DiscordAdapter and SlackAdapter both implement Adapter<TThreadId,
+  // TRawMessage> with these signatures). The narrow cast below is needed
+  // because CachedBot.adapter is the union DiscordAdapter | SlackAdapter
+  // and TS can't narrow on the union shape without a discriminator switch.
+  const adapter = input.bot.adapter as unknown as AdapterPostMessageShape;
 
   try {
-    if (input.existingMessageId && typeof adapter.editMessage === "function") {
-      await adapter.editMessage(input.channelId, input.existingMessageId, text);
-      return { ok: true, messageId: input.existingMessageId };
+    if (input.existingMessageId) {
+      const result = await withTimeout(
+        adapter.editMessage(input.threadId, input.existingMessageId, text),
+        POST_TIMEOUT_MS,
+        "editMessage",
+      );
+      return { ok: true, messageId: result.id ?? input.existingMessageId };
     }
-    if (typeof adapter.postMessage === "function") {
-      const opts: Record<string, unknown> = {};
-      if (input.replyToMessageId) opts.replyToMessageId = input.replyToMessageId;
-      const result = await adapter.postMessage(input.channelId, text, opts);
-      const id = typeof result === "string" ? result : result.id;
-      return { ok: true, messageId: id };
-    }
-    return { ok: false, rateLimited: false, error: "adapter_missing_post_method" };
+    const result = await withTimeout(
+      adapter.postMessage(input.threadId, text),
+      POST_TIMEOUT_MS,
+      "postMessage",
+    );
+    return { ok: true, messageId: result.id };
   } catch (err) {
     const parsed = parseRateLimit(err);
-    if (parsed) return { ok: false, rateLimited: true, retryAfterMs: parsed };
+    if (parsed != null) return { ok: false, rateLimited: true, retryAfterMs: parsed };
     return { ok: false, rateLimited: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -76,6 +104,11 @@ function composeText(input: PostOrEditInput): string {
 /**
  * Parse a Discord/Slack 429 error and extract the retry-after window in ms.
  * Returns null when the error isn't a rate-limit response.
+ *
+ * Discord and Slack both report Retry-After as integer/float SECONDS — the
+ * earlier `>= 50 means already-ms` heuristic was wrong and 1000× under-shot
+ * the Slack backoff (P1 #7 in review run 20260506-221948-2402b0ed). Always
+ * treat retry-after as seconds; the caller multiplies to ms.
  */
 export function parseRateLimit(err: unknown): number | null {
   if (!err) return null;
@@ -85,9 +118,9 @@ export function parseRateLimit(err: unknown): number | null {
 
   if (status === 429 || /\b429\b|rate.?limit/i.test(msg)) {
     if (typeof retryAfter === "number" && retryAfter > 0) {
-      // Both Discord and Slack return seconds in the JSON body and most
-      // SDK errors normalize to seconds; bump anything <50 to milliseconds.
-      return retryAfter < 50 ? Math.ceil(retryAfter * 1000) : Math.ceil(retryAfter);
+      // Always seconds → milliseconds. Discord retry_after is float seconds;
+      // Slack Retry-After header is integer seconds.
+      return Math.ceil(retryAfter * 1000);
     }
     // Default to 1 second backoff when no header is provided.
     return 1000;
@@ -99,6 +132,13 @@ export function parseRateLimit(err: unknown): number | null {
  * Per-channel token bucket — Discord's per-channel cap is 5 edits / 5 sec.
  * In-process bucket; cross-instance burst is bounded by the per-user rate
  * limit at the bridge.
+ *
+ * NOTE: this bucket is workflow-instance-scoped. Two parallel chat workflows
+ * in the same Discord channel will each have their own bucket. The tenant-
+ * level mitigation is the per-platform-user 10/min limit at the bridge,
+ * which bounds total inbound and therefore outbound posts. Cross-instance
+ * coordination would require Redis-backed tokens (P1 #8 deferred — see
+ * the review residual queue).
  */
 export class ChannelTokenBucket {
   private tokens: number;

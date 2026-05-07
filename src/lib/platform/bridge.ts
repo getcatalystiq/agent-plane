@@ -105,7 +105,6 @@ export async function triggerChatWorkflow(input: ChatTriggerInput): Promise<void
   try {
     const { startChatDispatchWorkflow } = await import("@/lib/workflows/chat-dispatch-workflow");
     await startChatDispatchWorkflow(input, {
-      idempotencyKey: chatIdempotencyKey(input),
       rateLimited: rl.allowed ? null : (rl.which ?? null),
     });
   } catch (err) {
