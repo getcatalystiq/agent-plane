@@ -537,15 +537,36 @@ async function startInnerDispatchStep(
     throw err;
   }
 
-  await withTenantTransaction(input.tenantId, async (tx) => {
-    await tx.execute(
-      `UPDATE chat_event_dedupe
-       SET session_id = $4, message_id = $5
-       WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
-         AND inner_run_id IS NULL`,
-      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId],
-    );
-  });
+  // DIAG: wrap the placeholder UPDATE so we can isolate it as the
+  // throw point. Production trace shows `reserveSessionAndMessage OK`
+  // fires but `calling start(dispatchWorkflow)` never fires on the
+  // winner — meaning the step dies between them. The only thing in
+  // between is this UPDATE.
+  try {
+    await withTenantTransaction(input.tenantId, async (tx) => {
+      await tx.execute(
+        `UPDATE chat_event_dedupe
+         SET session_id = $4, message_id = $5
+         WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+           AND inner_run_id IS NULL`,
+        [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId],
+      );
+    });
+    logger.info("startInnerDispatchStep: dedupe UPDATE OK", {
+      event_id: input.eventId,
+      session_id: prepared.session.id,
+      message_id: prepared.messageId,
+    });
+  } catch (err) {
+    logger.error("startInnerDispatchStep: dedupe UPDATE threw", {
+      event_id: input.eventId,
+      session_id: prepared.session.id,
+      message_id: prepared.messageId,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 
   // DIAG: log immediately before + after start() so we can correlate
   // the inner runId in Vercel logs and confirm the inner workflow's
@@ -561,13 +582,26 @@ async function startInnerDispatchStep(
     session_id: prepared.session.id,
     message_id: prepared.messageId,
   });
-  const run = await start(
-    dispatchWorkflow as unknown as (
-      input: DispatchInput,
-      prepared: PreparedExecution,
-    ) => Promise<DispatchWorkflowOutput>,
-    [dispatchInput, prepared],
-  );
+  let run: { runId: string };
+  try {
+    run = await start(
+      dispatchWorkflow as unknown as (
+        input: DispatchInput,
+        prepared: PreparedExecution,
+      ) => Promise<DispatchWorkflowOutput>,
+      [dispatchInput, prepared],
+    );
+  } catch (err) {
+    logger.error("startInnerDispatchStep: start(dispatchWorkflow) THREW", {
+      event_id: input.eventId,
+      session_id: prepared.session.id,
+      message_id: prepared.messageId,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    throw err;
+  }
   logger.info("startInnerDispatchStep: start(dispatchWorkflow) returned", {
     tenant_id: input.tenantId,
     agent_id: input.agentId,
