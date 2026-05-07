@@ -21,6 +21,7 @@
 import { NextRequest, after } from "next/server";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
+import { withErrorHandler } from "@/lib/api";
 import { findBotByTeamId } from "@/lib/platform/bot";
 import { getDecryptedCredentials, type SlackCredentials } from "@/lib/platform/operations";
 import type { TenantId, AgentId } from "@/lib/types";
@@ -126,7 +127,7 @@ async function maybeHandleFirstTimeChallenge(
   });
 }
 
-export async function POST(req: NextRequest) {
+export const POST = withErrorHandler(async (req: NextRequest) => {
   const rawBody = await req.text();
 
   // 1. Timestamp skew check — header-only, no parse.
@@ -197,20 +198,44 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 5. HMAC verify.
+  // 5. HMAC verify. Try the per-bot signing secret first, then global
+  //    SLACK_SIGNING_SECRET / SLACK_SIGNING_SECRET_PREVIOUS as rotation
+  //    fallbacks (P2 #19 dual-accept window).
+  //
+  //    Signature failures past the team_id-found branch return 200
+  //    unhandled — the same status the unknown-team_id branch returns —
+  //    to close the timing/registration oracle (P2 #18). A real attacker
+  //    with a forged signature can still tell the route exists, but
+  //    can't tell which team_ids are registered just by toggling between
+  //    valid and forged signatures.
+  const env = getEnv();
   const sigHeader = req.headers.get("x-slack-signature");
   const match = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
   if (!match) {
-    return new Response(JSON.stringify({ error: "invalid_signature_format" }), {
-      status: 401,
+    return new Response(JSON.stringify({ status: "unhandled" }), {
+      status: 200,
       headers: { "Content-Type": "application/json" },
     });
   }
   const provided = match[1].toLowerCase();
-  const expected = await hmacSha256Hex(signingSecret, `v0:${ts}:${rawBody}`);
-  if (!constantTimeEqualHex(provided, expected)) {
-    return new Response(JSON.stringify({ error: "invalid_signature" }), {
-      status: 401,
+  const candidates = [signingSecret];
+  if (env.SLACK_SIGNING_SECRET && env.SLACK_SIGNING_SECRET !== signingSecret) {
+    candidates.push(env.SLACK_SIGNING_SECRET);
+  }
+  if (env.SLACK_SIGNING_SECRET_PREVIOUS) {
+    candidates.push(env.SLACK_SIGNING_SECRET_PREVIOUS);
+  }
+  let verified = false;
+  for (const secret of candidates) {
+    const expected = await hmacSha256Hex(secret, `v0:${ts}:${rawBody}`);
+    if (constantTimeEqualHex(provided, expected)) {
+      verified = true;
+      break;
+    }
+  }
+  if (!verified) {
+    return new Response(JSON.stringify({ status: "unhandled" }), {
+      status: 200,
       headers: { "Content-Type": "application/json" },
     });
   }
@@ -257,4 +282,4 @@ export async function POST(req: NextRequest) {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
-}
+});

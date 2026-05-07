@@ -6,7 +6,8 @@
     { "path": "/api/cron/scheduled-runs", "schedule": "* * * * *" },
     { "path": "/api/cron/cleanup-sessions", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/refresh-snapshot", "schedule": "0 4 * * *" },
-    { "path": "/api/discord/gateway", "schedule": "*/9 * * * *" }
+    { "path": "/api/discord/gateway", "schedule": "*/9 * * * *" },
+    { "path": "/api/cron/chat-bots-reprobe", "schedule": "0 6 * * *" }
   ],
   "functions": {
     "app/api/sessions/**": { "supportsCancellation": true },

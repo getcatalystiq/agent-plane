@@ -26,15 +26,14 @@ type Platform = "discord" | "slack";
 interface BotConfig {
   id: string;
   platform: Platform;
-  kind: Platform;
   last4: string;
-  credentialsVersion: number;
-  platformIdentity: Record<string, unknown>;
-  attestations: { privateWorkspace: boolean; attestedAt: string | null };
+  credentials_version: number;
+  platform_identity: Record<string, unknown>;
+  attestations: { private_workspace: boolean; attested_at: string | null };
   enabled: boolean;
-  lastEventAt: string | null;
-  lastError: string | null;
-  lastConnectedAt: string | null;
+  last_event_at: string | null;
+  last_error: string | null;
+  last_connected_at: string | null;
 }
 
 type ConnectionState =
@@ -50,10 +49,10 @@ function deriveState(config: BotConfig | null, refreshing: boolean): ConnectionS
   if (refreshing) return "refreshing";
   if (!config) return "not_configured";
   if (!config.enabled) return "disabled";
-  if (config.lastError) return "token_rejected";
-  if (!config.lastConnectedAt) return "pending_validation";
-  if (!config.lastEventAt) {
-    const since = Date.now() - new Date(config.lastConnectedAt).getTime();
+  if (config.last_error) return "token_rejected";
+  if (!config.last_connected_at) return "pending_validation";
+  if (!config.last_event_at) {
+    const since = Date.now() - new Date(config.last_connected_at).getTime();
     if (since > 5 * 60 * 1000) return "no_events";
   }
   return "connected";
@@ -182,16 +181,16 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
               <code className="text-xs">{config.last4}</code>
             </dd>
           </div>
-          {config.lastConnectedAt && (
+          {config.last_connected_at && (
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Last connected</dt>
-              <dd>{new Date(config.lastConnectedAt).toLocaleString()}</dd>
+              <dd>{new Date(config.last_connected_at).toLocaleString()}</dd>
             </div>
           )}
-          {config.lastEventAt && (
+          {config.last_event_at && (
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Last event</dt>
-              <dd>{new Date(config.lastEventAt).toLocaleString()}</dd>
+              <dd>{new Date(config.last_event_at).toLocaleString()}</dd>
             </div>
           )}
         </dl>
@@ -201,9 +200,9 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
         <NoEventsHint platform={platform} />
       )}
 
-      {state === "token_rejected" && config?.lastError && (
+      {state === "token_rejected" && config?.last_error && (
         <div className="rounded border border-red-700/40 bg-red-900/20 p-3 text-sm">
-          <strong>Token rejected:</strong> {config.lastError}
+          <strong>Token rejected:</strong> {config.last_error}
         </div>
       )}
 

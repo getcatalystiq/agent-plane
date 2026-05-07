@@ -92,25 +92,24 @@ describe("GET /api/admin/agents/:id/platforms/:platform", () => {
     queryOneMock.mockResolvedValueOnce({ id: "agent-1", tenant_id: "tenant-1" });
     opsMock.getBotConfig.mockResolvedValueOnce({
       id: "cfg-1",
-      tenantId: "tenant-1",
-      agentId: "agent-1",
+      tenant_id: "tenant-1",
+      agent_id: "agent-1",
       platform: "discord",
-      kind: "discord",
       last4: "***x",
-      credentialsVersion: 2,
-      platformIdentity: {},
-      attestations: { privateWorkspace: true, attestedAt: null },
+      credentials_version: 2,
+      platform_identity: {},
+      attestations: { private_workspace: true, attested_at: null },
       enabled: true,
-      lastEventAt: null,
-      lastError: null,
-      lastConnectedAt: null,
-      createdAt: "2026-05-06",
-      updatedAt: "2026-05-06",
+      last_event_at: null,
+      last_error: null,
+      last_connected_at: null,
+      created_at: "2026-05-06",
+      updated_at: "2026-05-06",
     });
     const res = await GET(makeRequest("GET"), makeContext("agent-1", "discord"));
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { config: { credentialsVersion: number } };
-    expect(json.config.credentialsVersion).toBe(2);
+    const json = (await res.json()) as { config: { credentials_version: number } };
+    expect(json.config.credentials_version).toBe(2);
   });
 
   it("returns 404 on unsupported platform without leaking existence", async () => {

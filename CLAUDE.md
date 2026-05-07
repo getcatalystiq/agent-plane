@@ -127,7 +127,7 @@ src/
   db/
     index.ts              # DB client (Pool, query helpers, RLS context, transactions)
     migrate.ts            # migration runner
-    migrations/           # sequential SQL migration files (001–033), run via `npm run migrate`
+    migrations/           # sequential SQL migration files (001–036), run via `npm run migrate`
   lib/
     a2a.ts                # A2A protocol: status mapping, Agent Card builder/cache, MessageBackedTaskStore, SandboxAgentExecutor, input validation
     types.ts              # branded types (TenantId, AgentId, McpServerId, McpConnectionId, PluginMarketplaceId), domain interfaces, StreamEvent union
@@ -206,7 +206,7 @@ tests/
 
 ## Database
 
-Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `sessions`, `session_messages`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`, `webhook_sources`, `webhook_deliveries`.
+Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `sessions`, `session_messages`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`, `webhook_sources`, `webhook_deliveries`, `platform_bot_configs`, `chat_event_dedupe`.
 
 - Agent names are unique per tenant
 - RLS enforced via `app.current_tenant_id` session config (fail-closed via `NULLIF`)
@@ -240,6 +240,14 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 | `COMPOSIO_API_KEY` | No | Composio MCP tool integration (optional if not using Composio toolkits) |
 | `CRON_SECRET` | No | Vercel Cron authentication (must be manually set; random string ≥16 chars) |
 | `BRAINTRUST_API_KEY` | No | Braintrust observability; when set, sandbox runners auto-trace LLM calls to Braintrust |
+| `UPSTASH_REDIS_URL` | When chat enabled | Native Redis URL (`rediss://...`) for Chat SDK shared state + cross-instance rate limit / debounce / channel bucket. Provisioned via Vercel Marketplace (Upstash). |
+| `GATEWAY_FORWARDER_SECRET` | When Discord enabled | HMAC secret signing forwarded gateway events. Distinct from any bot token so a leaked bot token cannot forge events at the public webhook. |
+| `GATEWAY_FORWARDER_SECRET_PREVIOUS` | No | Previous secret accepted during a rotation window. Mirrors `ENCRYPTION_KEY_PREVIOUS`. |
+| `DISCORD_PUBLIC_KEY` / `DISCORD_APPLICATION_ID` | No | Single-bot deploy fallbacks. Per-bot values in `platform_bot_configs.credentials_enc` are authoritative when set. |
+| `SLACK_SIGNING_SECRET` | No | Single-bot fallback. Used during first-time portal handshake (before per-bot credentials saved) and as a dual-accept rotation fallback. |
+| `SLACK_SIGNING_SECRET_PREVIOUS` | No | Previous Slack signing secret accepted during a rotation window. |
+| `NEXT_PUBLIC_APP_URL` | When chat enabled | Public origin used to build the gateway-forwarder webhook URL. |
+| `PLATFORM_ATTACHMENT_MAX_BYTES` | No | Per-attachment cap. Default 25 MB. |
 
 ## API Authentication
 
@@ -332,7 +340,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - `a2aHeaders()` helper shared between JSON-RPC and Agent Card routes for consistent `A2A-Version` + `A2A-Request-Id` headers
 - Admin UI terminology: "tenant" is renamed to "company" throughout the UI (API still uses "tenant")
 - Admin UI navigation: top bar with breadcrumb (serves as page title, no redundant h1), company switcher dropdown, all pages scoped to active company
-- Admin UI agent detail: tabbed interface (General, Identity, Connectors, Skills, Plugins, Schedules, Runs) with line-style tabs; metrics cards under General tab
+- Admin UI agent detail: tabbed interface (General, Identity, Connectors, Skills, Plugins, Schedules, Webhooks, Bots, Runs) with line-style tabs; metrics cards under General tab. The tab row uses `overflow-x-auto` so the 9 tabs scroll horizontally on narrow viewports.
 - Admin UI Identity tab: FileTreeEditor with all 8 SoulSpec files (SOUL.md, IDENTITY.md, STYLE.md, AGENTS.md, HEARTBEAT.md, USER_TEMPLATE.md, examples/); action buttons: Generate Soul, Import, Export, Publish; validation warnings inline
 - Admin UI settings page (`/admin/settings`): company form (name, slug, timezone, budget, logo upload), API keys section, ClawSouls Registry section (API token), danger zone
 - SoulSpec v0.5 identity: strict compliance — required SOUL.md sections (Personality, Tone, Principles), IDENTITY.md fields (Name, Role, Creature, Emoji, Vibe, Avatar); progressive disclosure (Level 1 = summary, Level 2 = 4 files, Level 3 = all); `identity` JSONB auto-derived on save; `.soul/` directory injected into sandbox

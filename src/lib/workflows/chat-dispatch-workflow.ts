@@ -441,8 +441,8 @@ async function resolveCachedBot(
     tenantId,
     agentId,
     platform,
-    credentialsVersion: config.credentialsVersion,
-    platformIdentity: config.platformIdentity,
+    credentialsVersion: config.credentials_version,
+    platformIdentity: config.platform_identity,
   });
 }
 

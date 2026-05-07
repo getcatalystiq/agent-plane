@@ -18,6 +18,7 @@
 
 import { after, NextResponse, type NextRequest } from "next/server";
 import { verifyCronSecret } from "@/lib/cron-auth";
+import { withErrorHandler } from "@/lib/api";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
 import { getPool } from "@/db";
@@ -26,14 +27,14 @@ import { refreshBots, getAllBots, type CachedBot } from "@/lib/platform/bot";
 export const dynamic = "force-dynamic";
 export const maxDuration = 800;
 
-const LISTENER_DURATION_MS = 750_000;
+// Listener targets 700s (well under maxDuration: 800), leaving a 100s
+// buffer for in-flight forwarder POSTs and clean shutdown. Earlier rev
+// used 750s which left only 50s — review run 20260506-221948-2402b0ed
+// P2 #25.
+const LISTENER_DURATION_MS = 700_000;
 
-export async function GET(request: NextRequest) {
-  try {
-    verifyCronSecret(request);
-  } catch (err) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+export const GET = withErrorHandler(async (request: NextRequest) => {
+  verifyCronSecret(request);
 
   try {
     await refreshBots();
@@ -151,4 +152,4 @@ export async function GET(request: NextRequest) {
     bots: bots.length,
     message: `Gateway listeners starting for ${bots.length} bot(s)`,
   });
-}
+});

@@ -11,11 +11,12 @@
  */
 
 import { NextResponse } from "next/server";
+import { withErrorHandler } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 90;
 
-export async function GET() {
+export const GET = withErrorHandler(async () => {
   const start = Date.now();
   await new Promise<void>((resolve) => setTimeout(resolve, 65_000));
   const elapsed = Date.now() - start;
@@ -24,4 +25,4 @@ export async function GET() {
     elapsedMs: elapsed,
     note: "If this response did not arrive, the deployment is on Hobby tier (60s function cap). The Discord ingress requires Pro extended-duration or Enterprise.",
   });
-}
+});

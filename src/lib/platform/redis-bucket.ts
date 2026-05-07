@@ -117,3 +117,32 @@ export function _resetRedisBucketForTests(): void {
   sharedClient = null;
   connectPromise = null;
 }
+
+/**
+ * Cross-instance debounce via Redis SETNX. Returns true if the key was
+ * not already set (caller should proceed) or false if it was (caller
+ * should short-circuit). Used by validateCredentials to prevent
+ * triple-click submits on multi-instance Vercel deploys from hitting
+ * Discord/Slack auth.test rate limits N times in parallel.
+ *
+ * Fail-open: returns true on Redis errors so a Redis outage doesn't
+ * block validation entirely.
+ */
+export async function tryAcquireDebounce(key: string, ttlMs: number): Promise<boolean> {
+  try {
+    const client = await getClient();
+    // SET key value NX EX <seconds> — atomically set only if not set,
+    // with expiry. Returns "OK" on success, null on conflict.
+    const result = await client.set(`chat:debounce:${key}`, "1", {
+      condition: "NX",
+      EX: Math.max(1, Math.ceil(ttlMs / 1000)),
+    });
+    return result === "OK";
+  } catch (err) {
+    logger.warn("redis-bucket: tryAcquireDebounce failed (fail-open)", {
+      key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return true;
+  }
+}

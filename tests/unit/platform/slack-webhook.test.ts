@@ -21,6 +21,7 @@ vi.mock("@/lib/logger", () => ({
 vi.mock("@/lib/env", () => ({
   getEnv: () => ({
     SLACK_SIGNING_SECRET: undefined,
+    SLACK_SIGNING_SECRET_PREVIOUS: undefined,
   }),
 }));
 
@@ -132,7 +133,10 @@ describe("Slack webhook strict ordering", () => {
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
-  it("returns 401 on signature value mismatch even after team_id matches", async () => {
+  it("returns 200 unhandled on signature value mismatch (closes team_id oracle)", async () => {
+    // P2 #18: returning 401 on bad signature for a registered team_id and
+    // 200 on unknown team_id leaks which team_ids are registered. Both
+    // paths now return 200 unhandled with the same body.
     findBotByTeamIdMock.mockReturnValueOnce({
       tenantId: "tenant-1",
       agentId: "agent-1",
@@ -149,7 +153,9 @@ describe("Slack webhook strict ordering", () => {
         "x-slack-signature": "v0=deadbeef",
       }),
     );
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("unhandled");
   });
 
   it("returns 200 with the challenge when url_verification arrives with a valid signature", async () => {

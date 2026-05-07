@@ -69,20 +69,20 @@ export interface AttestationsInput {
 
 export interface PlatformBotConfigPublic {
   id: string;
-  tenantId: TenantId;
-  agentId: AgentId;
+  tenant_id: TenantId;
+  agent_id: AgentId;
   platform: ChatPlatform;
   /** Masked secret summary — last4 of the bot token. Never returns plaintext. */
   last4: string;
-  credentialsVersion: number;
-  platformIdentity: Record<string, unknown>;
-  attestations: { privateWorkspace: boolean; attestedAt: string | null };
+  credentials_version: number;
+  platform_identity: Record<string, unknown>;
+  attestations: { private_workspace: boolean; attested_at: string | null };
   enabled: boolean;
-  lastEventAt: string | null;
-  lastError: string | null;
-  lastConnectedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
+  last_event_at: string | null;
+  last_error: string | null;
+  last_connected_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type ValidationResult =
@@ -172,22 +172,22 @@ async function rowToPublic(row: PlatformBotConfigRow): Promise<PlatformBotConfig
   const attestations = row.attestations as { private_workspace?: boolean; attested_at?: string };
   return {
     id: row.id,
-    tenantId: row.tenant_id as TenantId,
-    agentId: row.agent_id as AgentId,
+    tenant_id: row.tenant_id as TenantId,
+    agent_id: row.agent_id as AgentId,
     platform: row.platform,
     last4: mask,
-    credentialsVersion: row.credentials_version,
-    platformIdentity: row.platform_identity,
+    credentials_version: row.credentials_version,
+    platform_identity: row.platform_identity,
     attestations: {
-      privateWorkspace: attestations.private_workspace === true,
-      attestedAt: attestations.attested_at ?? null,
+      private_workspace: attestations.private_workspace === true,
+      attested_at: attestations.attested_at ?? null,
     },
     enabled: row.enabled,
-    lastEventAt: row.last_event_at?.toISOString() ?? null,
-    lastError: row.last_error,
-    lastConnectedAt: row.last_connected_at?.toISOString() ?? null,
-    createdAt: row.created_at.toISOString(),
-    updatedAt: row.updated_at.toISOString(),
+    last_event_at: row.last_event_at?.toISOString() ?? null,
+    last_error: row.last_error,
+    last_connected_at: row.last_connected_at?.toISOString() ?? null,
+    created_at: row.created_at.toISOString(),
+    updated_at: row.updated_at.toISOString(),
   };
 }
 
@@ -200,27 +200,42 @@ const VALIDATION_TIMEOUT_MS = 5_000;
 // Server-side debounce: blocks duplicate validation within this window for
 // the same (tenant, platform, tokenHash). Absorbs users who triple-click
 // submit, preventing spurious Discord/Slack auth.test rate-limit hits.
+//
+// Cross-instance via Redis SETNX (P2 #24 fix). Earlier rev used an
+// in-process Map which was per-instance and didn't actually dedupe
+// concurrent validations across multi-instance Vercel deploys.
 const VALIDATION_DEBOUNCE_MS = 5_000;
-const validationDebounce = new Map<string, number>();
 
 async function debounceKey(tenantId: TenantId, platform: ChatPlatform, token: string): Promise<string> {
   return `${tenantId}:${platform}:${await hashApiKey(token)}`;
 }
 
-function checkDebounce(key: string): boolean {
+// Fallback in-memory store for tests / Redis-unavailable contexts. Same
+// behavior as before, just gated behind a Redis-not-available branch.
+const inMemoryDebounce = new Map<string, number>();
+
+function inMemoryCheckDebounce(key: string): boolean {
   const now = Date.now();
-  const expiresAt = validationDebounce.get(key);
-  if (expiresAt && expiresAt > now) {
-    return false;
-  }
-  validationDebounce.set(key, now + VALIDATION_DEBOUNCE_MS);
-  // Lazy cleanup so the map doesn't grow unbounded across tenants.
-  if (validationDebounce.size > 5_000) {
-    for (const [k, exp] of validationDebounce) {
-      if (exp <= now) validationDebounce.delete(k);
+  const expiresAt = inMemoryDebounce.get(key);
+  if (expiresAt && expiresAt > now) return false;
+  inMemoryDebounce.set(key, now + VALIDATION_DEBOUNCE_MS);
+  if (inMemoryDebounce.size > 5_000) {
+    for (const [k, exp] of inMemoryDebounce) {
+      if (exp <= now) inMemoryDebounce.delete(k);
     }
   }
   return true;
+}
+
+async function checkDebounce(key: string): Promise<boolean> {
+  // Use Redis when configured (production path); fall back to in-memory
+  // when not (test environments, Redis-unavailable bootstraps).
+  const env = getEnv();
+  if (env.UPSTASH_REDIS_URL) {
+    const { tryAcquireDebounce } = await import("@/lib/platform/redis-bucket");
+    return tryAcquireDebounce(key, VALIDATION_DEBOUNCE_MS);
+  }
+  return inMemoryCheckDebounce(key);
 }
 
 export async function validateCredentials(
@@ -228,7 +243,7 @@ export async function validateCredentials(
   credentials: PlatformCredentials,
 ): Promise<ValidationResult> {
   const dedupe = await debounceKey(tenantId, credentials.platform, credentials.botToken);
-  if (!checkDebounce(dedupe)) {
+  if (!(await checkDebounce(dedupe))) {
     return { ok: false, error: { code: "debounced", message: "Validation already in progress; wait a few seconds before retrying." } };
   }
 
@@ -561,6 +576,8 @@ export async function markBotError(
 }
 
 // Test-only export — reset the in-memory debounce map between cases.
+// (Tests don't hit the Redis path because UPSTASH_REDIS_URL is unset
+// in the test env mock.)
 export function _resetValidationDebounceForTests(): void {
-  validationDebounce.clear();
+  inMemoryDebounce.clear();
 }

@@ -18,6 +18,7 @@
 import { NextRequest, after } from "next/server";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
+import { withErrorHandler } from "@/lib/api";
 import { findBotByToken } from "@/lib/platform/bot";
 import { stashInboundAttachments, normalizeDiscordAttachments } from "@/lib/platform/attachments";
 
@@ -109,7 +110,7 @@ function stashAttachmentsFromBody(bodyText: string): void {
   }
 }
 
-export async function POST(req: NextRequest) {
+export const POST = withErrorHandler(async (req: NextRequest) => {
   const rawBody = await req.text();
 
   // 1. Verify forwarder signature BEFORE consulting findBotByToken.
@@ -161,4 +162,4 @@ export async function POST(req: NextRequest) {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
-}
+});

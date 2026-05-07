@@ -306,6 +306,15 @@ export async function persistAttachments(
   opts: PersistOpts,
 ): Promise<PersistedAttachment[]> {
   if (attachments.length === 0) return [];
+
+  // P2 #26: verify BLOB_PRIVATE_READ_WRITE_TOKEN actually resolves to a
+  // privately-provisioned store before uploading user content. Cached
+  // after first run; re-runnable after a 60s cool-off if the canary
+  // throws. Failure here is fatal — fail-closed rather than upload to
+  // a misconfigured public store.
+  const { ensurePrivateBlobStore } = await import("@/lib/platform/blob-canary");
+  await ensurePrivateBlobStore();
+
   const results = await Promise.allSettled(attachments.map((a) => persistOne(a, opts)));
   const persisted: PersistedAttachment[] = [];
   for (let i = 0; i < results.length; i++) {

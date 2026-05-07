@@ -76,9 +76,15 @@ const EnvSchema = z.object({
   // in platform_bot_configs.credentials_enc are authoritative.
   DISCORD_PUBLIC_KEY: z.string().optional(),
   DISCORD_APPLICATION_ID: z.string().optional(),
-  // Slack global signing secret fallback (single-bot deploys). Per-bot
-  // value in platform_bot_configs.credentials_enc is authoritative when set.
+  // Slack global signing secret fallback. Two roles: (1) used during
+  // first-time portal handshake when no per-bot row exists yet (A5);
+  // (2) used as a dual-accept verification fallback during rotation
+  // alongside SLACK_SIGNING_SECRET_PREVIOUS for single-bot deploys
+  // where per-bot rotation is too cumbersome. Per-bot value in
+  // platform_bot_configs.credentials_enc is the authoritative value
+  // for steady-state event verification.
   SLACK_SIGNING_SECRET: z.string().optional(),
+  SLACK_SIGNING_SECRET_PREVIOUS: z.string().optional(),
   // Public-app URL — the gateway cron forwards events to
   // ${NEXT_PUBLIC_APP_URL}/api/webhooks/discord. Already used elsewhere.
   NEXT_PUBLIC_APP_URL: z.string().url().optional(),
