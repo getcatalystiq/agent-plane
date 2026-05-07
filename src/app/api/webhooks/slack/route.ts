@@ -1,21 +1,37 @@
 /**
- * Slack Events API webhook — strict signature-verification ordering.
+ * Slack Events API webhook — fast-ack + deferred verify/dispatch.
  *
  * Plan reference: U5 in
  * docs/plans/2026-05-06-001-feat-chat-platform-bots-discord-slack-plan.md
  *
- * Order (R12, no decryption before authentication):
- *   1. Read raw body once.
- *   2. Verify timestamp skew from headers (≤5 min). Fail → 401, no parse.
- *   3. Parse team_id from body via a length-bounded JSON pointer extract.
- *   4. findBotByTeamId(teamId) — if null: 200 `unhandled`, no decrypt.
- *   5. Decrypt the bot's signing secret (via getDecryptedCredentials).
- *   6. HMAC-SHA-256 verify `v0:${timestamp}:${rawBody}` against
- *      X-Slack-Signature `v0=` prefix; constant-time compare.
- *   7. Hand to Chat SDK's webhook dispatch (which fires onAppMention etc.).
+ * Slack's 3-second ack window is too narrow for the cold-start cost of
+ * Neon SELECT + AES-GCM decrypt + Chat SDK boot + workflow start. When
+ * we missed it, Slack retried with exponential backoff (immediate, +1s,
+ * +5s, +10s), producing up to 4 webhook deliveries per single user
+ * message — wasted compute even after the m.ts dedupe collapsed them
+ * onto a single workflow run.
  *
- * url_verification challenge requires the same signature path — Slack signs
- * those events too, so we don't short-circuit before signature verify.
+ * Sync (fast) path — runs before the response:
+ *   1. Read raw body once.
+ *   2. Verify timestamp skew from headers (≤5 min). Fail → 401.
+ *   3. url_verification short-circuit. The handshake body has no
+ *      `team_id`, so we'd 400 it on the path below; route directly
+ *      to the global-fallback HMAC verifier and echo the challenge.
+ *   4. Length-bounded team_id extract — if missing, 400.
+ *   5. Return 200 `queued` immediately.
+ *
+ * Deferred (after()) path — runs after the response:
+ *   6. findOrLoadSlackBotByTeamId(teamId) — drop silently if unknown.
+ *   7. Decrypt the bot's signing secret (via getDecryptedCredentials).
+ *   8. HMAC-SHA-256 verify `v0:${timestamp}:${rawBody}` against
+ *      X-Slack-Signature; drop silently on failure.
+ *   9. Hand to Chat SDK's webhook dispatch.
+ *
+ * Security: bad-sig events get a 200 `queued` ack but are silently
+ * dropped after the deferred verify fails — same outcome as the prior
+ * synchronous "200 unhandled" path that closed the team_id oracle
+ * (P2 #18). The 200 ack is not a signature attestation; it's just
+ * Slack's retry suppression contract.
  */
 
 import { NextRequest, after } from "next/server";
@@ -128,7 +144,9 @@ async function maybeHandleFirstTimeChallenge(
 export const POST = withErrorHandler(async (req: NextRequest) => {
   const rawBody = await req.text();
 
-  // 1. Timestamp skew check — header-only, no parse.
+  // 1. Timestamp skew (fast, sync). Reject obviously bad / replay
+  //    requests synchronously so an attacker can't burn after()
+  //    capacity by spraying garbage.
   const tsHeader = req.headers.get("x-slack-request-timestamp");
   const ts = tsHeader ? Number.parseInt(tsHeader, 10) : NaN;
   if (!Number.isFinite(ts)) {
@@ -145,19 +163,17 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     });
   }
 
-  // 2. url_verification short-circuit. Slack's url_verification POST
-  //    has no `team_id` field — only `{type, challenge, token}` — so
-  //    the team_id-required path below would 400 on it. Peek at `type`
-  //    in the unauthenticated body prefix and route directly to
-  //    maybeHandleFirstTimeChallenge, which does the HMAC verify
-  //    before echoing the challenge.
+  // 2. url_verification short-circuit (sync). Slack's handshake body has
+  //    no `team_id`, and the response IS the challenge — must be the
+  //    response body, can't defer.
+  const sigHeader = req.headers.get("x-slack-signature");
   const bodyPrefix = rawBody.length > 4096 ? rawBody.slice(0, 4096) : rawBody;
   if (/"type"\s*:\s*"url_verification"/.test(bodyPrefix)) {
-    return await maybeHandleFirstTimeChallenge(rawBody, ts, req.headers.get("x-slack-signature"));
+    return await maybeHandleFirstTimeChallenge(rawBody, ts, sigHeader);
   }
 
-  // 3. Extract team_id — body is unauthenticated until step 6, but the
-  //    extract is length-bounded.
+  // 3. Extract team_id (fast, sync). Bounded prefix prevents megabyte
+  //    JSON DoS on unauthenticated input.
   const teamId = extractTeamId(rawBody);
   if (!teamId) {
     return new Response(JSON.stringify({ error: "missing_team_id" }), {
@@ -166,122 +182,86 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     });
   }
 
-  // 3. Registry lookup — no decryption yet.
-  //    Lazy DB-fallback (findOrLoadSlackBotByTeamId): the Slack webhook
-  //    serverless function is a different Vercel instance from the
-  //    Discord gateway cron that runs refreshBots(), so its in-process
-  //    botCache is empty until we lazy-populate it from the DB on miss.
-  //    Without this, every Slack event hit "200 unhandled" because
-  //    findBotByTeamId always scanned an empty Map.
-  const targetBot = await findOrLoadSlackBotByTeamId(teamId);
-  if (!targetBot) {
-    // A5 (review run 20260506-221948-2402b0ed P1 #12): first-time Slack
-    // setup chicken-and-egg. Slack POSTs `url_verification` to the
-    // configured Request URL before the operator has saved the signing
-    // secret in AgentPlane — so findBotByTeamId returns null. If a
-    // global SLACK_SIGNING_SECRET env var is configured AND the body is
-    // a url_verification challenge, fall back to that secret to verify
-    // and respond with the challenge so the portal handshake completes.
-    // After credentials are saved, the per-bot signing secret takes
-    // over for real events.
-    //
-    // Round-3 review #9: the prior SEC-R2-002 no-op HMAC against a
-    // zero-secret was timing theatre — it closed <1% of the gap because
-    // the known-team-id branch is dominated by Neon SELECT + AES-GCM
-    // decrypt latency (~10-100ms), not the HMAC. We accept the residual
-    // workspace-existence oracle: the side channel is reconnaissance-
-    // grade only. Real events still require the per-bot signing secret,
-    // so the oracle does not enable forgery — it only reveals which
-    // team_ids have AgentPlane bots installed, information already
-    // discoverable by attempting an OAuth install in the workspace.
-    return await maybeHandleFirstTimeChallenge(rawBody, ts, req.headers.get("x-slack-signature"));
-  }
+  // 4. Defer everything heavy — bot load + decrypt + HMAC verify + Chat
+  //    SDK dispatch. The 200 ack races back to Slack so we never miss
+  //    the 3-second window. Bad-sig events still get a 200, but the
+  //    deferred verify drops them silently — same end state as the
+  //    prior sync "200 unhandled" path that closed the team_id oracle.
+  const reqUrl = req.url;
+  const reqMethod = req.method;
+  const reqHeaders = new Headers(req.headers);
+  after(async () => {
+    let targetBot: Awaited<ReturnType<typeof findOrLoadSlackBotByTeamId>>;
+    try {
+      targetBot = await findOrLoadSlackBotByTeamId(teamId);
+    } catch (err) {
+      logger.error("slack-webhook (deferred): bot load failed", {
+        team_id: teamId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    // Unknown team_id: drop silently. Real events from unregistered
+    // workspaces shouldn't trigger anything; preserves the oracle
+    // closure (same observable behaviour as the registered-but-bad-sig
+    // path below).
+    if (!targetBot) return;
 
-  // 4. Decrypt the bot's signing secret.
-  let signingSecret: string;
-  try {
-    const creds = (await getDecryptedCredentials(
-      targetBot.tenantId as TenantId,
-      targetBot.agentId as AgentId,
-      "slack",
-    )) as SlackCredentials | null;
-    if (!creds) {
-      return new Response(JSON.stringify({ status: "unhandled" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
+    let signingSecret: string;
+    try {
+      const creds = (await getDecryptedCredentials(
+        targetBot.tenantId as TenantId,
+        targetBot.agentId as AgentId,
+        "slack",
+      )) as SlackCredentials | null;
+      if (!creds) return;
+      signingSecret = creds.signingSecret;
+    } catch (err) {
+      logger.error("slack-webhook (deferred): decrypt failed", {
+        agent_id: targetBot.agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    const verified = await verifySlackV0(rawBody, ts, sigHeader, signingSecret);
+    if (!verified) {
+      logger.warn("slack-webhook (deferred): signature mismatch — event dropped", {
+        agent_id: targetBot.agentId,
+      });
+      return;
+    }
+
+    let parsed: SlackEventBody;
+    try {
+      parsed = JSON.parse(rawBody) as SlackEventBody;
+    } catch {
+      return;
+    }
+    // url_verification was already handled in the sync path above; if
+    // we somehow reach here, just drop.
+    if (parsed.type === "url_verification") return;
+
+    try {
+      await targetBot.bot.initialize();
+      const newReq = new NextRequest(reqUrl, {
+        method: reqMethod,
+        headers: reqHeaders,
+        body: rawBody,
+      });
+      await targetBot.bot.webhooks.slack(newReq, {
+        waitUntil: (p) => after(() => p),
+      });
+    } catch (err) {
+      logger.error("slack-webhook (deferred): SDK dispatch failed", {
+        agent_id: targetBot.agentId,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
-    signingSecret = creds.signingSecret;
-  } catch (err) {
-    logger.error("slack-webhook: decrypt failed", {
-      agent_id: targetBot.agentId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return new Response(JSON.stringify({ error: "decrypt_failed" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  });
 
-  // 5. HMAC verify.
-  //
-  //    SEC-R2-001 fix (review run 20260506-232400-round2): the per-bot
-  //    secret is the ONLY secret that authorizes real events. The
-  //    global SLACK_SIGNING_SECRET / SLACK_SIGNING_SECRET_PREVIOUS env
-  //    vars are accepted only on the maybeHandleFirstTimeChallenge
-  //    path — i.e., url_verification challenges before per-bot
-  //    credentials are saved. Round-1 added the global fallback for
-  //    multi-bot rotation convenience, but that broke the per-bot
-  //    ownership model: anyone holding the global env value could
-  //    forge real events on any tenant's bot. Per-bot rotation via
-  //    `credentials_version` bump is the canonical rotation path.
-  //
-  //    Signature failures past the team_id-found branch return 200
-  //    unhandled — the same status the unknown-team_id branch returns —
-  //    to close the timing/registration oracle (P2 #18).
-  const sigHeader = req.headers.get("x-slack-signature");
-  const verified = await verifySlackV0(rawBody, ts, sigHeader, signingSecret);
-  if (!verified) return unhandledResponse();
-
-  // 6. Parse body — now safe.
-  let parsed: SlackEventBody;
-  try {
-    parsed = JSON.parse(rawBody) as SlackEventBody;
-  } catch {
-    return new Response(JSON.stringify({ error: "invalid_json" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  // 7. url_verification — Slack's app-config handshake. Signature already
-  //    verified above, so the challenge response is authenticated.
-  if (parsed.type === "url_verification" && typeof parsed.challenge === "string") {
-    return new Response(parsed.challenge, {
-      status: 200,
-      headers: { "Content-Type": "text/plain" },
-    });
-  }
-
-  // 8. Hand to Chat SDK.
-  try {
-    await targetBot.bot.initialize();
-    const newReq = new NextRequest(req.url, {
-      method: req.method,
-      headers: req.headers,
-      body: rawBody,
-    });
-    const response = await targetBot.bot.webhooks.slack(newReq, {
-      waitUntil: (p) => after(() => p),
-    });
-    if (response) return response;
-  } catch (err) {
-    logger.error("slack-webhook: SDK dispatch failed", {
-      agent_id: targetBot.agentId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  return new Response(JSON.stringify({ status: "ok" }), {
+  // 5. Immediate ack — Slack only needs the 200 to suppress retries.
+  return new Response(JSON.stringify({ status: "queued" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });

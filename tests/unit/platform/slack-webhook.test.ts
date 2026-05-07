@@ -121,7 +121,7 @@ describe("Slack webhook strict ordering", () => {
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
-  it("returns 200 unhandled and DOES NOT decrypt when team_id is unknown", async () => {
+  it("returns 200 queued and DOES NOT decrypt when team_id is unknown (deferred path drops silently)", async () => {
     findBotByTeamIdMock.mockResolvedValueOnce(null);
     const res = await POST(
       makeRequest('{"team_id":"T999"}', {
@@ -131,16 +131,22 @@ describe("Slack webhook strict ordering", () => {
     );
     expect(res.status).toBe(200);
     const json = (await res.json()) as { status: string };
-    expect(json.status).toBe("unhandled");
+    expect(json.status).toBe("queued");
+    // The route's `after()` mock runs deferred work inline before the
+    // response promise resolves, so the bot lookup HAS happened by now.
     expect(findBotByTeamIdMock).toHaveBeenCalledWith("T999");
-    // Critical security invariant from R12 — no decryption on unknown team_id.
+    // Critical security invariant from R12 — no decryption on unknown team_id,
+    // even after the deferred path runs.
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
-  it("returns 200 unhandled on signature value mismatch (closes team_id oracle)", async () => {
+  it("returns 200 queued on signature value mismatch (oracle preserved — body is identical to unknown-team path)", async () => {
     // P2 #18: returning 401 on bad signature for a registered team_id and
-    // 200 on unknown team_id leaks which team_ids are registered. Both
-    // paths now return 200 unhandled with the same body.
+    // 200 on unknown team_id leaks which team_ids are registered. With
+    // the after() refactor, both paths get the same immediate 200 queued
+    // ack; the registered-but-bad-sig case decrypts in the deferred path
+    // and drops silently. The team_id oracle stays closed because the
+    // response shape is identical for both branches.
     findBotByTeamIdMock.mockResolvedValueOnce({
       tenantId: "tenant-1",
       agentId: "agent-1",
@@ -159,7 +165,11 @@ describe("Slack webhook strict ordering", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
-    expect(body.status).toBe("unhandled");
+    expect(body.status).toBe("queued");
+    // Decrypt IS called now (deferred verify needs the bot's signing
+    // secret to confirm the bad signature) — this is an implementation
+    // detail; the user-visible outcome is the same drop.
+    expect(decryptMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns 200 with the challenge on url_verification — uses global SLACK_SIGNING_SECRET fallback (no team_id in Slack's payload)", async () => {
