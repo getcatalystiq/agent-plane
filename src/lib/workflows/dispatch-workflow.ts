@@ -23,7 +23,8 @@
  *   │   } catch (err) { cancelled = true; ... }                            │
  *   │                                                                      │
  *   │   await finalizeStep(prepared, sandbox, { cancelled })    // STEP    │
- *   │   await tailStep(prepared, sandbox)                       // STEP    │
+ *   │   // tailStep is intentionally NOT called: finalizeMessage's          │
+ *   │   // happy path already calls sessionTail internally.                 │
  *   │                                                                      │
  *   └──────────────────────────────────────────────────────────────────────┘
  *
@@ -167,11 +168,17 @@ export async function dispatchWorkflow(
     });
   }
 
-  // Step 4 — finalize: assemble transcript blob, billing, transition message
+  // Step 4 — finalize: assemble transcript blob, billing, transition message,
+  // and run session-tail (backup + idle/stop). finalizeMessage already
+  // delegates to sessionTail internally for the happy path, so a separate
+  // tailStep here would double-run incrementMessageCount + backupSessionFile
+  // and double-transition active→idle (which manifested as "Session status
+  // transition failed (stale state)" warnings on the first workflow-backed
+  // schedule run after the cutover).
+  //
+  // tailStep remains exported for tests that pin its delegation-to-sessionTail
+  // contract, but is intentionally NOT called from the workflow body.
   await finalizeStep(prepared, sandboxRef, { cancelled, cancelReason });
-
-  // Step 5 — tail: persistent backup or ephemeral stop
-  await tailStep(prepared, sandboxRef);
 
   return { sessionId: prepared.session.id, messageId: prepared.messageId };
 }
