@@ -213,6 +213,52 @@ export function findBotByTeamId(teamId: string): CachedBot | null {
   return null;
 }
 
+/**
+ * Slack-webhook lazy loader. The Slack webhook serverless function is a
+ * different Vercel instance from the Discord gateway cron that calls
+ * refreshBots() — its in-process botCache is empty until we populate it
+ * here. On cache miss, query platform_bot_configs by
+ * platform_identity->>'team_id' and lazy-build the Chat instance via
+ * getOrCreateBot (which decrypts credentials lazily). System-scope query
+ * mirrors refreshBots — credentials_enc is NEVER part of the SELECT, so
+ * a regression that re-adds it would fail Zod parsing rather than
+ * silently widening the audit surface.
+ */
+export async function findOrLoadSlackBotByTeamId(teamId: string): Promise<CachedBot | null> {
+  const cached = findBotByTeamId(teamId);
+  if (cached) return cached;
+
+  const rows = await query(
+    BotRegistryRow,
+    `SELECT id, tenant_id, agent_id, platform, credentials_version, enabled, platform_identity
+       FROM platform_bot_configs
+      WHERE enabled = true
+        AND platform = 'slack'
+        AND platform_identity->>'team_id' = $1
+      LIMIT 1`,
+    [teamId],
+  );
+  if (rows.length === 0) return null;
+
+  const row = rows[0];
+  try {
+    return await getOrCreateBot({
+      tenantId: row.tenant_id as TenantId,
+      agentId: row.agent_id as AgentId,
+      platform: row.platform,
+      credentialsVersion: row.credentials_version,
+      platformIdentity: row.platform_identity,
+    });
+  } catch (err) {
+    logger.error("findOrLoadSlackBotByTeamId: failed to build bot", {
+      team_id: teamId,
+      agent_id: row.agent_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 export function getAllBots(): Map<string, CachedBot> {
   return botCache;
 }

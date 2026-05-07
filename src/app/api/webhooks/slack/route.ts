@@ -22,7 +22,7 @@ import { NextRequest, after } from "next/server";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
 import { withErrorHandler } from "@/lib/api";
-import { findBotByTeamId } from "@/lib/platform/bot";
+import { findOrLoadSlackBotByTeamId } from "@/lib/platform/bot";
 import { getDecryptedCredentials, type SlackCredentials } from "@/lib/platform/operations";
 import type { TenantId, AgentId } from "@/lib/types";
 
@@ -167,7 +167,13 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
   }
 
   // 3. Registry lookup — no decryption yet.
-  const targetBot = findBotByTeamId(teamId);
+  //    Lazy DB-fallback (findOrLoadSlackBotByTeamId): the Slack webhook
+  //    serverless function is a different Vercel instance from the
+  //    Discord gateway cron that runs refreshBots(), so its in-process
+  //    botCache is empty until we lazy-populate it from the DB on miss.
+  //    Without this, every Slack event hit "200 unhandled" because
+  //    findBotByTeamId always scanned an empty Map.
+  const targetBot = await findOrLoadSlackBotByTeamId(teamId);
   if (!targetBot) {
     // A5 (review run 20260506-221948-2402b0ed P1 #12): first-time Slack
     // setup chicken-and-egg. Slack POSTs `url_verification` to the

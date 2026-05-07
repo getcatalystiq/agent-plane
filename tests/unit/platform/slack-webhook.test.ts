@@ -33,7 +33,9 @@ const { findBotByTeamIdMock, decryptMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/platform/bot", () => ({
-  findBotByTeamId: findBotByTeamIdMock,
+  // Route now calls findOrLoadSlackBotByTeamId (async) — the underlying
+  // shape from the route's POV is the same: returns a CachedBot or null.
+  findOrLoadSlackBotByTeamId: findBotByTeamIdMock,
 }));
 
 vi.mock("@/lib/platform/operations", () => ({
@@ -120,7 +122,7 @@ describe("Slack webhook strict ordering", () => {
   });
 
   it("returns 200 unhandled and DOES NOT decrypt when team_id is unknown", async () => {
-    findBotByTeamIdMock.mockReturnValueOnce(null);
+    findBotByTeamIdMock.mockResolvedValueOnce(null);
     const res = await POST(
       makeRequest('{"team_id":"T999"}', {
         "x-slack-request-timestamp": nowSeconds(),
@@ -139,7 +141,7 @@ describe("Slack webhook strict ordering", () => {
     // P2 #18: returning 401 on bad signature for a registered team_id and
     // 200 on unknown team_id leaks which team_ids are registered. Both
     // paths now return 200 unhandled with the same body.
-    findBotByTeamIdMock.mockReturnValueOnce({
+    findBotByTeamIdMock.mockResolvedValueOnce({
       tenantId: "tenant-1",
       agentId: "agent-1",
       botToken: "xoxb-fake",
