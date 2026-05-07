@@ -2,6 +2,13 @@ import type { NextConfig } from "next";
 import { withWorkflow } from "workflow/next";
 
 const nextConfig: NextConfig = {
+  // discord.js (and its dep @discordjs/ws) lazy-imports `zlib-sync`, an
+  // optional native dep that's NOT in our package.json. Runtime gracefully
+  // falls back when it can't resolve (`.catch(() => null)`), but Turbopack's
+  // static analysis fails the build trying to resolve the dynamic import.
+  // Marking it as a server-external package leaves it as a runtime require
+  // and skips the bundle-time resolution.
+  serverExternalPackages: ["discord.js", "@discordjs/ws", "@chat-adapter/discord"],
   async redirects() {
     return [
       {
