@@ -173,7 +173,7 @@ export function AddAgentForm({ tenantId }: Props) {
                     <Input
                       type="number"
                       min="1"
-                      max="60"
+                      max="240"
                       value={form.max_runtime_minutes}
                       onChange={(e) => setForm((f) => ({ ...f, max_runtime_minutes: e.target.value }))}
                       className="pr-10"
