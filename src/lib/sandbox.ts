@@ -137,6 +137,16 @@ export interface SandboxConfig {
     max_turns: number;
     max_budget_usd: number;
     skills: Array<{ folder: string; files: Array<{ path: string; content: string }> }>;
+    /**
+     * Agent plugin definitions (`agents.plugins` JSONB). The actual plugin
+     * file contents are passed separately via `SessionSandboxConfig.pluginFiles`
+     * (cold-start) or are already on the sandbox's disk (reconnect). This
+     * field exists so `reconnectSessionSandbox` can decide whether to enable
+     * `settingSources: ["project"]` on the runner SDK init — without it, the
+     * SDK ignores on-disk `.claude/skills/<plugin>-*` files for plugin-only
+     * agents (no skills configured).
+     */
+    plugins?: Array<{ name?: string } & Record<string, unknown>>;
   };
   tenantId: string;
   /**
@@ -1521,7 +1531,18 @@ export async function reconnectSessionSandbox(
   try {
     const hasMcp = config.mcpServers ? Object.keys(config.mcpServers).length > 0 : false;
     const hasSkills = config.agent.skills.length > 0;
-    const hasPluginContent = (config.pluginFiles ?? []).length > 0;
+    // OPTIMIZATION B inverse: hasPluginContent on reconnect MUST come from
+    // the agent definition, not config.pluginFiles. Reconnect callers
+    // (dispatcher.ts:692 legacy path, dispatch-workflow.ts ensureSandboxImpl
+    // workflow path) intentionally pass pluginFiles: [] because plugin files
+    // were already injected at cold-start and persist on the sandbox's disk.
+    // Deriving the flag from the empty array here would falsely report no
+    // plugins and skip `settingSources: ["project"]` in the runner SDK init,
+    // causing the SDK to ignore the on-disk .claude/skills/<plugin>-* files
+    // for plugin-only agents (no skills configured). The Claude Agent SDK
+    // only loads project settings when this flag is set; without it,
+    // follow-up messages on plugin-only agents lose their plugin tools.
+    const hasPluginContent = (config.agent.plugins ?? []).length > 0;
 
     const baseEnv: Record<string, string> = {
       AGENT_PLANE_AGENT_ID: config.agent.id,
