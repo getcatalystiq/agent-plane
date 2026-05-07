@@ -367,8 +367,18 @@ function ConnectForm({
         body: JSON.stringify({ credentials, attestations: { private_workspace: true } }),
       });
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
-        setError(body.error?.message ?? `HTTP ${res.status}`);
+        // Round-5 review #7: read the structured error code so cap-exceeded
+        // (409) renders an actionable hint instead of just the message.
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: { code?: string; message?: string; platform?: string; limit?: number };
+        };
+        if (body.error?.code === "tenant_bot_cap_exceeded" && body.error.limit != null) {
+          setError(
+            `${body.error.message} You're at ${body.error.limit}/${body.error.limit} ${body.error.platform ?? ""} bots — disable one in the list above before connecting another.`,
+          );
+        } else {
+          setError(body.error?.message ?? `HTTP ${res.status}`);
+        }
         return;
       }
       await onSuccess();

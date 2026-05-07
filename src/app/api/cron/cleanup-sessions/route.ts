@@ -536,7 +536,18 @@ async function sweepOrphans(): Promise<number> {
 const SWEEP_BATCH_SIZE = 5_000;
 const SWEEP_MAX_BATCHES = 20;
 
-async function sweepDedupeBatched(predicate: string): Promise<number> {
+// Round-5 review #8 fix: replace the `predicate: string` parameter with
+// a discriminated union so sweepDedupeBatched cannot accept user-derived
+// SQL fragments. Each cohort maps to a frozen WHERE clause.
+type DedupeSweepCohort = "stale-placeholder" | "expired-filled";
+
+const DEDUPE_SWEEP_PREDICATES: Record<DedupeSweepCohort, string> = {
+  "stale-placeholder": "inner_run_id IS NULL AND claimed_at < now() - INTERVAL '15 minutes'",
+  "expired-filled": "created_at < now() - INTERVAL '7 days'",
+};
+
+async function sweepDedupeBatched(cohort: DedupeSweepCohort): Promise<number> {
+  const predicate = DEDUPE_SWEEP_PREDICATES[cohort];
   let total = 0;
   for (let i = 0; i < SWEEP_MAX_BATCHES; i++) {
     const result = await execute(
@@ -556,8 +567,8 @@ async function sweepDedupeBatched(predicate: string): Promise<number> {
 
 async function sweepChatEventDedupe(): Promise<number> {
   const [stale, expired] = await Promise.all([
-    sweepDedupeBatched("inner_run_id IS NULL AND claimed_at < now() - INTERVAL '15 minutes'"),
-    sweepDedupeBatched("created_at < now() - INTERVAL '7 days'"),
+    sweepDedupeBatched("stale-placeholder"),
+    sweepDedupeBatched("expired-filled"),
   ]);
   if (stale > 0 || expired > 0) {
     logger.info("chat_event_dedupe sweep", {

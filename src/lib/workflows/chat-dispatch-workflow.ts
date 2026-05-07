@@ -438,6 +438,16 @@ async function startInnerDispatchStep(
     if (recovered.kind === "attached") {
       return { innerRunId: recovered.innerRunId };
     }
+    if (recovered.kind === "abandoned") {
+      // Round-5 review #12: surface the abandonment as a bot error so
+      // operators see it. The caller (workflow body) should not call
+      // start() — throw a descriptive error that bypasses WDK retry.
+      await markBotErrorStep(
+        input,
+        `claim recovery abandoned after ${recovered.attempts} steal attempts; cleanup sweep will free the placeholder shortly`,
+      );
+      throw new ClaimAbandonedError(input.eventId, recovered.attempts);
+    }
     // recovered.kind === "promoted" — fall through to the winner path
     // with the stolen claim.
   }
@@ -462,7 +472,38 @@ async function startInnerDispatchStep(
     })),
   };
 
+  // Round-5 review #2 fix: split the placeholder fill into two stages
+  // around start(). The prior code wrote session_id, message_id, AND
+  // inner_run_id in a single UPDATE AFTER start(). If that UPDATE
+  // failed (DB connectivity blip), the inner workflow was already
+  // running but the dedupe row had no record of it — WDK retry would
+  // re-poll, observe stale claim, steal, and dispatch a SECOND run.
+  //
+  // New ordering:
+  //   (1) reserveSessionAndMessage → prepared
+  //   (2) UPDATE session_id, message_id (NOT inner_run_id yet) — pin
+  //       the reservation to the dedupe row before start()
+  //   (3) start(dispatchWorkflow) → run.runId
+  //   (4) UPDATE inner_run_id, with bounded retry — three attempts
+  //       100ms / 250ms / 500ms before giving up.
+  //
+  // Effect: if (4) fails after retries, the placeholder still has
+  // session_id + message_id from (2), so a WDK retry sees session/
+  // message bound but inner_run_id NULL → polls. Eventually the
+  // 15-min cleanup sweep frees the orphan and the next retry
+  // INSERTs cleanly. No silent double-dispatch.
   const prepared = await reserveSessionAndMessage(dispatchInput);
+
+  await withTenantTransaction(input.tenantId, async (tx) => {
+    await tx.execute(
+      `UPDATE chat_event_dedupe
+       SET session_id = $4, message_id = $5
+       WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+         AND inner_run_id IS NULL`,
+      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId],
+    );
+  });
+
   const run = await start(
     dispatchWorkflow as unknown as (
       input: DispatchInput,
@@ -471,25 +512,55 @@ async function startInnerDispatchStep(
     [dispatchInput, prepared],
   );
 
-  // Fill in the placeholder row with the actual session/message/run ids.
-  // The unique constraint guarantees only one row exists per
-  // (tenant, platform, event_id), so this UPDATE is unconditionally safe.
-  await withTenantTransaction(input.tenantId, async (tx) => {
-    await tx.execute(
-      `UPDATE chat_event_dedupe
-       SET session_id = $4, message_id = $5, inner_run_id = $6
-       WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
-         AND inner_run_id IS NULL`,
-      [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId, run.runId],
-    );
-  });
+  await retryPlaceholderInnerRunUpdate(input, run.runId);
 
   return { innerRunId: run.runId };
 }
 
+const PLACEHOLDER_UPDATE_BACKOFFS_MS = [100, 250, 500] as const;
+
+async function retryPlaceholderInnerRunUpdate(
+  input: ChatTriggerInput,
+  innerRunId: string,
+): Promise<void> {
+  let lastErr: unknown;
+  for (let i = 0; i <= PLACEHOLDER_UPDATE_BACKOFFS_MS.length; i++) {
+    try {
+      await withTenantTransaction(input.tenantId, async (tx) => {
+        await tx.execute(
+          `UPDATE chat_event_dedupe
+           SET inner_run_id = $4
+           WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+             AND inner_run_id IS NULL`,
+          [input.tenantId, input.platform, input.eventId, innerRunId],
+        );
+      });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (i < PLACEHOLDER_UPDATE_BACKOFFS_MS.length) {
+        await new Promise((resolve) => setTimeout(resolve, PLACEHOLDER_UPDATE_BACKOFFS_MS[i]));
+      }
+    }
+  }
+  // All retries failed. Inner workflow is running; placeholder has
+  // session_id + message_id but no inner_run_id. The cleanup-sessions
+  // sweep will reap this orphan after 15min. Log loudly so ops knows.
+  logger.error("startInnerDispatchStep: failed to fill inner_run_id after retries", {
+    tenant_id: input.tenantId,
+    agent_id: input.agentId,
+    platform: input.platform,
+    event_id: input.eventId,
+    inner_run_id: innerRunId,
+    error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+  });
+  throw lastErr;
+}
+
 type ClaimRecovery =
   | { kind: "attached"; innerRunId: string }
-  | { kind: "promoted" };
+  | { kind: "promoted" }
+  | { kind: "abandoned"; attempts: number };
 
 /**
  * Thrown by recoverLostClaim when both the poll and the atomic-steal
@@ -516,15 +587,39 @@ export class StaleClaimError extends Error {
 }
 
 /**
- * Recovery branch for the loser of the claim-then-reserve race. Three
+ * Round-5 review #12: thrown by recoverLostClaim when the steal-attempts
+ * counter crosses MAX_STEAL_ATTEMPTS. Distinct from StaleClaimError so
+ * the workflow body can recognize "give up" vs "retry" semantics. The
+ * caller should NOT retry on this — markBotError has already been
+ * stamped and the cleanup sweep will free the placeholder.
+ */
+export class ClaimAbandonedError extends Error {
+  constructor(eventId: string, public readonly attempts: number) {
+    super(
+      `startInnerDispatchStep: claim recovery abandoned for event ${eventId} after ${attempts} steal attempts; cleanup sweep will free the placeholder`,
+    );
+    this.name = "ClaimAbandonedError";
+  }
+}
+
+// Round-5 review #12: circuit breaker. Each steal attempt increments
+// chat_event_dedupe.steal_attempts (atomic with the steal UPDATE). If
+// the counter crosses MAX_STEAL_ATTEMPTS, recoverLostClaim returns
+// `{ kind: "abandoned" }` so the caller can mark the bot in error and
+// emit a user-visible "we couldn't process this message" reply instead
+// of looping until WDK gives up silently.
+const MAX_STEAL_ATTEMPTS = 5;
+
+/**
+ * Recovery branch for the loser of the claim-then-reserve race. Four
  * possible outcomes:
  *   1. Poll observes the winner's UPDATE → attach to that runId.
  *   2. Poll times out, atomic stale-claim steal succeeds → caller is
- *      promoted to new winner and must run reserveSessionAndMessage +
- *      start (returns `{ kind: "promoted" }`).
- *   3. Steal fails (another concurrent stealer won, or claim filled in
- *      the race window). Re-poll once. If still empty, throw — let
- *      WDK retry the whole step on a clean placeholder.
+ *      promoted to new winner.
+ *   3. Steal fails AND counter > MAX_STEAL_ATTEMPTS → abandoned (emit
+ *      user-facing error, do not retry).
+ *   4. Steal fails AND counter ≤ MAX_STEAL_ATTEMPTS → throw
+ *      StaleClaimError so WDK retries.
  */
 async function recoverLostClaim(input: ChatTriggerInput): Promise<ClaimRecovery> {
   const filled = await pollForDedupeFill(input.tenantId, input.platform, input.eventId);
@@ -537,36 +632,63 @@ async function recoverLostClaim(input: ChatTriggerInput): Promise<ClaimRecovery>
     });
     return { kind: "attached", innerRunId: filled.inner_run_id };
   }
+  // Atomic steal + counter increment. The counter increments on every
+  // attempt regardless of whether the predicate matches, so retry
+  // storms drive the counter forward.
   const stealResult = await withTenantTransaction(input.tenantId, async (tx) => {
-    return tx.execute(
+    return tx.queryOne(
+      StealAttemptRow,
       `UPDATE chat_event_dedupe
-       SET claimed_at = now()
+       SET claimed_at = CASE
+             WHEN inner_run_id IS NULL AND claimed_at < now() - make_interval(secs => $4)
+             THEN now() ELSE claimed_at END,
+           steal_attempts = steal_attempts + 1
        WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
-         AND inner_run_id IS NULL
-         AND claimed_at < now() - make_interval(secs => $4)`,
+       RETURNING
+         steal_attempts,
+         (inner_run_id IS NULL AND claimed_at = now()) AS stole`,
       [input.tenantId, input.platform, input.eventId, STALE_CLAIM_THRESHOLD_SECONDS],
     );
   });
-  if (stealResult.rowCount !== 1) {
-    const reFilled = await pollForDedupeFill(input.tenantId, input.platform, input.eventId);
-    if (reFilled) {
-      logger.info("startInnerDispatchStep: claim filled during steal window; attaching", {
-        tenant_id: input.tenantId,
-        platform: input.platform,
-        event_id: input.eventId,
-        inner_run_id: reFilled.inner_run_id,
-      });
-      return { kind: "attached", innerRunId: reFilled.inner_run_id };
-    }
-    throw new StaleClaimError(input.eventId);
+  if (stealResult?.stole) {
+    logger.warn("startInnerDispatchStep: stole stale claim; promoting to new winner", {
+      tenant_id: input.tenantId,
+      platform: input.platform,
+      event_id: input.eventId,
+      attempts: stealResult.steal_attempts,
+    });
+    return { kind: "promoted" };
   }
-  logger.warn("startInnerDispatchStep: stole stale claim; promoting to new winner", {
-    tenant_id: input.tenantId,
-    platform: input.platform,
-    event_id: input.eventId,
-  });
-  return { kind: "promoted" };
+  // Steal didn't match. Try one more poll in case the row filled in
+  // the steal window.
+  const reFilled = await pollForDedupeFill(input.tenantId, input.platform, input.eventId);
+  if (reFilled) {
+    logger.info("startInnerDispatchStep: claim filled during steal window; attaching", {
+      tenant_id: input.tenantId,
+      platform: input.platform,
+      event_id: input.eventId,
+      inner_run_id: reFilled.inner_run_id,
+    });
+    return { kind: "attached", innerRunId: reFilled.inner_run_id };
+  }
+  // Circuit breaker: bail explicitly so the caller can mark the bot
+  // in error and emit a user-visible reply instead of WDK looping.
+  if ((stealResult?.steal_attempts ?? 0) > MAX_STEAL_ATTEMPTS) {
+    logger.error("startInnerDispatchStep: claim recovery abandoned after circuit-breaker threshold", {
+      tenant_id: input.tenantId,
+      platform: input.platform,
+      event_id: input.eventId,
+      attempts: stealResult?.steal_attempts,
+    });
+    return { kind: "abandoned", attempts: stealResult?.steal_attempts ?? 0 };
+  }
+  throw new StaleClaimError(input.eventId);
 }
+
+const StealAttemptRow = z.object({
+  steal_attempts: z.number().int().nonnegative(),
+  stole: z.boolean(),
+});
 
 /**
  * Poll the dedupe row until the winner's UPDATE fills inner_run_id.
@@ -752,12 +874,35 @@ async function flushAndFinishStep(opts: {
 
 async function markBotErrorStep(input: ChatTriggerInput, message: string): Promise<void> {
   "use step";
-  await markBotError(input.tenantId, input.agentId, input.platform, message).catch(() => {});
+  // Round-5 review #6: log on failure instead of silently swallowing.
+  // markBotError populates last_error which the operator UI surfaces;
+  // a silent failure means the silent-bot UX is invisible to ops too.
+  try {
+    await markBotError(input.tenantId, input.agentId, input.platform, message);
+  } catch (err) {
+    logger.error("markBotErrorStep: failed to write last_error", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      platform: input.platform,
+      original_message: message,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function finalizeChatStep(input: ChatTriggerInput): Promise<void> {
   "use step";
-  await markBotEvent(input.tenantId, input.agentId, input.platform).catch(() => {});
+  // Round-5 review #6: same treatment for markBotEvent.
+  try {
+    await markBotEvent(input.tenantId, input.agentId, input.platform);
+  } catch (err) {
+    logger.error("finalizeChatStep: failed to write last_event", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      platform: input.platform,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -188,7 +188,7 @@ will reap):
 SELECT COUNT(*) AS stuck
 FROM chat_event_dedupe
 WHERE inner_run_id IS NULL
-  AND claimed_at < now() - INTERVAL '5 minutes';
+  AND claimed_at < now() - INTERVAL '15 minutes';
 ```
 
 The cleanup-sessions cron runs every 5 min; sweeps surface in the

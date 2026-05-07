@@ -14,6 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TenantId, AgentId } from "@/lib/types";
+import type { TxClient } from "@/db";
 
 vi.mock("@/lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -103,14 +104,40 @@ describe("parseNdjsonLine", () => {
   });
 });
 
+// Round-5 review #9: consolidated test mock pattern. All tests now use
+// the probe-based mockImplementation that invokes the production
+// callback (rather than mockResolvedValue which bypasses it). This
+// keeps test semantics consistent with what production does.
+type DedupeRowShape = { session_id: string | null; message_id: string | null; inner_run_id: string | null };
+const EMPTY_DEDUPE_ROW: DedupeRowShape = { session_id: null, message_id: null, inner_run_id: null };
+
+function mockTxQueueWithProbe(responses: DedupeRowShape[]): void {
+  let idx = 0;
+  withTenantTransactionMock.mockImplementation(async (_tenantId: string, cb: (tx: TxClient) => Promise<unknown>) => {
+    let observed = false;
+    const probeTx: TxClient = {
+      queryOne: async () => {
+        observed = true;
+        const r = responses[idx] ?? EMPTY_DEDUPE_ROW;
+        idx += 1;
+        return r as never;
+      },
+      execute: async () => {
+        observed = true;
+        return { rowCount: 0 };
+      },
+      query: async () => [],
+    };
+    const result = await cb(probeTx);
+    if (!observed) throw new Error("test mock: callback didn't invoke tx");
+    return result;
+  });
+}
+
 describe("pollForDedupeFill", () => {
   it("returns the row immediately when inner_run_id is already filled", async () => {
-    const filled = {
-      session_id: "session-1",
-      message_id: "msg-1",
-      inner_run_id: "run-1",
-    };
-    withTenantTransactionMock.mockResolvedValueOnce(filled);
+    const filled = { session_id: "session-1", message_id: "msg-1", inner_run_id: "run-1" };
+    mockTxQueueWithProbe([filled]);
 
     const result = await __testing.pollForDedupeFill(tenantId, "discord", "evt-1");
 
@@ -119,18 +146,9 @@ describe("pollForDedupeFill", () => {
   });
 
   it("returns null when the placeholder is never filled (timeout)", async () => {
-    // Always return an unfilled placeholder row.
-    withTenantTransactionMock.mockResolvedValue({
-      session_id: null,
-      message_id: null,
-      inner_run_id: null,
-    });
+    mockTxQueueWithProbe([]); // every call falls through to empty default
 
     const promise = __testing.pollForDedupeFill(tenantId, "discord", "evt-2");
-    // Round-3: pollForDedupeFill now uses exponential backoff (capped at
-    // POLL_INTERVAL_CAP_MS). Advance the timer in cap-sized chunks past
-    // the total budget; each chunk fires whatever inner setTimeout is
-    // currently scheduled.
     for (let elapsed = 0; elapsed < __testing.POLL_MAX_DURATION_MS + 1000; elapsed += __testing.POLL_INTERVAL_CAP_MS) {
       await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_CAP_MS);
     }
@@ -141,10 +159,7 @@ describe("pollForDedupeFill", () => {
   it("ignores partially-filled rows (inner_run_id still null) and keeps polling", async () => {
     const partial = { session_id: "s1", message_id: "m1", inner_run_id: null };
     const filled = { session_id: "s1", message_id: "m1", inner_run_id: "run-1" };
-    withTenantTransactionMock
-      .mockResolvedValueOnce(partial)
-      .mockResolvedValueOnce(partial)
-      .mockResolvedValueOnce(filled);
+    mockTxQueueWithProbe([partial, partial, filled]);
 
     const promise = __testing.pollForDedupeFill(tenantId, "discord", "evt-3");
     // First backoff is POLL_INTERVAL_MS (100ms); second is doubled (200ms).
@@ -156,21 +171,13 @@ describe("pollForDedupeFill", () => {
   });
 
   it("uses exponential backoff: ~11 DB round-trips over the 30s budget, not 300", async () => {
-    // Round-3 review #8 fix verification. Always return unfilled.
-    withTenantTransactionMock.mockResolvedValue({
-      session_id: null,
-      message_id: null,
-      inner_run_id: null,
-    });
+    mockTxQueueWithProbe([]);
 
     const promise = __testing.pollForDedupeFill(tenantId, "discord", "evt-backoff");
     for (let elapsed = 0; elapsed < __testing.POLL_MAX_DURATION_MS + 1000; elapsed += __testing.POLL_INTERVAL_CAP_MS) {
       await vi.advanceTimersByTimeAsync(__testing.POLL_INTERVAL_CAP_MS);
     }
     await promise;
-    // Sanity: substantially fewer than the 300 the fixed-100ms scheme
-    // would have produced. Allow generous slack to avoid flakiness on
-    // exact backoff arithmetic.
     expect(withTenantTransactionMock.mock.calls.length).toBeLessThan(30);
     expect(withTenantTransactionMock.mock.calls.length).toBeGreaterThan(5);
   });
@@ -234,29 +241,37 @@ describe("recoverLostClaim", () => {
     let pollIdx = 0;
     let stealCalled = false;
     let rePollIdx = 0;
-    withTenantTransactionMock.mockImplementation(async (_tenantId: string, cb: (tx: unknown) => Promise<unknown>) => {
+    withTenantTransactionMock.mockImplementation(async (_tenantId: string, cb: (tx: TxClient) => Promise<unknown>) => {
       // Probe the callback by passing a tx that records the SQL it sees
-      // and returns the appropriate canned response.
+      // and returns the appropriate canned response. Round-5 review #12:
+      // recoverLostClaim's steal now uses queryOne(UPDATE ... RETURNING)
+      // instead of execute(). Distinguish poll calls (SELECT) from
+      // steal calls (UPDATE) by SQL substring.
       let observedSql = "";
-      const probeTx = {
-        queryOne: async (_schema: unknown, sql: string) => {
+      const probeTx: TxClient = {
+        queryOne: async (_schema, sql) => {
           observedSql = sql;
-          // queryOne is used by pollForDedupeFill on SELECT.
+          if (sql.toUpperCase().includes("UPDATE")) {
+            // This is the atomic-steal UPDATE … RETURNING.
+            stealCalled = true;
+            return {
+              steal_attempts: 1,
+              stole: opts.stealResponse.rowCount === 1,
+            } as never;
+          }
+          // SELECT — pollForDedupeFill or its re-poll.
           if (!stealCalled) {
             const r = opts.pollResponses[pollIdx] ?? empty;
             pollIdx += 1;
-            return r;
+            return r as never;
           }
-          // After the steal has fired, additional SELECTs are the re-poll.
           const r = opts.rePollResponses?.[rePollIdx] ?? empty;
           rePollIdx += 1;
-          return r;
+          return r as never;
         },
-        execute: async (sql: string) => {
+        execute: async (sql) => {
           observedSql = sql;
-          // execute is called by recoverLostClaim's atomic-steal UPDATE.
-          stealCalled = true;
-          return opts.stealResponse;
+          return { rowCount: 0 };
         },
         query: async () => [],
       };

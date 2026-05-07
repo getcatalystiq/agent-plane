@@ -22,7 +22,6 @@ import { withErrorHandler } from "@/lib/api";
 import { logger } from "@/lib/logger";
 import {
   upsertBotConfig,
-  TenantBotCapExceededError,
   getBotConfig,
   disableBotConfig,
   AttestationGateError,
@@ -157,19 +156,11 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
         { status: 400 },
       );
     }
-    if (err instanceof TenantBotCapExceededError) {
-      return NextResponse.json(
-        {
-          error: {
-            code: "tenant_bot_cap_exceeded",
-            message: err.message,
-            platform: err.platform,
-            limit: err.limit,
-          },
-        },
-        { status: 409 },
-      );
-    }
+    // Round-5 review #4: TenantBotCapExceededError now extends
+    // ConflictError → AppError, so withErrorHandler maps it to 409
+    // automatically using the class's toJSON() (which surfaces
+    // platform + limit). The hand-rolled mapping that lived here is
+    // unnecessary — let it bubble.
     throw err;
   }
 });
