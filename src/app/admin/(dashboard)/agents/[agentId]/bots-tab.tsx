@@ -159,17 +159,56 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
       </div>
 
       {platform === "slack" && slackWebhookUrl && (
-        <div className="space-y-1">
-          <label className="text-xs text-muted-foreground">Slack Events API webhook URL</label>
-          <div className="flex gap-2 items-center">
-            <code className="text-xs bg-muted px-2 py-1 rounded flex-1 overflow-x-auto whitespace-nowrap">
-              {slackWebhookUrl}
-            </code>
-            <CopyButton text={slackWebhookUrl} />
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Slack Events API webhook URL</label>
+            <div className="flex gap-2 items-center">
+              <code className="text-xs bg-muted px-2 py-1 rounded flex-1 overflow-x-auto whitespace-nowrap">
+                {slackWebhookUrl}
+              </code>
+              <CopyButton text={slackWebhookUrl} />
+            </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Paste this into your Slack app's Event Subscriptions → Request URL.
-          </p>
+          <details className="text-xs space-y-2 rounded-md border border-border bg-muted/30 p-3" open={!config}>
+            <summary className="cursor-pointer font-medium text-foreground">
+              Slack app setup checklist
+            </summary>
+            <ol className="space-y-2 mt-2 ml-4 list-decimal text-muted-foreground">
+              <li>
+                <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                  api.slack.com/apps
+                </a>
+                {" "}→ your app → <strong className="text-foreground">Event Subscriptions</strong> →
+                paste the URL above into <strong className="text-foreground">Request URL</strong>. Wait for ✓ Verified.
+              </li>
+              <li>
+                Same page → <strong className="text-foreground">Subscribe to bot events</strong> →
+                add these (without them, Slack sends no events to your webhook):
+                <ul className="ml-5 mt-1 list-disc space-y-0.5">
+                  <li><code className="text-foreground">app_mention</code> — required, fires on @mentions</li>
+                  <li><code className="text-foreground">message.channels</code> — public-channel thread follow-ups</li>
+                  <li><code className="text-foreground">message.groups</code> — private-channel thread follow-ups</li>
+                  <li><code className="text-foreground">message.im</code> — optional, DMs to the bot</li>
+                </ul>
+              </li>
+              <li>
+                <strong className="text-foreground">OAuth & Permissions</strong> → Bot Token Scopes must include:
+                <code className="ml-1 text-foreground">app_mentions:read</code>,
+                <code className="ml-1 text-foreground">chat:write</code>,
+                <code className="ml-1 text-foreground">channels:history</code>,
+                <code className="ml-1 text-foreground">groups:history</code>
+                {", "}<code className="text-foreground">im:history</code> (if using DMs).
+              </li>
+              <li>
+                <strong className="text-foreground">Reinstall to Workspace</strong> after adding scopes or events.
+                Without reinstall, scopes show in the UI but Slack fires no events.
+              </li>
+              <li>
+                In your Slack channel: <code className="text-foreground">/invite @YourBot</code>, then
+                {" "}<strong className="text-foreground">@mention</strong> the bot — type <code className="text-foreground">@</code> and select the bot from the autocomplete (plain text won't fire <code className="text-foreground">app_mention</code>).
+              </li>
+            </ol>
+          </details>
         </div>
       )}
 
