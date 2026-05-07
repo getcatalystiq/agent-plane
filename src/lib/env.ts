@@ -57,6 +57,34 @@ const EnvSchema = z.object({
   // 2 weeks after U10a ships.
   LEGACY_DISPATCH_GLASS_BREAK: z.enum(["on", "off"]).default("off"),
 
+  // --- Chat platform bots (U3-U8) ---
+  // Upstash Redis — Chat SDK shared state across all per-agent bot
+  // instances. The Chat SDK's @chat-adapter/state-redis uses native Redis
+  // protocol (redis:// or rediss://), so we wire to Upstash's native
+  // endpoint (UPSTASH_REDIS_URL with rediss:// scheme) rather than the
+  // REST API. Provisioned via Vercel Marketplace; optional at boot, the
+  // platform module fail-closes when chat ingress tries to instantiate
+  // without it.
+  UPSTASH_REDIS_URL: z.string().optional(),
+  // Discord forwarder shared secret — distinct from any bot token. Signs
+  // forwarded gateway events so anyone who has a leaked bot token still
+  // can't forge events at the public webhook URL. PREVIOUS supports
+  // zero-downtime rotation (mirrors ENCRYPTION_KEY_PREVIOUS).
+  GATEWAY_FORWARDER_SECRET: z.string().optional(),
+  GATEWAY_FORWARDER_SECRET_PREVIOUS: z.string().optional(),
+  // Discord global fallbacks for single-bot deploys; per-bot values stored
+  // in platform_bot_configs.credentials_enc are authoritative.
+  DISCORD_PUBLIC_KEY: z.string().optional(),
+  DISCORD_APPLICATION_ID: z.string().optional(),
+  // Slack global signing secret fallback (single-bot deploys). Per-bot
+  // value in platform_bot_configs.credentials_enc is authoritative when set.
+  SLACK_SIGNING_SECRET: z.string().optional(),
+  // Public-app URL — the gateway cron forwards events to
+  // ${NEXT_PUBLIC_APP_URL}/api/webhooks/discord. Already used elsewhere.
+  NEXT_PUBLIC_APP_URL: z.string().url().optional(),
+  // Per-attachment cap (R7). Default 25 MB.
+  PLATFORM_ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+
   // Runtime
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
 });
