@@ -724,7 +724,7 @@ async function runMessageStream(
       } else {
         // Sandbox went missing — drop any cached handle (it's dead) and cold start.
         activeSessions.delete(session.id);
-        sandbox = await coldStartSandbox({
+        sandbox = (await coldStartSandbox({
           agent,
           tenantId: input.tenantId,
           sessionId: session.id,
@@ -738,7 +738,7 @@ async function runMessageStream(
           callbackData: input.callbackData,
           effectiveBudget,
           effectiveMaxTurns,
-        });
+        })).sandbox;
         // NOTE: do NOT cache cold-start sandboxes here; the DB row will be
         // updated by coldStartSandbox and the next message will reconnect
         // through the normal path (which DOES cache after success).
@@ -747,7 +747,7 @@ async function runMessageStream(
   } else {
     // Cold path: pure new-sandbox.
     const [mcpResult, pluginResult, auth] = await Promise.all([mcpPromise, pluginPromise, authPromise]);
-    sandbox = await coldStartSandbox({
+    sandbox = (await coldStartSandbox({
       agent,
       tenantId: input.tenantId,
       sessionId: session.id,
@@ -761,7 +761,7 @@ async function runMessageStream(
       callbackData: input.callbackData,
       effectiveBudget,
       effectiveMaxTurns,
-    });
+    })).sandbox;
   }
 
   // Sandbox is up; we no longer need the boot abort controller for this session.
@@ -934,7 +934,19 @@ export interface ColdStartArgs {
  * Exported for U2: the `dispatchWorkflow`'s `ensureSandbox` step calls
  * this body when no warm handle exists for the session.
  */
-export async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSandboxInstance> {
+export interface ColdStartResult {
+  sandbox: SessionSandboxInstance;
+  /**
+   * The serializable POJO config used to provision the sandbox, returned so
+   * that callers crossing serialization boundaries (the WDK workflow) can
+   * later `reconnectSessionSandbox(sandboxId, sandboxConfig)` without having
+   * to reconstruct it. The legacy in-process dispatcher path ignores this
+   * field — only `sandbox` is needed there.
+   */
+  sandboxConfig: SessionSandboxConfig;
+}
+
+export async function coldStartSandbox(args: ColdStartArgs): Promise<ColdStartResult> {
   if (args.mcpResult.errors.length > 0) {
     logger.warn("MCP config errors for session", {
       session_id: args.sessionId,
@@ -962,7 +974,7 @@ export async function coldStartSandbox(args: ColdStartArgs): Promise<SessionSand
   if (args.sdkSessionId && args.sessionBlobUrl) {
     await restoreSessionFile(sandbox, args.sessionBlobUrl, args.sdkSessionId);
   }
-  return sandbox;
+  return { sandbox, sandboxConfig };
 }
 
 export interface FinalizeArgs {

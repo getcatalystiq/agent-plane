@@ -72,6 +72,8 @@ import { scrubSecrets } from "@/lib/transcript-utils";
 import { processLineAssets } from "@/lib/assets";
 import { logger } from "@/lib/logger";
 import {
+  reconnectSessionSandbox,
+  type SessionSandboxConfig,
   type SessionSandboxInstance,
 } from "@/lib/sandbox";
 import type { TenantId } from "@/lib/types";
@@ -94,6 +96,23 @@ export type RunnerChunk =
 export interface DispatchWorkflowOutput {
   sessionId: string;
   messageId: string;
+}
+
+/**
+ * Serializable POJO returned by `ensureSandboxStep` and consumed by every
+ * subsequent step. The live `SessionSandboxInstance` (class instance with
+ * EventEmitter, async-function methods, and a `Sandbox` SDK ref) is NOT
+ * serializable, so it cannot cross WDK step boundaries — see U0 spike
+ * trap docs/research/wdk-spike-results.md and runbook §7.
+ *
+ * Each step that needs to operate on the sandbox calls `reconnectInStep(ref)`,
+ * which `Sandbox.get(sandboxId)` and rebuilds the wrapper locally. The
+ * underlying sandbox process is unaffected — it keeps running between steps
+ * regardless of which function instance executes which step.
+ */
+export interface SandboxRef {
+  sandboxId: string;
+  sandboxConfig: SessionSandboxConfig;
 }
 
 // --- Workflow ---
@@ -122,11 +141,11 @@ export async function dispatchWorkflow(
     token: `transcript:${prepared.messageId}`,
   });
 
-  // Step 2 — provision or reconnect sandbox
-  const sandbox = await ensureSandboxStep(input, prepared);
+  // Step 2 — provision sandbox; returns POJO ref (NOT live wrapper — see SandboxRef)
+  const sandboxRef = await ensureSandboxStep(input, prepared);
 
   // Step 3 — spawn runner inside sandbox; sets runner_started_at idempotently
-  await launchRunnerStep(input, prepared, sandbox);
+  await launchRunnerStep(input, prepared, sandboxRef);
 
   // Workflow body — iterate hook, dispatch each chunk to writeChunkStep.
   // Cancellation propagates here as a thrown exception; the catch routes
@@ -149,10 +168,10 @@ export async function dispatchWorkflow(
   }
 
   // Step 4 — finalize: assemble transcript blob, billing, transition message
-  await finalizeStep(prepared, sandbox, { cancelled, cancelReason });
+  await finalizeStep(prepared, sandboxRef, { cancelled, cancelReason });
 
   // Step 5 — tail: persistent backup or ephemeral stop
-  await tailStep(prepared, sandbox);
+  await tailStep(prepared, sandboxRef);
 
   return { sessionId: prepared.session.id, messageId: prepared.messageId };
 }
@@ -178,7 +197,7 @@ export async function reserveStep(
 export async function ensureSandboxStep(
   input: DispatchInput,
   prepared: PreparedExecution,
-): Promise<SessionSandboxInstance> {
+): Promise<SandboxRef> {
   "use step";
   // U2 v1: cold-start path only. The legacy runMessageStream has extensive
   // warm-handle cache + parallel MCP/plugin/auth optimization that we'll
@@ -198,7 +217,7 @@ export async function ensureSandboxStep(
     resolveSandboxAuth(input.tenantId, effectiveRunner),
   ]);
 
-  return coldStartSandbox({
+  const { sandbox, sandboxConfig } = await coldStartSandbox({
     agent,
     tenantId: input.tenantId,
     sessionId: session.id,
@@ -213,12 +232,32 @@ export async function ensureSandboxStep(
     effectiveBudget,
     effectiveMaxTurns,
   });
+  // Return a serializable ref (sandboxId + the POJO config used to provision
+  // it). Subsequent steps reconnect via reconnectSessionSandbox(sandboxId, cfg)
+  // — the sandbox process keeps running on its own host between steps.
+  return { sandboxId: sandbox.id, sandboxConfig };
+}
+
+/**
+ * Reconnect to a sandbox from a SandboxRef. Throws if the sandbox is gone —
+ * a workflow path that loses its sandbox mid-flight cannot recover. (The
+ * legacy reconnect path handles "sandbox went missing" by cold-starting a
+ * new one, but that pre-launchRunner re-spawn doesn't apply to the
+ * workflow's mid-stream context: the runner has already started inside
+ * the original sandbox.)
+ */
+async function reconnectInStep(ref: SandboxRef): Promise<SessionSandboxInstance> {
+  const wrapper = await reconnectSessionSandbox(ref.sandboxId, ref.sandboxConfig);
+  if (!wrapper) {
+    throw new Error(`workflow sandbox ${ref.sandboxId} no longer reachable`);
+  }
+  return wrapper;
 }
 
 export async function launchRunnerStep(
   input: DispatchInput,
   prepared: PreparedExecution,
-  sandbox: SessionSandboxInstance,
+  sandboxRef: SandboxRef,
 ): Promise<void> {
   "use step";
 
@@ -245,6 +284,7 @@ export async function launchRunnerStep(
 
   const env = getEnv();
   const messageToken = await generateMessageToken(prepared.messageId, env.ENCRYPTION_KEY);
+  const sandbox = await reconnectInStep(sandboxRef);
 
   // U3-e: spawn the runner with per-line streaming on. The runner POSTs
   // each NDJSON line to /api/internal/messages/:messageId/transcript with
@@ -293,7 +333,7 @@ export async function writeChunkStep(
 
 export async function finalizeStep(
   prepared: PreparedExecution,
-  sandbox: SessionSandboxInstance,
+  sandboxRef: SandboxRef,
   opts: { cancelled: boolean; cancelReason?: string },
 ): Promise<void> {
   "use step";
@@ -317,6 +357,7 @@ export async function finalizeStep(
     // here uses whatever chunks landed before cancel.
   }
 
+  const sandbox = await reconnectInStep(sandboxRef);
   await finalizeMessage({
     messageId: prepared.messageId,
     tenantId: prepared.session.tenant_id as TenantId,
@@ -330,9 +371,10 @@ export async function finalizeStep(
 
 export async function tailStep(
   prepared: PreparedExecution,
-  sandbox: SessionSandboxInstance,
+  sandboxRef: SandboxRef,
 ): Promise<void> {
   "use step";
+  const sandbox = await reconnectInStep(sandboxRef);
   await sessionTail({
     sessionId: prepared.session.id,
     tenantId: prepared.session.tenant_id as TenantId,

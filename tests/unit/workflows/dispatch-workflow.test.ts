@@ -95,6 +95,10 @@ vi.mock("@/lib/assets", () => ({
   processLineAssets: vi.fn().mockImplementation(async (line: string) => line),
 }));
 
+vi.mock("@/lib/sandbox", () => ({
+  reconnectSessionSandbox: vi.fn(),
+}));
+
 // WDK runtime mocks — these are the trickiest. The step bodies invoke
 // getWorkflowMetadata, getWritable, getRun. We stub them per-test.
 vi.mock("workflow", () => ({
@@ -137,6 +141,7 @@ import { setWorkflowRunId } from "@/lib/sessions";
 import { markRunnerStarted } from "@/lib/session-messages";
 import { scrubSecrets } from "@/lib/transcript-utils";
 import { processLineAssets } from "@/lib/assets";
+import { reconnectSessionSandbox } from "@/lib/sandbox";
 import { getWritable } from "workflow";
 import { getRun } from "workflow/api";
 
@@ -208,11 +213,26 @@ function makeSandbox() {
   };
 }
 
+/**
+ * Each step that historically received a live SessionSandboxInstance now
+ * receives a serializable SandboxRef and reconnects internally via
+ * reconnectSessionSandbox (mocked at the file level). Tests that want to
+ * assert on the live wrapper's methods install the wrapper as the mock's
+ * resolved value before calling the step, then read the same wrapper back.
+ */
+function makeSandboxRef() {
+  return { sandboxId: "sandbox-1", sandboxConfig: {} as never };
+}
+
 // --- Tests ---
 
 describe("dispatchWorkflow steps", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks does NOT drain the mockResolvedValueOnce chain — without
+    // this reset, queued onces from earlier tests in the same file leak
+    // into later tests and the wrong sandbox flows out of reconnectInStep.
+    vi.mocked(reconnectSessionSandbox).mockReset();
   });
 
   describe("reserveStep", () => {
@@ -254,8 +274,9 @@ describe("dispatchWorkflow steps", () => {
       vi.mocked(markRunnerStarted).mockResolvedValueOnce(true);
       const prepared = makePrepared();
       const sandbox = makeSandbox();
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(sandbox as never);
 
-      await launchRunnerStep(makeDispatchInput(), prepared, sandbox as never);
+      await launchRunnerStep(makeDispatchInput(), prepared, makeSandboxRef());
 
       expect(markRunnerStarted).toHaveBeenCalledWith(messageId, tenantId);
       expect(sandbox.runMessage).toHaveBeenCalledWith(
@@ -279,8 +300,9 @@ describe("dispatchWorkflow steps", () => {
       vi.mocked(markRunnerStarted).mockResolvedValueOnce(false);
       const prepared = makePrepared();
       const sandbox = makeSandbox();
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(sandbox as never);
 
-      await launchRunnerStep(makeDispatchInput(), prepared, sandbox as never);
+      await launchRunnerStep(makeDispatchInput(), prepared, makeSandboxRef());
 
       expect(markRunnerStarted).toHaveBeenCalledWith(messageId, tenantId);
       // Critical: the spawn is NOT re-issued on replay. This is the
@@ -367,7 +389,8 @@ describe("dispatchWorkflow steps", () => {
         getReadable: vi.fn().mockReturnValue(readable),
       } as never);
 
-      await finalizeStep(makePrepared(), makeSandbox() as never, {
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(makeSandbox() as never);
+      await finalizeStep(makePrepared(), makeSandboxRef(), {
         cancelled: false,
       });
 
@@ -395,7 +418,8 @@ describe("dispatchWorkflow steps", () => {
         getReadable: vi.fn().mockReturnValue(readable),
       } as never);
 
-      await finalizeStep(makePrepared(), makeSandbox() as never, {
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(makeSandbox() as never);
+      await finalizeStep(makePrepared(), makeSandboxRef(), {
         cancelled: false,
       });
 
@@ -425,7 +449,8 @@ describe("dispatchWorkflow steps", () => {
         getReadable: vi.fn().mockReturnValue(readable),
       } as never);
 
-      await finalizeStep(makePrepared(), makeSandbox() as never, {
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(makeSandbox() as never);
+      await finalizeStep(makePrepared(), makeSandboxRef(), {
         cancelled: false,
       });
 
@@ -445,7 +470,8 @@ describe("dispatchWorkflow steps", () => {
         getReadable: vi.fn().mockReturnValue(readable),
       } as never);
 
-      await finalizeStep(makePrepared(), makeSandbox() as never, {
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(makeSandbox() as never);
+      await finalizeStep(makePrepared(), makeSandboxRef(), {
         cancelled: true,
         cancelReason: "user requested",
       });
@@ -461,8 +487,9 @@ describe("dispatchWorkflow steps", () => {
     it("delegates to sessionTail with the prepared lifecycle inputs", async () => {
       const prepared = makePrepared();
       const sandbox = makeSandbox();
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(sandbox as never);
 
-      await tailStep(prepared, sandbox as never);
+      await tailStep(prepared, makeSandboxRef());
 
       expect(sessionTail).toHaveBeenCalledWith({
         sessionId: prepared.session.id,
@@ -476,7 +503,10 @@ describe("dispatchWorkflow steps", () => {
 
   describe("ensureSandboxStep", () => {
     it("resolves auth + MCP + plugins in parallel before coldStartSandbox", async () => {
-      vi.mocked(coldStartSandbox).mockResolvedValueOnce(makeSandbox() as never);
+      vi.mocked(coldStartSandbox).mockResolvedValueOnce({
+        sandbox: makeSandbox() as never,
+        sandboxConfig: {} as never,
+      });
       const prepared = makePrepared();
 
       await ensureSandboxStep(makeDispatchInput(), prepared);
