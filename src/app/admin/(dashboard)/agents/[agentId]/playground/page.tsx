@@ -69,6 +69,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     setPolling(true);
 
     const sid = sessionIdRef.current;
+    const myAbort = abortRef.current;
     try {
       let res: Response;
       try {
@@ -124,9 +125,12 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       return;
     } finally {
       setPolling(false);
-      setRunning(false);
-      abortRef.current = null;
-      runIdRef.current = null;
+      // Only clear refs if the in-flight session is still ours.
+      if (abortRef.current === myAbort) {
+        setRunning(false);
+        abortRef.current = null;
+        runIdRef.current = null;
+      }
     }
   }
 
@@ -134,13 +138,17 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     let delay = 3000;
     const maxDelay = 10_000;
     const sid = sessionIdRef.current;
+    // Capture the abort controller for this poll session so we can release
+    // refs at the end without stomping on a newer message that may have
+    // started by the time polling completes.
+    const myAbort = abortRef.current;
 
     try {
       while (true) {
-        if (abortRef.current?.signal.aborted) break;
+        if (myAbort?.signal.aborted) break;
 
         await new Promise((r) => setTimeout(r, delay));
-        if (abortRef.current?.signal.aborted) break;
+        if (myAbort?.signal.aborted) break;
 
         let data: Record<string, unknown>;
         try {
@@ -197,9 +205,14 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       }
     } finally {
       setPolling(false);
-      setRunning(false);
-      abortRef.current = null;
-      runIdRef.current = null;
+      // Only clear refs if the current in-flight session is still ours —
+      // a newer handleSend() may have started while we were polling and
+      // its abort controller would have replaced abortRef.current.
+      if (abortRef.current === myAbort) {
+        setRunning(false);
+        abortRef.current = null;
+        runIdRef.current = null;
+      }
     }
   }
 
@@ -266,27 +279,35 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       }
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
-      // Stream error — fall back to polling for the terminal state.
+      // Stream error — release the input UI immediately so the user can
+      // compose the follow-up; kick off polling for the terminal result
+      // in the background.
+      setRunning(false);
       const messageId = runIdRef.current;
       if (messageId && !sawTerminalEvent) {
-        await pollForFinalResult(messageId);
+        // Don't await: polling is best-effort for result-event recovery.
+        // The send button is already free.
+        void pollForFinalResult(messageId);
+      } else {
+        abortRef.current = null;
+        runIdRef.current = null;
       }
       return;
     } finally {
       if (!handedOffToReconnect) {
+        // Always release the Send button when the stream closes — the user
+        // shouldn't have to wait for polling to finish before composing the
+        // next prompt. If we never saw a terminal event, fire polling in
+        // the background (it'll surface the synthetic result event into
+        // the transcript when the run finalizes).
+        setRunning(false);
         if (!sawTerminalEvent) {
-          // Stream closed cleanly but we never saw `result` or `error` —
-          // the workflow run may still be live (server-side finalize is
-          // racing the stream close, or render-rest's terminal-status
-          // detection beat the writer). Poll for terminal state instead
-          // of stranding the UI.
           const messageId = runIdRef.current;
           if (messageId) {
-            await pollForFinalResult(messageId);
+            void pollForFinalResult(messageId);
             return;
           }
         }
-        setRunning(false);
         abortRef.current = null;
         runIdRef.current = null;
       }
