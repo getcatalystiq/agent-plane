@@ -58,14 +58,13 @@ const EnvSchema = z.object({
   LEGACY_DISPATCH_GLASS_BREAK: z.enum(["on", "off"]).default("off"),
 
   // --- Chat platform bots (U3-U8) ---
-  // Upstash Redis — Chat SDK shared state across all per-agent bot
+  // Native Redis URL — Chat SDK shared state across all per-agent bot
   // instances. The Chat SDK's @chat-adapter/state-redis uses native Redis
-  // protocol (redis:// or rediss://), so we wire to Upstash's native
-  // endpoint (UPSTASH_REDIS_URL with rediss:// scheme) rather than the
-  // REST API. Provisioned via Vercel Marketplace; optional at boot, the
-  // platform module fail-closes when chat ingress tries to instantiate
-  // without it.
-  UPSTASH_REDIS_URL: z.string().optional(),
+  // protocol (redis:// or rediss://), not the REST API. Provisioned by
+  // the Vercel Upstash/KV integration as REDIS_URL. Optional at boot;
+  // the platform module fail-closes when chat ingress tries to
+  // instantiate without it.
+  REDIS_URL: z.string().optional(),
   // Discord forwarder shared secret — distinct from any bot token. Signs
   // forwarded gateway events so anyone who has a leaked bot token still
   // can't forge events at the public webhook URL. PREVIOUS supports

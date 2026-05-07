@@ -38,7 +38,7 @@ vi.mock("redis", () => ({
 }));
 
 vi.mock("@/lib/env", () => ({
-  getEnv: () => ({ UPSTASH_REDIS_URL: "rediss://test" }),
+  getEnv: () => ({ REDIS_URL: "rediss://test" }),
 }));
 
 vi.mock("@/lib/logger", () => ({

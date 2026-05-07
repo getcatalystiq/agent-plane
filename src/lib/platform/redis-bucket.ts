@@ -32,10 +32,10 @@ let connectPromise: Promise<void> | null = null;
 async function getClient(): Promise<RedisClientType> {
   if (!sharedClient) {
     const env = getEnv();
-    if (!env.UPSTASH_REDIS_URL) {
-      throw new Error("redis-bucket requires UPSTASH_REDIS_URL");
+    if (!env.REDIS_URL) {
+      throw new Error("redis-bucket requires REDIS_URL");
     }
-    sharedClient = createClient({ url: env.UPSTASH_REDIS_URL }) as RedisClientType;
+    sharedClient = createClient({ url: env.REDIS_URL }) as RedisClientType;
     sharedClient.on("error", (err: Error) => {
       logger.warn("redis-bucket: client error", { error: err.message });
     });

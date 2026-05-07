@@ -86,15 +86,15 @@ let sharedState: ReturnType<typeof createRedisState> | null = null;
 function getSharedState(): ReturnType<typeof createRedisState> {
   if (!sharedState) {
     const env = getEnv();
-    if (!env.UPSTASH_REDIS_URL) {
+    if (!env.REDIS_URL) {
       // Boot-fail-closed: chat ingress must not silently fall back to an
       // in-memory state store; cross-instance correctness depends on Redis.
       throw new Error(
-        "Chat-platform bots require UPSTASH_REDIS_URL env var (rediss://... native Redis endpoint). " +
+        "Chat-platform bots require REDIS_URL env var (rediss://... native Redis endpoint). " +
           "Provision Upstash Redis via Vercel Marketplace.",
       );
     }
-    sharedState = createRedisState({ url: env.UPSTASH_REDIS_URL });
+    sharedState = createRedisState({ url: env.REDIS_URL });
   }
   return sharedState;
 }

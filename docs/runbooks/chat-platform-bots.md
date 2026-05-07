@@ -33,7 +33,7 @@ follow-up.
 
 | Var | Purpose | Required |
 |---|---|---|
-| `UPSTASH_REDIS_URL` | Chat SDK shared state across per-agent bot instances. Native Redis URL (`rediss://...`). Provisioned via Vercel Marketplace (Upstash). | When chat is enabled |
+| `REDIS_URL` | Chat SDK shared state across per-agent bot instances. Native Redis URL (`rediss://...`). Provisioned via Vercel Marketplace (Upstash). | When chat is enabled |
 | `GATEWAY_FORWARDER_SECRET` | HMAC-SHA-256 secret signing forwarded Discord gateway events. | When Discord is enabled |
 | `GATEWAY_FORWARDER_SECRET_PREVIOUS` | Previous secret accepted during a rotation window. | Optional |
 | `BLOB_PRIVATE_READ_WRITE_TOKEN` | Private Vercel Blob token for chat attachments. **No public-blob fallback.** | When chat is enabled |

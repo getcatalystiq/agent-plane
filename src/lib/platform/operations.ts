@@ -232,7 +232,7 @@ async function checkDebounce(key: string): Promise<boolean> {
   // Use Redis when configured (production path); fall back to in-memory
   // when not (test environments, Redis-unavailable bootstraps).
   const env = getEnv();
-  if (env.UPSTASH_REDIS_URL) {
+  if (env.REDIS_URL) {
     const { tryAcquireDebounce } = await import("@/lib/platform/redis-bucket");
     return tryAcquireDebounce(key, VALIDATION_DEBOUNCE_MS);
   }
@@ -673,8 +673,8 @@ export async function markBotError(
 }
 
 // Test-only export — reset the in-memory debounce map between cases.
-// (Tests don't hit the Redis path because UPSTASH_REDIS_URL is unset
-// in the test env mock.)
+// (Tests don't hit the Redis path because REDIS_URL is unset in the
+// test env mock.)
 export function _resetValidationDebounceForTests(): void {
   inMemoryDebounce.clear();
 }

@@ -6,14 +6,14 @@
  *   - findBotByToken / findBotByTeamId basic lookups
  *   - LRU eviction at 200 entries (rememberBot via getOrCreateBot)
  *   - credentialsVersion change rebuilds the cached bot
- *   - getSharedState fail-closed on missing UPSTASH_REDIS_URL
+ *   - getSharedState fail-closed on missing REDIS_URL
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TenantId, AgentId } from "@/lib/types";
 
 const env = {
-  UPSTASH_REDIS_URL: "rediss://test" as string | undefined,
+  REDIS_URL: "rediss://test" as string | undefined,
 };
 
 vi.mock("@/lib/env", () => ({
@@ -84,7 +84,7 @@ beforeEach(() => {
   // Drain the singleton cache between tests by evicting everything.
   const cache = getAllBots();
   for (const k of [...cache.keys()]) cache.delete(k);
-  env.UPSTASH_REDIS_URL = "rediss://test";
+  env.REDIS_URL = "rediss://test";
 });
 
 afterEach(() => {
@@ -228,14 +228,14 @@ describe("credentialsVersion-driven rebuild", () => {
   });
 });
 
-describe("UPSTASH_REDIS_URL boot-fail-closed", () => {
+describe("REDIS_URL boot-fail-closed", () => {
   // sharedState is a module singleton, so once it's been initialized by
-  // another test, unsetting UPSTASH_REDIS_URL is not enough — the env
+  // another test, unsetting REDIS_URL is not enough — the env
   // check only runs on first init. Reset modules to force a fresh
   // sharedState initialization for this test.
-  it("buildCachedBot throws a clear error when UPSTASH_REDIS_URL is unset", async () => {
+  it("buildCachedBot throws a clear error when REDIS_URL is unset", async () => {
     vi.resetModules();
-    env.UPSTASH_REDIS_URL = undefined;
+    env.REDIS_URL = undefined;
     decryptMock.mockResolvedValue({
       platform: "discord",
       botToken: "tok",
@@ -252,6 +252,6 @@ describe("UPSTASH_REDIS_URL boot-fail-closed", () => {
         credentialsVersion: 1,
         platformIdentity: {},
       }),
-    ).rejects.toThrow(/UPSTASH_REDIS_URL/);
+    ).rejects.toThrow(/REDIS_URL/);
   });
 });
