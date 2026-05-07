@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ChannelTokenBucket, parseRateLimit } from "@/lib/platform/callback";
+import { parseRateLimit } from "@/lib/platform/callback";
 
 describe("parseRateLimit", () => {
   it("returns null on a normal Error", () => {
@@ -35,32 +35,7 @@ describe("parseRateLimit", () => {
   });
 });
 
-describe("ChannelTokenBucket", () => {
-  it("starts full and decrements per consume", () => {
-    const b = new ChannelTokenBucket(5, 5_000);
-    expect(b.tryConsume()).toBe(true);
-    expect(b.tryConsume()).toBe(true);
-  });
-
-  it("blocks when drained", () => {
-    const b = new ChannelTokenBucket(2, 5_000);
-    expect(b.tryConsume()).toBe(true);
-    expect(b.tryConsume()).toBe(true);
-    expect(b.tryConsume()).toBe(false);
-  });
-
-  it("drain() empties the bucket immediately", () => {
-    const b = new ChannelTokenBucket(5, 5_000);
-    b.drain();
-    expect(b.tryConsume()).toBe(false);
-  });
-
-  it("refills proportionally with elapsed time", async () => {
-    const b = new ChannelTokenBucket(5, 100);
-    for (let i = 0; i < 5; i++) b.tryConsume();
-    expect(b.tryConsume()).toBe(false);
-    // Wait beyond the window — tokens fully refilled.
-    await new Promise((r) => setTimeout(r, 110));
-    expect(b.tryConsume()).toBe(true);
-  });
-});
+// ChannelTokenBucket moved to Redis-backed helpers in
+// src/lib/platform/redis-bucket.ts (A3, replaces P1 #8). Runtime tests
+// for tryConsumeChannelToken / drainChannelToken require a live Redis
+// instance and are deferred to the integration suite.

@@ -66,11 +66,19 @@ async function probeDiscord(token: string): Promise<WorkspaceProbeResult> {
   }
   const guilds = (await res.json()) as DiscordGuild[];
   if (!Array.isArray(guilds) || guilds.length === 0) {
-    // Bot validated successfully but isn't in any guild yet — operator
-    // hasn't completed the OAuth install. Treat as 0 members; the gate
-    // accepts this (user must install AFTER connect, but the threshold
-    // check is moot until they do).
-    return { probed: true, memberCount: 0, label: "pending_install" };
+    // R19 (post-review): refuse to persist credentials when the bot is
+    // not yet installed in any guild. Earlier rev accepted this with
+    // memberCount=0 ("pending_install"), which let the operator install
+    // the bot to a 100k-member public Discord AFTER persisting and bypass
+    // the threshold gate (P0 #6 in review run 20260506-221948-2402b0ed).
+    // The trade-off: operators must invite the bot to ≥1 guild first,
+    // then complete the connect flow. Slightly more friction; correct
+    // gating.
+    return {
+      probed: false,
+      reason:
+        "discord_not_installed: bot has no guilds yet. Invite it to your private workspace before connecting.",
+    };
   }
   const memberCount = guilds.reduce((sum, g) => sum + (g.approximate_member_count ?? 0), 0);
   const label = guilds.length === 1

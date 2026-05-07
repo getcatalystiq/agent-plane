@@ -60,6 +60,14 @@ async function verifyForwarderSignature(rawBody: string, signatureHeader: string
     if (constantTimeEqual(provided, expected)) return true;
   }
   return false;
+  // A4 NOTE (review run 20260506-221948-2402b0ed P1 #10): a timestamp-
+  // bound HMAC was the right architectural fix, but the Chat SDK's
+  // Discord adapter hard-codes the forwarder fetch headers (only
+  // `x-discord-gateway-token` is sent). Adding a timestamp would require
+  // forking the adapter or a PR upstream. Captured-body replay within
+  // the workflow idempotency-key retention window is the residual risk;
+  // bounded but not zero. Tracking as a follow-up — needs upstream
+  // chat-adapter/discord change to emit the timestamp + signed payload.
 }
 
 interface InboundEvent {

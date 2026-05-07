@@ -56,10 +56,14 @@ describe("probeWorkspaceSize — Discord", () => {
     expect(init?.redirect).toBe("error");
   });
 
-  it("returns memberCount 0 with pending_install when bot is in no guilds", async () => {
+  it("REFUSES persist when bot has no guilds (R19 install-then-grow gate)", async () => {
+    // Earlier rev accepted memberCount=0 with `pending_install`; that let
+    // the operator install to a 100k-member public Discord AFTER persist
+    // and bypass the threshold (P0 #6 in review run 20260506-221948-2402b0ed).
     fetchSpy.mockResolvedValueOnce(new Response("[]", { status: 200 }));
     const result = await probeWorkspaceSize(discord, {});
-    expect(result).toMatchObject({ probed: true, memberCount: 0, label: "pending_install" });
+    expect(result.probed).toBe(false);
+    if (!result.probed) expect(result.reason).toContain("discord_not_installed");
   });
 
   it("returns probed:false on Discord HTTP 401", async () => {

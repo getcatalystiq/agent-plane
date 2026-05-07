@@ -13,9 +13,21 @@ scanner lands. The connect flow enforces:
 - A workspace-size probe at connect time (Discord guild member-count sum;
   Slack `users.list` page-1 size). Default threshold: 100 members per
   tenant. Override via `tenants.max_trusted_members`.
+- **Discord ≥1 guild required at connect time.** A bot with no guilds
+  produces `probed: false, reason: discord_not_installed`. Operator must
+  invite the bot to a target guild before completing the connect flow.
+  This closes the install-then-grow bypass where memberCount=0 was
+  accepted and the operator could later install to a public Discord.
 
 If the workspace probe fails or the workspace exceeds the threshold,
 connect refuses to persist credentials.
+
+**Post-connect growth is NOT re-checked in v1.** A workspace that grows
+past the threshold after a successful connect remains active. Mitigations:
+per-platform-user 10/min rate limit at the bridge bounds individual
+abuse; tenant budget caps total spend; threat-model is policy-only
+beyond connect-time. Periodic re-probe via a daily cron is a known
+follow-up.
 
 ## Required environment variables
 

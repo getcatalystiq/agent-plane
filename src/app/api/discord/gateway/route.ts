@@ -20,6 +20,7 @@ import { after, NextResponse, type NextRequest } from "next/server";
 import { verifyCronSecret } from "@/lib/cron-auth";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
+import { getPool } from "@/db";
 import { refreshBots, getAllBots, type CachedBot } from "@/lib/platform/bot";
 
 export const dynamic = "force-dynamic";
@@ -64,14 +65,45 @@ export async function GET(request: NextRequest) {
   }
   const webhookUrl = `${baseUrl}/api/webhooks/discord`;
 
-  // Keep listeners alive for the full function duration.
+  // A7 (review run 20260506-221948-2402b0ed P1 #15): cron tick is every
+  // 9 min but listener targets ~750s (12.5 min), so every tick has a
+  // 210s window where two cron invocations are both holding gateway
+  // sessions for the same bot. Discord rejects duplicate sessions
+  // (4004/4009). Resolution: per-bot pg_advisory_lock — second listener
+  // tries to acquire and fails fast, exits cleanly.
+  //
+  // Lock key: hash of `discord-gateway:${agentId}` so it's stable across
+  // Vercel function instances. We use SESSION-level locks held for the
+  // duration of the listener via a dedicated client connection that we
+  // release at the end of the listener window.
   after(async () => {
     const abortController = new AbortController();
     const cleanup = setTimeout(() => abortController.abort(), LISTENER_DURATION_MS);
 
     try {
       const startPromises = bots.map(async (cached: CachedBot) => {
+        // Acquire per-bot advisory lock. pg_try_advisory_lock returns
+        // false immediately if held; that's the signal that another
+        // cron tick is already running this listener.
+        // Connection-typed loosely because @neondatabase/serverless's
+        // PoolClient export shape varies; the runtime contract
+        // (connect/query/release) is stable.
+        const lockClient = await getPool().connect() as unknown as {
+          query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }>;
+          release: () => void;
+        };
         try {
+          const lockKeyResult = await lockClient.query<{ ok: boolean }>(
+            "SELECT pg_try_advisory_lock(hashtext($1)) AS ok",
+            [`discord-gateway:${cached.agentId}`],
+          );
+          if (!lockKeyResult.rows[0]?.ok) {
+            logger.info("discord-gateway: listener already running for bot; skipping", {
+              agent_id: cached.agentId,
+            });
+            return;
+          }
+
           await cached.bot.initialize();
           const adapter = cached.adapter as {
             startGatewayListener: (
@@ -96,6 +128,16 @@ export async function GET(request: NextRequest) {
               error: err instanceof Error ? err.message : String(err),
             });
           }
+        } finally {
+          // Release the advisory lock before returning the client.
+          try {
+            await lockClient.query("SELECT pg_advisory_unlock(hashtext($1))", [
+              `discord-gateway:${cached.agentId}`,
+            ]);
+          } catch {
+            // Lock auto-releases on connection close; ignore errors here.
+          }
+          lockClient.release();
         }
       });
       await Promise.allSettled(startPromises);

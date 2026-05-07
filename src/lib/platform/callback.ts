@@ -128,51 +128,9 @@ export function parseRateLimit(err: unknown): number | null {
   return null;
 }
 
-/**
- * Per-channel token bucket — Discord's per-channel cap is 5 edits / 5 sec.
- * In-process bucket; cross-instance burst is bounded by the per-user rate
- * limit at the bridge.
- *
- * NOTE: this bucket is workflow-instance-scoped. Two parallel chat workflows
- * in the same Discord channel will each have their own bucket. The tenant-
- * level mitigation is the per-platform-user 10/min limit at the bridge,
- * which bounds total inbound and therefore outbound posts. Cross-instance
- * coordination would require Redis-backed tokens (P1 #8 deferred — see
- * the review residual queue).
- */
-export class ChannelTokenBucket {
-  private tokens: number;
-  private lastRefill: number;
-
-  constructor(public readonly capacity: number, public readonly windowMs: number) {
-    this.tokens = capacity;
-    this.lastRefill = Date.now();
-  }
-
-  tryConsume(): boolean {
-    this.refill();
-    if (this.tokens >= 1) {
-      this.tokens -= 1;
-      return true;
-    }
-    return false;
-  }
-
-  drain(): void {
-    this.tokens = 0;
-    this.lastRefill = Date.now();
-  }
-
-  private refill(): void {
-    const now = Date.now();
-    const elapsed = now - this.lastRefill;
-    if (elapsed >= this.windowMs) {
-      this.tokens = this.capacity;
-      this.lastRefill = now;
-    } else if (elapsed > 0) {
-      const refillRate = this.capacity / this.windowMs;
-      this.tokens = Math.min(this.capacity, this.tokens + elapsed * refillRate);
-      this.lastRefill = now;
-    }
-  }
-}
+// NOTE: the previous `ChannelTokenBucket` in-process class lived here.
+// It was workflow-instance-scoped — two parallel chat workflows in the
+// same channel each got a fresh budget, exceeding Discord's 5/5sec cap
+// (P1 #8 in review run 20260506-221948-2402b0ed). Replaced by the
+// Redis-backed `tryConsumeChannelToken` / `drainChannelToken` helpers
+// in `src/lib/platform/redis-bucket.ts`.

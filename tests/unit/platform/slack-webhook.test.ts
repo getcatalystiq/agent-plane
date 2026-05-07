@@ -18,6 +18,12 @@ vi.mock("@/lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+vi.mock("@/lib/env", () => ({
+  getEnv: () => ({
+    SLACK_SIGNING_SECRET: undefined,
+  }),
+}));
+
 const { findBotByTeamIdMock, decryptMock } = vi.hoisted(() => ({
   findBotByTeamIdMock: vi.fn(),
   decryptMock: vi.fn(),

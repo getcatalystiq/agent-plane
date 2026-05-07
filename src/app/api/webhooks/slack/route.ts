@@ -20,6 +20,7 @@
 
 import { NextRequest, after } from "next/server";
 import { logger } from "@/lib/logger";
+import { getEnv } from "@/lib/env";
 import { findBotByTeamId } from "@/lib/platform/bot";
 import { getDecryptedCredentials, type SlackCredentials } from "@/lib/platform/operations";
 import type { TenantId, AgentId } from "@/lib/types";
@@ -69,6 +70,62 @@ interface SlackEventBody {
   event?: { type?: string };
 }
 
+async function maybeHandleFirstTimeChallenge(
+  rawBody: string,
+  ts: number,
+  sigHeader: string | null,
+): Promise<Response> {
+  const env = getEnv();
+  const fallback = env.SLACK_SIGNING_SECRET;
+  // Without a global fallback secret, treat as unhandled — the operator
+  // hasn't enabled first-time setup support yet.
+  if (!fallback) {
+    return new Response(JSON.stringify({ status: "unhandled" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const match = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
+  if (!match) {
+    return new Response(JSON.stringify({ status: "unhandled" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const provided = match[1].toLowerCase();
+  const expected = await hmacSha256Hex(fallback, `v0:${ts}:${rawBody}`);
+  if (!constantTimeEqualHex(provided, expected)) {
+    return new Response(JSON.stringify({ status: "unhandled" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Signature valid against the global fallback. Only respond to
+  // url_verification — anything else gets unhandled (we don't want to
+  // accept real events on the global secret bypass).
+  let parsed: SlackEventBody;
+  try {
+    parsed = JSON.parse(rawBody) as SlackEventBody;
+  } catch {
+    return new Response(JSON.stringify({ status: "unhandled" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (parsed.type === "url_verification" && typeof parsed.challenge === "string") {
+    logger.info("slack-webhook: first-time url_verification accepted via global fallback secret");
+    return new Response(parsed.challenge, {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+  return new Response(JSON.stringify({ status: "unhandled" }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
 
@@ -102,10 +159,16 @@ export async function POST(req: NextRequest) {
   // 3. Registry lookup — no decryption yet.
   const targetBot = findBotByTeamId(teamId);
   if (!targetBot) {
-    return new Response(JSON.stringify({ status: "unhandled" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    // A5 (review run 20260506-221948-2402b0ed P1 #12): first-time Slack
+    // setup chicken-and-egg. Slack POSTs `url_verification` to the
+    // configured Request URL before the operator has saved the signing
+    // secret in AgentPlane — so findBotByTeamId returns null. If a
+    // global SLACK_SIGNING_SECRET env var is configured AND the body is
+    // a url_verification challenge, fall back to that secret to verify
+    // and respond with the challenge so the portal handshake completes.
+    // After credentials are saved, the per-bot signing secret takes
+    // over for real events.
+    return await maybeHandleFirstTimeChallenge(rawBody, ts, req.headers.get("x-slack-signature"));
   }
 
   // 4. Decrypt the bot's signing secret.

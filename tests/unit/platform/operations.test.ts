@@ -225,16 +225,19 @@ describe("enforceAttestationGate", () => {
     expect(probe).toMatchObject({ probed: true, memberCount: 25, label: "Acme" });
   });
 
-  it("accepts a Discord pending_install probe (memberCount 0) — bot validated but not yet added to a guild", async () => {
-    vi.mocked(probeWorkspaceSize).mockResolvedValueOnce({ probed: true, memberCount: 0, label: "pending_install" });
-    const probe = await enforceAttestationGate({
-      tenantId: TENANT,
-      credentials: validDiscord,
-      identity: {},
-      attestations: { private_workspace: true },
-      maxTrustedMembers: 100,
+  it("REFUSES persist when probe reports discord_not_installed (R19 post-review fix)", async () => {
+    vi.mocked(probeWorkspaceSize).mockResolvedValueOnce({
+      probed: false,
+      reason: "discord_not_installed: bot has no guilds yet. Invite it to your private workspace before connecting.",
     });
-    expect(probe.probed).toBe(true);
-    if (probe.probed) expect(probe.memberCount).toBe(0);
+    await expect(
+      enforceAttestationGate({
+        tenantId: TENANT,
+        credentials: validDiscord,
+        identity: {},
+        attestations: { private_workspace: true },
+        maxTrustedMembers: 100,
+      }),
+    ).rejects.toMatchObject({ reason: "probe_failed" });
   });
 });
