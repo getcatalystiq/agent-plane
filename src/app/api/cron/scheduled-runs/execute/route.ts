@@ -3,7 +3,12 @@ import { queryOne } from "@/db";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { verifyCronSecret } from "@/lib/cron-auth";
 import { AgentRowInternal, TenantRow, ScheduleRow } from "@/lib/validation";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
+import {
+  dispatchSessionMessage,
+  reserveSessionAndMessage,
+  type DispatchInput,
+  type PreparedExecution,
+} from "@/lib/dispatcher";
 import { findWarmScheduleSession, casActiveToIdle } from "@/lib/sessions";
 import { transitionMessageStatus } from "@/lib/session-messages";
 import { BudgetExceededError, ConcurrencyLimitError, PromptRejectedError } from "@/lib/errors";
@@ -276,38 +281,86 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
  *     running. The cleanup cron's workflow-aware stuck-active watchdog
  *     is the backstop if the runner never emits terminal.
  */
-async function runViaWorkflow(input: {
+async function runViaWorkflow(args: {
   tenantId: TenantId;
   agentId: AgentId;
   sessionId: string | undefined;
   prompt: string;
   schedule_id: string;
 }): Promise<Response> {
+  // Build the same DispatchInput shape the shim uses, so reserve and the
+  // workflow body see identical inputs.
+  const input: DispatchInput = {
+    tenantId: args.tenantId,
+    agentId: args.agentId,
+    sessionId: args.sessionId,
+    prompt: args.prompt,
+    triggeredBy: "schedule",
+    ephemeral: false,
+    callerKeyId: null,
+    platformApiUrl: getCallbackBaseUrl(),
+  };
+
+  // Reserve session + message BEFORE start() — same pattern as
+  // src/lib/workflows/dispatch-shim.ts:168. dispatchWorkflow's body reads
+  // `prepared.messageId` on its very first line; passing prepared=undefined
+  // (the prior bug) made every workflow-backed schedule tick crash with
+  // `TypeError: Cannot read properties of undefined (reading 'messageId')`
+  // before any session/message row was written, so the schedule looked like
+  // it "didn't run". Reserve runs in-process so it surfaces budget /
+  // concurrency errors via the same catch as the legacy path.
+  let prepared: PreparedExecution;
+  try {
+    prepared = await reserveSessionAndMessage(input);
+  } catch (err) {
+    if (err instanceof ConcurrencyLimitError || err instanceof BudgetExceededError) {
+      const reason =
+        err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: args.schedule_id,
+        reason,
+        error: err.message,
+      });
+      return jsonResponse({ status: "skipped", reason });
+    }
+    if (err instanceof PromptRejectedError) {
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: args.schedule_id,
+        reason: "prompt_rejected",
+      });
+      return jsonResponse({ status: "skipped", reason: "prompt_rejected" });
+    }
+    logger.error("Scheduled run (workflow) reserve failed", {
+      schedule_id: args.schedule_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jsonResponse({ status: "failed", reason: "reserve_error" });
+  }
+
   try {
     const run = await start(
-      dispatchWorkflow as unknown as (input: {
-        tenantId: TenantId;
-        agentId: AgentId;
-        sessionId?: string;
-        prompt: string;
-        triggeredBy: "schedule";
-        ephemeral: false;
-        callerKeyId: null;
-        platformApiUrl: string;
-      }) => Promise<{ sessionId: string; messageId: string }>,
-      [
+      dispatchWorkflow as unknown as (
+        input: DispatchInput,
+        prepared: PreparedExecution,
+      ) => Promise<{ sessionId: string; messageId: string }>,
+      [input, prepared],
+    ).catch(async (err: unknown) => {
+      // start() failed — message is reserved as 'running'. Mark it failed so
+      // it doesn't sit forever waiting for a runner that won't spawn. Same
+      // shape as dispatch-shim.ts:182.
+      await transitionMessageStatus(
+        prepared.messageId,
+        input.tenantId,
+        "running",
+        "failed",
         {
-          tenantId: input.tenantId,
-          agentId: input.agentId,
-          sessionId: input.sessionId,
-          prompt: input.prompt,
-          triggeredBy: "schedule",
-          ephemeral: false,
-          callerKeyId: null,
-          platformApiUrl: getCallbackBaseUrl(),
+          completed_at: new Date().toISOString(),
+          error_type: "workflow_start_failed",
+          error_messages: [err instanceof Error ? err.message : String(err)],
         },
-      ],
-    );
+      ).catch(() => {});
+      throw err;
+    });
 
     // Race the workflow's return value against a maxDuration-30s timeout.
     // Cron functions inherit the platform default (300s on Fluid Compute);
@@ -327,7 +380,7 @@ async function runViaWorkflow(input: {
     if (result.kind === "terminal") {
       const out = result.value as { sessionId: string; messageId: string };
       logger.info("Scheduled run (workflow) completed", {
-        schedule_id: input.schedule_id,
+        schedule_id: args.schedule_id,
         run_id: run.runId,
         message_id: out.messageId,
       });
@@ -340,7 +393,7 @@ async function runViaWorkflow(input: {
 
     // Detached — workflow continues; cleanup cron is the backstop.
     logger.info("Scheduled run (workflow) detached at maxDuration", {
-      schedule_id: input.schedule_id,
+      schedule_id: args.schedule_id,
       run_id: run.runId,
     });
     return jsonResponse({
@@ -352,7 +405,7 @@ async function runViaWorkflow(input: {
       const reason =
         err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
       logger.warn("Scheduled run (workflow) skipped", {
-        schedule_id: input.schedule_id,
+        schedule_id: args.schedule_id,
         reason,
         error: err.message,
       });
@@ -360,13 +413,13 @@ async function runViaWorkflow(input: {
     }
     if (err instanceof PromptRejectedError) {
       logger.warn("Scheduled run (workflow) skipped", {
-        schedule_id: input.schedule_id,
+        schedule_id: args.schedule_id,
         reason: "prompt_rejected",
       });
       return jsonResponse({ status: "skipped", reason: "prompt_rejected" });
     }
     logger.error("Scheduled run (workflow) failed", {
-      schedule_id: input.schedule_id,
+      schedule_id: args.schedule_id,
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse({ status: "failed", reason: "dispatch_error" });
