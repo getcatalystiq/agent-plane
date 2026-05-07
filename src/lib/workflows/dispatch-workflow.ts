@@ -87,17 +87,29 @@ import type { TenantId } from "@/lib/types";
 // --- Public types ---
 
 /**
- * The shape the runner POSTs (one per NDJSON line) and the hook delivers
- * to the workflow body's `for await`. The internal endpoint (U3) parses
- * raw runner NDJSON, classifies it as `chunk` vs `terminal` based on the
- * event's `type` field, and `resumeHook`s the structured chunk.
+ * The shape the runner POSTs (one POST = one batch of up to ~10 NDJSON
+ * lines, coalesced by the runner template) and the hook delivers to the
+ * workflow body's `for await`. The internal endpoint (U3) parses raw
+ * runner NDJSON into a batch and `resumeHook`s once with the whole batch.
  *
- * `terminal` is set for `result` and `error` event types — they're the
- * runner's natural break-out signals. Everything else is a `chunk`.
+ * `terminal` is set when at least one of `lines` is a terminal event
+ * (`result` or `error`). The workflow body breaks its for-await after
+ * processing the batch.
+ *
+ * PERF: pre-batching this was one chunk per parsed line, meaning every
+ * NDJSON line emitted by the runner became a separate WDK step boundary
+ * (writeChunkStep). With the runner already coalescing 10 lines / 100ms
+ * per HTTP POST, batching here cuts step count by up to 10×.
  */
-export type RunnerChunk =
-  | { kind: "chunk"; line: string; eventType: string }
-  | { kind: "terminal"; line: string; eventType: "result" | "error" };
+export interface RunnerChunkLine {
+  line: string;
+  eventType: string;
+}
+
+export type RunnerChunk = {
+  kind: "chunk" | "terminal";
+  lines: RunnerChunkLine[];
+};
 
 export interface DispatchWorkflowOutput {
   sessionId: string;
@@ -156,13 +168,20 @@ export async function dispatchWorkflow(
     token: `transcript:${prepared.messageId}`,
   });
 
-  // Persist workflow_run_id on the session row now that we know the runId.
-  // (Pre-fix this was inside reserveStep; moved here so the shim can skip
-  // pollForReserveCommit. Idempotent on retry — same row, same value.)
-  await persistWorkflowRunIdStep(prepared, runId, input.tenantId);
-
-  const sandboxRef = await ensureSandboxStep(input, prepared);
-  await launchRunnerStep(input, prepared, sandboxRef);
+  // PERF: persist runId + ensureSandbox + launchRunner all in ONE step.
+  // Pre-fix these were three separate steps, each paying ~100-500ms of WDK
+  // step-boundary overhead. Combined here because:
+  //   - setWorkflowRunId is an idempotent UPDATE on a row that already
+  //     exists (the shim reserved it before start()).
+  //   - coldStartSandbox / reconnectSessionSandbox are idempotent on retry
+  //     (sandbox_id CAS, mcp_refreshed_at TTL).
+  //   - markRunnerStarted is the spawn-idempotency CAS — replay still skips
+  //     the actual spawn after the first attempt.
+  const sandboxRef = await prepareSandboxAndLaunchStep(
+    input,
+    prepared,
+    runId,
+  );
 
   // Workflow body — iterate hook, dispatch each chunk to writeChunkStep.
   // Cancellation propagates here as a thrown exception; the catch routes
@@ -203,12 +222,30 @@ export async function dispatchWorkflow(
 //     so callers don't accidentally invoke them outside the workflow body) ---
 
 /**
- * Persist `wdk_v1_<runId>` on the session row. Replaces the legacy
- * `reserveStep` whose reserve work now happens in the shim before start().
- * Kept as a step so a function-host crash here doesn't lose the runId
- * linkage entirely — WDK retries it. Idempotent: setWorkflowRunId is a
- * plain UPDATE on a row that already exists; replay overwrites with the
- * same value.
+ * Single step that does runId persistence + sandbox provisioning + runner
+ * launch. Combined to save WDK step boundaries — pre-fix this was three
+ * separate steps each paying ~100-500ms of cross-function overhead.
+ *
+ * All three operations are idempotent on retry:
+ *   - setWorkflowRunId is an UPDATE on an existing row (same value on replay).
+ *   - ensureSandboxImpl uses sandbox_id CAS / mcp_refreshed_at TTL.
+ *   - launchRunnerImpl uses markRunnerStarted CAS — replay skips spawn.
+ */
+export async function prepareSandboxAndLaunchStep(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+  runId: string,
+): Promise<SandboxRef> {
+  "use step";
+  await setWorkflowRunId(prepared.session.id, input.tenantId, `wdk_v1_${runId}`);
+  const sandboxRef = await ensureSandboxImpl(input, prepared);
+  await launchRunnerImpl(input, prepared, sandboxRef);
+  return sandboxRef;
+}
+
+/**
+ * @deprecated Kept for unit tests that pin its behavior. The workflow body
+ * now calls `prepareSandboxAndLaunchStep` which inlines this work.
  */
 export async function persistWorkflowRunIdStep(
   prepared: PreparedExecution,
@@ -244,6 +281,18 @@ export async function ensureSandboxStep(
   prepared: PreparedExecution,
 ): Promise<SandboxRef> {
   "use step";
+  return ensureSandboxImpl(input, prepared);
+}
+
+/**
+ * Body of ensureSandboxStep without the `"use step"` directive so it can be
+ * called from inside another step (e.g. `prepareSandboxAndLaunchStep`)
+ * without scheduling a nested WDK step boundary.
+ */
+async function ensureSandboxImpl(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+): Promise<SandboxRef> {
   // Mirrors the legacy runMessageStream optimization layout (dispatcher.ts:
   // 590–765) so workflow-backed follow-up messages don't pay the full cold-
   // start cost on every turn. The hot-path process-local cache (activeSessions)
@@ -416,7 +465,18 @@ export async function launchRunnerStep(
   sandboxRef: SandboxRef,
 ): Promise<void> {
   "use step";
+  await launchRunnerImpl(input, prepared, sandboxRef);
+}
 
+/**
+ * Body of launchRunnerStep without the `"use step"` directive. Called from
+ * `prepareSandboxAndLaunchStep` to avoid scheduling a nested WDK boundary.
+ */
+async function launchRunnerImpl(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+  sandboxRef: SandboxRef,
+): Promise<void> {
   // DB-backed spawn idempotency primitive (replaces sandbox-process inspection).
   // Replay finds runner_started_at non-null and skips the actual spawn.
   const fresh = await markRunnerStarted(prepared.messageId, input.tenantId);
@@ -477,11 +537,23 @@ export async function writeChunkStep(
   // secrets are redacted before reaching downstream consumers (REST/A2A
   // render shims, transcript blob), and ephemeral asset URLs are
   // persisted to Vercel Blob before leaving the platform's trust boundary.
-  const processed = scrubSecrets(await processLineAssets(chunk.line, tenantId, messageId));
+  //
+  // PERF: process lines in parallel — scrubSecrets + processLineAssets
+  // are independent across lines; serial dispatch was leaving latency
+  // on the table for batches of 5-10 lines.
+  const processed = await Promise.all(
+    chunk.lines.map(async (l) =>
+      scrubSecrets(await processLineAssets(l.line, tenantId, messageId)),
+    ),
+  );
 
   const writer = getWritable<string>().getWriter();
   try {
-    await writer.write(processed);
+    // Single write call per batch; the writable is durable so the writes
+    // line up in order on subsequent reader pulls.
+    for (const line of processed) {
+      await writer.write(line);
+    }
   } finally {
     writer.releaseLock();
   }

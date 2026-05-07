@@ -339,8 +339,12 @@ describe("dispatchWorkflow steps", () => {
 
       const chunk: RunnerChunk = {
         kind: "chunk",
-        line: '{"type":"assistant","content":"hi SECRET=foo"}',
-        eventType: "assistant",
+        lines: [
+          {
+            line: '{"type":"assistant","content":"hi SECRET=foo"}',
+            eventType: "assistant",
+          },
+        ],
       };
       await writeChunkStep(tenantId, messageId, chunk);
 
@@ -366,8 +370,7 @@ describe("dispatchWorkflow steps", () => {
       await expect(
         writeChunkStep(tenantId, messageId, {
           kind: "chunk",
-          line: "x",
-          eventType: "assistant",
+          lines: [{ line: "x", eventType: "assistant" }],
         }),
       ).rejects.toThrow("stream closed");
 

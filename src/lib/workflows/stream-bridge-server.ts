@@ -174,13 +174,30 @@ export function __resetLineCountersForTests(): void {
 // resumeHook batch — call resumeHook(token, payload) once per parsed line
 // ---------------------------------------------------------------------------
 
-export interface RunnerChunkPayload {
-  /** Either "chunk" or "terminal" — drives the workflow body's break. */
-  kind: "chunk" | "terminal";
+export interface RunnerChunkLine {
   /** Original NDJSON line (post-parse, pre-scrub — scrub happens in writeChunk step). */
   line: string;
   /** SDK event type (`assistant`, `tool_use`, `result`, `error`, `text_delta`, etc.). */
   eventType: string;
+}
+
+/**
+ * Payload delivered to the workflow body via a single `resumeHook` call.
+ *
+ * PERF: pre-batching this was one payload per parsed line — every NDJSON
+ * line emitted by the runner became a separate WDK step boundary in the
+ * workflow body's for-await. With the runner already coalescing 10 lines
+ * (or 100ms) per HTTP POST, batching here cuts the workflow's step count
+ * by up to 10×.
+ *
+ * `kind: "terminal"` means at least one of `lines` is a terminal event
+ * (`result` or `error`). The workflow body breaks its for-await loop
+ * after processing the batch.
+ */
+export interface RunnerChunkPayload {
+  kind: "chunk" | "terminal";
+  /** One or more parsed runner lines, in emission order. */
+  lines: RunnerChunkLine[];
 }
 
 export interface ResumeBatchResult {
@@ -200,8 +217,10 @@ export interface ResumeBatchResult {
 }
 
 /**
- * Forward a batch of parsed RunnerChunk payloads to the workflow's hook
- * via resumeHook. Returns aggregate delivery status.
+ * Forward a batch of parsed runner lines to the workflow's hook via a
+ * SINGLE resumeHook call. The whole batch becomes one chunk delivered to
+ * the workflow body's for-await — the body invokes writeChunkStep once
+ * per resumeHook (vs once per line pre-batching).
  *
  * Order is preserved within the batch — the runner's coalescing window
  * keeps batches small (10 lines OR 100ms in U3-e), so within-batch order
@@ -211,24 +230,33 @@ export interface ResumeBatchResult {
  */
 export async function resumeHookBatch(
   messageId: string,
-  payloads: RunnerChunkPayload[],
+  lines: RunnerChunkLine[],
 ): Promise<ResumeBatchResult> {
-  const token = `transcript:${messageId}`;
-  let delivered = 0;
-  for (const payload of payloads) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await resumeHook(token, payload as any);
-      delivered++;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("Hook not found")) {
-        return { delivered, hookNotFound: true, otherError: null };
-      }
-      return { delivered, hookNotFound: false, otherError: message };
-    }
+  if (lines.length === 0) {
+    return { delivered: 0, hookNotFound: false, otherError: null };
   }
-  return { delivered, hookNotFound: false, otherError: null };
+  const token = `transcript:${messageId}`;
+  // Terminal-kind if ANY line in the batch is a terminal event. The workflow
+  // body's break-on-terminal stays correct even though we coalesce — it just
+  // breaks one batch later than per-line dispatch would.
+  const isTerminal = lines.some(
+    (l) => l.eventType === "result" || l.eventType === "error",
+  );
+  const payload: RunnerChunkPayload = {
+    kind: isTerminal ? "terminal" : "chunk",
+    lines,
+  };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await resumeHook(token, payload as any);
+    return { delivered: lines.length, hookNotFound: false, otherError: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("Hook not found")) {
+      return { delivered: 0, hookNotFound: true, otherError: null };
+    }
+    return { delivered: 0, hookNotFound: false, otherError: message };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +272,7 @@ export async function resumeHookBatch(
  * try/catch. Throws on malformed JSON because that's a bug in the runner
  * template, not a normal-path condition.
  */
-export function parseRunnerLine(line: string): RunnerChunkPayload | null {
+export function parseRunnerLine(line: string): RunnerChunkLine | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
   let parsed: unknown;
@@ -252,20 +280,16 @@ export function parseRunnerLine(line: string): RunnerChunkPayload | null {
     parsed = JSON.parse(trimmed);
   } catch {
     // Don't crash the request on malformed runner output — treat as a
-    // generic "unknown" chunk. The workflow body's writeChunk step will
+    // generic "unknown" line. The workflow body's writeChunk step will
     // still scrub and write the line; downstream consumers see it as-is.
-    return { kind: "chunk", line: trimmed, eventType: "unknown" };
+    return { line: trimmed, eventType: "unknown" };
   }
   if (typeof parsed !== "object" || parsed === null) {
-    return { kind: "chunk", line: trimmed, eventType: "unknown" };
+    return { line: trimmed, eventType: "unknown" };
   }
   const eventType =
     typeof (parsed as { type?: unknown }).type === "string"
       ? ((parsed as { type: string }).type)
       : "unknown";
-  const isTerminal = eventType === "result" || eventType === "error";
-  if (isTerminal) {
-    return { kind: "terminal", line: trimmed, eventType: eventType as "result" | "error" };
-  }
-  return { kind: "chunk", line: trimmed, eventType };
+  return { line: trimmed, eventType };
 }
