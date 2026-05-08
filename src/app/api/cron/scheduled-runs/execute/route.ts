@@ -8,7 +8,7 @@ import {
   type DispatchInput,
   type PreparedExecution,
 } from "@/lib/dispatcher";
-import { findWarmScheduleSession } from "@/lib/sessions";
+import { findWarmScheduleSession, setWorkflowRunId } from "@/lib/sessions";
 import { transitionMessageStatus } from "@/lib/session-messages";
 import { BudgetExceededError, ConcurrencyLimitError, PromptRejectedError } from "@/lib/errors";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
@@ -216,6 +216,29 @@ async function runViaWorkflow(args: {
         },
       ).catch(() => {});
       throw err;
+    });
+
+    // Persist the workflow_run_id on the session row IMMEDIATELY after
+    // start() so the cleanup-sessions cron can call WDK's cancel API on
+    // the active-watchdog path. Previously this was only written from
+    // inside `prepareSandboxAndLaunchStep` — meaning if that step
+    // retried for 12+ minutes (the symptom that caused this fix), the
+    // watchdog tried to cancel a session whose workflow_run_id was null,
+    // fell through to the legacy stop-sandbox path, and left the
+    // workflow run zombied for hours iterating its hook waiting for
+    // chunks that would never come (cancelled at the WDK 4h expiry).
+    // Mirrors the equivalent write in `src/lib/workflows/dispatch-shim.ts`.
+    await setWorkflowRunId(
+      prepared.session.id,
+      input.tenantId,
+      `wdk_v1_${run.runId}`,
+    ).catch((err) => {
+      logger.warn("Scheduled run (workflow): setWorkflowRunId failed (best-effort)", {
+        schedule_id: args.schedule_id,
+        session_id: prepared.session.id,
+        run_id: run.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     // Race the workflow's return value against a maxDuration-30s timeout.

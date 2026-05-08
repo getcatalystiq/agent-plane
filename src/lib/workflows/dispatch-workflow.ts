@@ -44,6 +44,7 @@
  */
 import {
   createHook,
+  FatalError,
   getWorkflowMetadata,
   getWritable,
 } from "workflow";
@@ -66,7 +67,7 @@ import {
   setWorkflowRunId,
   type Session,
 } from "@/lib/sessions";
-import { markRunnerStarted } from "@/lib/session-messages";
+import { markRunnerStarted, transitionMessageStatus } from "@/lib/session-messages";
 import { resolveSandboxAuth } from "@/lib/tenant-auth";
 import { resolveEffectiveRunner } from "@/lib/models";
 import { buildMcpConfig, type McpBuildResult } from "@/lib/mcp";
@@ -237,6 +238,56 @@ export async function prepareSandboxAndLaunchStep(
   runId: string,
 ): Promise<SandboxRef> {
   "use step";
+  // Wrapped in try/catch so a thrown error does NOT trigger WDK's
+  // automatic step retry. Production trace via `workflow inspect events`
+  // on a 4-hour zombie schedule run showed a 22-minute gap between
+  // run_started and the first chunk — most likely caused by this step
+  // throwing once and WDK retrying on multi-minute backoff. While the
+  // step retried, the watchdog correctly killed the session at
+  // max_runtime+120s, but the workflow run kept running its hook
+  // iterator until the WDK 4h expiry. Same posture as PR #62/#63: log
+  // the error loudly and rethrow as a `FatalError` so the run fails
+  // fast (cleanup-sessions sees workflow_run_id and cancels), instead
+  // of hanging on retries.
+  try {
+    return await prepareSandboxAndLaunchImpl(input, prepared, runId);
+  } catch (err) {
+    logger.error("prepareSandboxAndLaunchStep: caught — failing fast (no WDK retry)", {
+      run_id: runId,
+      triggered_by: input.triggeredBy,
+      session_id: prepared.session.id,
+      message_id: prepared.messageId,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    // Best-effort: mark the session message failed so the user-facing
+    // row reflects what actually happened, instead of waiting for the
+    // active-watchdog to fire (12+ minutes by default).
+    await transitionMessageStatus(
+      prepared.messageId,
+      input.tenantId,
+      "running",
+      "failed",
+      {
+        completed_at: new Date().toISOString(),
+        error_type: "sandbox_launch_failed",
+        error_messages: [err instanceof Error ? err.message : String(err)],
+      },
+    ).catch(() => {});
+    // FatalError tells WDK not to retry. The run finalizes promptly
+    // and the cleanup cron can do its work without the 4h zombie tail.
+    throw new FatalError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+async function prepareSandboxAndLaunchImpl(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+  runId: string,
+): Promise<SandboxRef> {
   // DIAG: first thing the inner workflow's first step does is log so
   // we can correlate by run_id. If chat path's start() schedules the
   // inner run but this log never fires, the inner is hanging before
