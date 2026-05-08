@@ -399,7 +399,7 @@ export async function persistSlackAppIdIfMissing(
          SET platform_identity = jsonb_set(
                platform_identity,
                '{app_id}',
-               to_jsonb($4::text),
+               to_jsonb($3::text),
                true
              ),
              updated_at = now()
@@ -408,7 +408,7 @@ export async function persistSlackAppIdIfMissing(
          AND platform = 'slack'
          AND (platform_identity->>'app_id' IS NULL
               OR platform_identity->>'app_id' = '')`,
-      [tenantId, agentId, "slack", apiAppId],
+      [tenantId, agentId, apiAppId],
     );
   } catch (err) {
     logger.warn("persistSlackAppIdIfMissing: best-effort UPDATE failed", {
