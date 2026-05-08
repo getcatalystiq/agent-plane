@@ -220,6 +220,13 @@ async function consumeAndPostStep(
     });
   }
 
+  // 👀 receipt reaction — visible "I see this" signal on the user's
+  // original message before any text reply lands. Wrapped so a
+  // reaction failure (missing scope, bot can't react in DMs, etc.)
+  // never blocks the actual reply. Removed below on success/error
+  // and replaced with ✅/❌ so the user gets a status pill.
+  await safeAddReaction(input, REACTION_RECEIPT);
+
   // Platform fork: Slack has a native streaming API on its Chat SDK
   // adapter (`adapter.stream(threadId, asyncIterable, options)`) that
   // posts a single message and incrementally extends it as text chunks
@@ -227,10 +234,70 @@ async function consumeAndPostStep(
   // chat.stopStream APIs. It also drives Slack's own typing-style
   // indicator throughout the stream lifecycle. Discord has no
   // equivalent; we keep its existing post-then-edit loop.
-  if (input.platform === "slack") {
-    return await consumeAndStreamSlack(input, innerRunId);
+  let success = false;
+  try {
+    if (input.platform === "slack") {
+      await consumeAndStreamSlack(input, innerRunId);
+    } else {
+      await consumeAndEditDiscord(input, innerRunId);
+    }
+    success = true;
+  } finally {
+    // Swap the receipt reaction for the terminal status. Best-effort
+    // (reactions are decorative; failures don't bubble).
+    await safeRemoveReaction(input, REACTION_RECEIPT);
+    await safeAddReaction(input, success ? REACTION_DONE : REACTION_ERROR);
   }
-  return await consumeAndEditDiscord(input, innerRunId);
+}
+
+// Slack/Discord both accept emoji shortcodes (no colons) on their
+// addReaction/removeReaction adapters. These match the CLAUDE.md UX
+// guidelines: 👀 receipt → ✅ done → ❌ error.
+const REACTION_RECEIPT = "eyes";
+const REACTION_DONE = "white_check_mark";
+const REACTION_ERROR = "x";
+
+interface ReactingAdapter {
+  addReaction?: (threadId: string, messageId: string, emoji: string) => Promise<void>;
+  removeReaction?: (threadId: string, messageId: string, emoji: string) => Promise<void>;
+}
+
+async function safeAddReaction(input: ChatTriggerInput, emoji: string): Promise<void> {
+  if (!input.replyToMessageId) return;
+  try {
+    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
+    if (!cached) return;
+    const adapter = cached.adapter as unknown as ReactingAdapter;
+    if (typeof adapter.addReaction !== "function") return;
+    await adapter.addReaction(input.threadKey, input.replyToMessageId, emoji);
+  } catch (err) {
+    logger.warn("safeAddReaction failed (best-effort, non-blocking)", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      emoji,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+async function safeRemoveReaction(input: ChatTriggerInput, emoji: string): Promise<void> {
+  if (!input.replyToMessageId) return;
+  try {
+    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
+    if (!cached) return;
+    const adapter = cached.adapter as unknown as ReactingAdapter;
+    if (typeof adapter.removeReaction !== "function") return;
+    await adapter.removeReaction(input.threadKey, input.replyToMessageId, emoji);
+  } catch (err) {
+    logger.warn("safeRemoveReaction failed (best-effort, non-blocking)", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      emoji,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
