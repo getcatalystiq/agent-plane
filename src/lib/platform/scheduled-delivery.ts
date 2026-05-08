@@ -168,15 +168,51 @@ export async function deliverScheduleReplyToChannel(
 
   const adapter = cached.adapter as unknown as ChannelPostingAdapter;
 
+  // Build the platform-specific threadId expected by the Chat SDK
+  // adapter from the raw channel ID stored in the schedule. Without
+  // this, the Slack adapter's `decodeThreadId` rejects the value with
+  // "Invalid Slack channel ID: C…" because the user's saved value is
+  // the bare channel ID (e.g. `C0ABCDEF12`) and the adapter expects
+  // `slack:C0ABCDEF12` (2-part form, no thread_ts → posts to channel
+  // root). The schedule editor's placeholder asks for raw IDs by
+  // design — wrapping happens here, not in the user-facing UI.
+  let threadId: string;
+  if (args.targetPlatform === "slack") {
+    threadId = `slack:${args.targetChannel}`;
+  } else if (args.targetPlatform === "discord") {
+    // Discord's decodeThreadId requires `discord:guildId:channelId`
+    // (3 parts minimum). The schedule schema only stores
+    // `target_channel`, not `target_guild_id`, so for now we accept
+    // either a raw channel id (best-effort: derive guild via the
+    // adapter's channel→guild lookup is not exposed) OR a pre-formed
+    // `discord:guildId:channelId` string the user pasted directly.
+    threadId = args.targetChannel.startsWith("discord:")
+      ? args.targetChannel
+      : args.targetChannel;
+    if (!threadId.startsWith("discord:")) {
+      logger.warn(
+        "scheduled-delivery: Discord requires `discord:guildId:channelId` — bare channel id will likely fail",
+        {
+          tenant_id: args.tenantId,
+          agent_id: args.agentId,
+          schedule_id: args.scheduleId,
+          target_channel: args.targetChannel,
+        },
+      );
+    }
+  } else {
+    threadId = args.targetChannel;
+  }
+
   try {
     if (typeof adapter.postChannelMessage === "function") {
-      await adapter.postChannelMessage(args.targetChannel, args.text);
+      await adapter.postChannelMessage(threadId, args.text);
     } else if (typeof adapter.postMessage === "function") {
       // Some Chat SDK versions don't expose a separate channel
       // helper. postMessage with a channel id (no thread_ts) posts
       // a top-level channel message in Slack and a channel message
       // in Discord — same observable behaviour.
-      await adapter.postMessage(args.targetChannel, args.text);
+      await adapter.postMessage(threadId, args.text);
     } else {
       logger.warn("scheduled-delivery: adapter exposes neither postChannelMessage nor postMessage", {
         tenant_id: args.tenantId,
