@@ -369,7 +369,7 @@ async function consumeAndStreamSlack(
   const adapter = cached.adapter as unknown as {
     stream?: (
       threadId: string,
-      textStream: AsyncIterable<string>,
+      textStream: AsyncIterable<string | EmittedStreamChunk>,
       options?: { recipientUserId?: string; recipientTeamId?: string },
     ) => Promise<{ id: string }>;
   };
@@ -416,7 +416,17 @@ async function consumeAndStreamSlack(
   let emittedAnyText = false;
   let resultFallbackText: string | null = null;
 
-  const textStream: AsyncIterable<string> = (async function* () {
+  // Tool-call task tracking. When the agent emits a tool_use block, we
+  // emit a TaskUpdateChunk with status "in_progress" so Slack's
+  // StreamingPlan UI shows the tool call as a visible step. When the
+  // matching tool_result arrives (in a subsequent `user` role message),
+  // we emit status "complete" with the same id. Without this, multi-
+  // tool agent runs look like a long pause between text chunks; with
+  // it, the user sees "🔧 search_docs(query='FDA') → ✅" while the
+  // agent works.
+  const toolTitleById = new Map<string, string>();
+
+  const textStream: AsyncIterable<string | EmittedStreamChunk> = (async function* () {
     const reader = readable.getReader();
     try {
       while (true) {
@@ -435,6 +445,39 @@ async function consumeAndStreamSlack(
             if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
               emittedAnyText = true;
               yield block.text;
+            } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
+              const title = block.name;
+              const details = summarizeToolInput(block.input);
+              toolTitleById.set(block.id, title);
+              yield {
+                type: "task_update",
+                id: block.id,
+                title,
+                status: "in_progress",
+                ...(details ? { details } : {}),
+              };
+            }
+          }
+        } else if (evt.type === "user" && evt.message && typeof evt.message === "object") {
+          // The Claude Agent SDK delivers tool results inside a `user` role
+          // message wrapper. content[] holds tool_result blocks correlated
+          // to the originating tool_use via `tool_use_id`.
+          const blocks = evt.message.content ?? [];
+          for (const block of blocks) {
+            if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+              const title = toolTitleById.get(block.tool_use_id) ?? block.tool_use_id;
+              const output = typeof block.content === "string"
+                ? block.content
+                : Array.isArray(block.content)
+                  ? block.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n")
+                  : undefined;
+              yield {
+                type: "task_update",
+                id: block.tool_use_id,
+                title,
+                status: "complete",
+                ...(output && output.length > 0 ? { output: output.length > 200 ? output.slice(0, 197) + "…" : output } : {}),
+              };
             }
           }
         } else if (evt.type === "error") {
@@ -1383,10 +1426,27 @@ async function finalizeChatStep(input: ChatTriggerInput): Promise<void> {
 interface AssistantContentBlock {
   type?: string;
   text?: string;
+  // tool_use blocks. Claude Agent SDK emits these inside assistant messages
+  // when the agent calls a tool. We map them to TaskUpdateChunk events
+  // (status: "in_progress") so Slack's StreamingPlan UI surfaces tool calls
+  // as visible task steps.
+  id?: string;
+  name?: string;
+  input?: unknown;
+  // tool_result blocks (live in `user` role messages, not assistant). The
+  // `tool_use_id` correlates with the originating tool_use block's id so
+  // we can mark that task complete.
+  tool_use_id?: string;
+  content?: string | Array<{ type?: string; text?: string }>;
 }
 
 interface AssistantMessage {
   content?: AssistantContentBlock[];
+  // Claude Agent SDK includes a role on the SDK message — "assistant" for
+  // agent turns, "user" for tool_result delivery. We branch on role so we
+  // know whether content[] holds tool_use (assistant→tool) or tool_result
+  // (tool→assistant).
+  role?: string;
 }
 
 interface ParsedEvent {
@@ -1397,11 +1457,37 @@ interface ParsedEvent {
   // - On `type: "error"` it's a string (error message text).
   // - On `type: "assistant"` it's the SDK message object with content blocks
   //   carrying the agent reply text.
+  // - On `type: "user"` (Claude SDK's tool_result message wrapper) it's the
+  //   SDK message with content blocks of `type: "tool_result"`.
   message?: string | AssistantMessage;
   // On `type: "result"` Claude SDK emits a top-level `result` field with the
   // final assembled string — used as a fallback if the assistant blocks were
   // somehow empty.
   result?: string;
+}
+
+// Subset of the Chat SDK's StreamChunk shape we actually emit. Defined
+// locally so this file doesn't have a static import dependency on the
+// `chat` package (see top-of-file imports — adapter typing is structural,
+// not nominal). Keep field names aligned with the SDK so the union flows
+// through `adapter.stream` without coercion.
+type EmittedStreamChunk =
+  | { type: "task_update"; id: string; title: string; status: "pending" | "in_progress" | "complete" | "error"; details?: string; output?: string }
+  | { type: "markdown_text"; text: string };
+
+/** Render a tool_use input as a one-line task subtitle. */
+function summarizeToolInput(input: unknown): string | undefined {
+  if (input === null || input === undefined) return undefined;
+  if (typeof input === "string") {
+    return input.length > 120 ? input.slice(0, 117) + "…" : input;
+  }
+  try {
+    const json = JSON.stringify(input);
+    if (json === "{}") return undefined;
+    return json.length > 120 ? json.slice(0, 117) + "…" : json;
+  } catch {
+    return undefined;
+  }
 }
 
 function parseNdjsonLine(raw: string): ParsedEvent | null {
