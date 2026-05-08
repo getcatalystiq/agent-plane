@@ -85,7 +85,14 @@ function MessageRow({
 
   const events = useMemo(() => {
     if (isLatestActive) return liveEvents;
-    return transcriptEvents ?? [];
+    // After the stream closes (terminal `result`/`error` event), router.refresh
+    // re-fetches the message; isLatestActive flips to false and the page
+    // switches from liveEvents to the lazy-loaded transcript blob. But the
+    // blob fetch is async — and on the chat-workflow path the blob may not
+    // even be uploaded yet (finalizeStep race). Without this fallback, the
+    // viewer briefly (or persistently, on a slow/failed fetch) shows
+    // "No transcript available" right after a successful run.
+    return transcriptEvents ?? (liveEvents.length > 0 ? liveEvents : []);
   }, [isLatestActive, liveEvents, transcriptEvents]);
 
   // Lazy-load transcript blob when expanded for non-active messages
