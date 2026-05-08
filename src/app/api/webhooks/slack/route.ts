@@ -21,11 +21,15 @@
  *   5. Return 200 `queued` immediately.
  *
  * Deferred (after()) path — runs after the response:
- *   6. findOrLoadSlackBotByTeamId(teamId) — drop silently if unknown.
- *   7. Decrypt the bot's signing secret (via getDecryptedCredentials).
- *   8. HMAC-SHA-256 verify `v0:${timestamp}:${rawBody}` against
- *      X-Slack-Signature; drop silently on failure.
- *   9. Hand to Chat SDK's webhook dispatch.
+ *   6. listSlackBotsByTeamId(teamId) — return ALL enabled bots for that
+ *      workspace (some teams have two registered apps; LIMIT 1 picked
+ *      arbitrary). Drop silently if none.
+ *   7. For each candidate, HMAC-SHA-256 verify `v0:${timestamp}:${rawBody}`
+ *      with the candidate's per-bot signing secret. The first match
+ *      identifies which app sent the event.
+ *   8. Resolve the matched candidate's cached Chat instance via
+ *      getOrCreateBot, then hand to Chat SDK's webhook dispatch.
+ *   9. If no candidate verified, drop silently and log fingerprints.
  *
  * Security: bad-sig events get a 200 `queued` ack but are silently
  * dropped after the deferred verify fails — same outcome as the prior
@@ -39,11 +43,12 @@ import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
 import { withErrorHandler } from "@/lib/api";
 import {
-  findOrLoadSlackBotByTeamId,
+  findSlackBotByTeamAndApp,
+  getOrCreateBot,
   listSlackBotSigningSecrets,
+  listSlackBotsByTeamId,
+  persistSlackAppIdIfMissing,
 } from "@/lib/platform/bot";
-import { getDecryptedCredentials, type SlackCredentials } from "@/lib/platform/operations";
-import type { TenantId, AgentId } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -234,64 +239,80 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
   const reqMethod = req.method;
   const reqHeaders = new Headers(req.headers);
   after(async () => {
-    let targetBot: Awaited<ReturnType<typeof findOrLoadSlackBotByTeamId>>;
+    // Multi-bot per workspace: extract `api_app_id` from the body
+    // (untrusted — used only for lookup; the signature verify below is
+    // the authority) and try the surgical (team_id, app_id) lookup
+    // first. If a single row matches and its secret verifies, no
+    // enumeration needed.
+    //
+    // Fall back to enumerate-all-bots-for-team only when:
+    //   - the body has no api_app_id (defensive; real events always
+    //     include it, but synthetic / replay traffic might not), OR
+    //   - the surgical lookup found nothing (this row's app_id hasn't
+    //     been persisted yet — first webhook after install, or an
+    //     older bot row from before this migration).
+    //
+    // After a verifying match, write `app_id` back into
+    // `platform_identity` so the next event takes the surgical path.
+    let apiAppIdFromBody: string | null = null;
     try {
-      targetBot = await findOrLoadSlackBotByTeamId(teamId);
-    } catch (err) {
-      logger.error("slack-webhook (deferred): bot load failed", {
-        team_id: teamId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
-    // Unknown team_id: drop silently. Real events from unregistered
-    // workspaces shouldn't trigger anything; preserves the oracle
-    // closure (same observable behaviour as the registered-but-bad-sig
-    // path below).
-    if (!targetBot) return;
-
-    let signingSecret: string;
-    try {
-      const creds = (await getDecryptedCredentials(
-        targetBot.tenantId as TenantId,
-        targetBot.agentId as AgentId,
-        "slack",
-      )) as SlackCredentials | null;
-      if (!creds) return;
-      signingSecret = creds.signingSecret;
-    } catch (err) {
-      logger.error("slack-webhook (deferred): decrypt failed", {
-        agent_id: targetBot.agentId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
-
-    const verified = await verifySlackV0(rawBody, ts, sigHeader, signingSecret);
-    if (!verified) {
-      // DIAG: when the verify fails, log enough to triangulate WHY without
-      // leaking full secrets or signatures. Compare:
-      //   - secret_len + secret_head/tail (4 chars each) → did the right
-      //     value land in the DB?
-      //   - body_len + body_head_hash (sha256 first 16 chars of the raw
-      //     body) → was the body mutated in transit?
-      //   - sig_provided_prefix vs sig_expected_prefix (first 16 hex
-      //     chars of each v0 signature) → does the HMAC compute the same
-      //     bytes Slack signed?
-      //   - api_app_id (from the parsed body) → is this even the right
-      //     Slack app's signing secret? (multi-app accidental misroute)
-      let apiAppId: string | null = null;
-      try {
-        const parsed = JSON.parse(rawBody) as { api_app_id?: string };
-        if (typeof parsed.api_app_id === "string") apiAppId = parsed.api_app_id;
-      } catch {
-        // ignore
+      const peek = JSON.parse(rawBody) as { api_app_id?: unknown };
+      if (typeof peek.api_app_id === "string" && peek.api_app_id.length > 0) {
+        apiAppIdFromBody = peek.api_app_id;
       }
+    } catch {
+      // Untrusted body parse failure — fine, we'll use enumerate path.
+    }
+
+    let matched: Awaited<ReturnType<typeof findSlackBotByTeamAndApp>> = null;
+    let usedSurgicalPath = false;
+
+    if (apiAppIdFromBody) {
+      try {
+        const surgical = await findSlackBotByTeamAndApp(teamId, apiAppIdFromBody);
+        if (surgical && (await verifySlackV0(rawBody, ts, sigHeader, surgical.signingSecret))) {
+          matched = surgical;
+          usedSurgicalPath = true;
+        }
+      } catch (err) {
+        logger.warn("slack-webhook (deferred): surgical lookup threw — falling back", {
+          team_id: teamId,
+          api_app_id: apiAppIdFromBody,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    let candidates: Awaited<ReturnType<typeof listSlackBotsByTeamId>> = [];
+    if (!matched) {
+      try {
+        candidates = await listSlackBotsByTeamId(teamId);
+      } catch (err) {
+        logger.error("slack-webhook (deferred): listSlackBotsByTeamId failed", {
+          team_id: teamId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      // Unknown team_id: drop silently. Real events from unregistered
+      // workspaces shouldn't trigger anything; preserves the oracle
+      // closure (same observable behaviour as the registered-but-bad-
+      // sig path below).
+      if (candidates.length === 0) return;
+
+      for (const c of candidates) {
+        if (await verifySlackV0(rawBody, ts, sigHeader, c.signingSecret)) {
+          matched = c;
+          break;
+        }
+      }
+    }
+
+    if (!matched) {
+      // Surgical lookup found nothing AND no candidate's secret
+      // verified in the enumerate fallback. Log fingerprints to
+      // diagnose without leaking full secrets/signatures.
       const sigMatch = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
-      const provided = sigMatch ? sigMatch[1].toLowerCase() : null;
-      const expected = await hmacSha256Hex(signingSecret, `v0:${ts}:${rawBody}`);
-      // Hash a prefix of the body so we can detect mutation without
-      // logging body content.
       const bodyHashHead = await (async () => {
         const h = await crypto.subtle.digest(
           "SHA-256",
@@ -299,20 +320,20 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
         );
         return Array.from(new Uint8Array(h)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
       })();
-      logger.warn("slack-webhook (deferred): signature mismatch — event dropped", {
-        agent_id: targetBot.agentId,
+      logger.warn("slack-webhook (deferred): signature mismatch on all candidates — event dropped", {
         team_id: teamId,
-        api_app_id: apiAppId,
-        secret_len: signingSecret.length,
-        secret_head: signingSecret.slice(0, 4),
-        secret_tail: signingSecret.slice(-4),
+        api_app_id: apiAppIdFromBody,
+        candidate_count: candidates.length,
+        candidates: candidates.map((c) => ({
+          agent_id: c.agentId,
+          secret_head: c.signingSecret.slice(0, 4),
+          secret_tail: c.signingSecret.slice(-4),
+        })),
         body_len: rawBody.length,
         body_head_hash: bodyHashHead,
         ts_header: ts,
         sig_header_present: sigHeader !== null,
         sig_header_format_ok: !!sigMatch,
-        sig_provided_prefix: provided ? provided.slice(0, 16) : null,
-        sig_expected_prefix: expected.slice(0, 16),
       });
       return;
     }
@@ -326,6 +347,43 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
     // url_verification was already handled in the sync path above; if
     // we somehow reach here, just drop.
     if (parsed.type === "url_verification") return;
+
+    // Backfill: if we verified via the enumerate fallback AND the body
+    // had an api_app_id AND the matched row doesn't already have one
+    // stored, write it back so the next event takes the surgical
+    // path. Best-effort — failure here just means the next event also
+    // enumerates (acceptable).
+    if (!usedSurgicalPath && apiAppIdFromBody) {
+      const existingAppId = matched.platformIdentity?.app_id;
+      if (typeof existingAppId !== "string" || existingAppId.length === 0) {
+        await persistSlackAppIdIfMissing(matched.tenantId, matched.agentId, apiAppIdFromBody);
+        logger.info("slack-webhook (deferred): persisted app_id for surgical lookup", {
+          team_id: teamId,
+          api_app_id: apiAppIdFromBody,
+          agent_id: matched.agentId,
+        });
+      }
+    }
+
+    // Resolve the cached Chat instance for the matched bot. Uses the
+    // shared `getOrCreateBot` so concurrent webhooks for the same agent
+    // share one in-memory Chat per (platform, agentId).
+    let targetBot: Awaited<ReturnType<typeof getOrCreateBot>>;
+    try {
+      targetBot = await getOrCreateBot({
+        tenantId: matched.tenantId,
+        agentId: matched.agentId,
+        platform: "slack",
+        credentialsVersion: matched.credentialsVersion,
+        platformIdentity: matched.platformIdentity,
+      });
+    } catch (err) {
+      logger.error("slack-webhook (deferred): getOrCreateBot failed", {
+        agent_id: matched.agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
 
     try {
       await targetBot.bot.initialize();

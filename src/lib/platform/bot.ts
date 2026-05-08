@@ -23,7 +23,7 @@ import { createDiscordAdapter, type DiscordAdapter } from "@chat-adapter/discord
 import { createSlackAdapter, type SlackAdapter } from "@chat-adapter/slack";
 import { createRedisState } from "@chat-adapter/state-redis";
 import { z } from "zod";
-import { query } from "@/db";
+import { execute, query } from "@/db";
 import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import {
@@ -265,6 +265,159 @@ export function getAllBots(): Map<string, CachedBot> {
 
 export function getBot(platform: ChatPlatform, agentId: AgentId): CachedBot | null {
   return botCache.get(botKey(platform, agentId)) ?? null;
+}
+
+export interface SlackBotCandidate {
+  tenantId: TenantId;
+  agentId: AgentId;
+  credentialsVersion: number;
+  platformIdentity: Record<string, unknown>;
+  signingSecret: string;
+}
+
+async function rowsToSlackCandidates(
+  rows: Array<{
+    tenant_id: string;
+    agent_id: string;
+    credentials_version: number;
+    platform_identity: Record<string, unknown>;
+  }>,
+  diagContext: Record<string, unknown>,
+): Promise<SlackBotCandidate[]> {
+  const out: SlackBotCandidate[] = [];
+  for (const row of rows) {
+    try {
+      const creds = await getDecryptedCredentials(
+        row.tenant_id as TenantId,
+        row.agent_id as AgentId,
+        "slack",
+      );
+      if (!creds || creds.platform !== "slack") continue;
+      const slackCreds = creds as SlackCredentials;
+      out.push({
+        tenantId: row.tenant_id as TenantId,
+        agentId: row.agent_id as AgentId,
+        credentialsVersion: row.credentials_version,
+        platformIdentity: row.platform_identity,
+        signingSecret: slackCreds.signingSecret,
+      });
+    } catch (err) {
+      logger.warn("rowsToSlackCandidates: decrypt skipped", {
+        ...diagContext,
+        agent_id: row.agent_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Surgical lookup: return the enabled Slack bot for the exact
+ * `(team_id, api_app_id)` pair. The Slack event body's `api_app_id`
+ * uniquely identifies which app sent the event, so once
+ * `platform_identity.app_id` has been persisted (see
+ * `persistSlackAppIdIfMissing` below) every subsequent webhook can
+ * resolve the right bot in one query — no enumerate, no
+ * try-every-secret loop.
+ *
+ * Returns at most one bot. Empty when:
+ *   - no bot for this workspace, OR
+ *   - the row hasn't yet had its `app_id` filled in (cold-start /
+ *     pre-migration bots) — caller should fall back to
+ *     `listSlackBotsByTeamId` for that one event, then persist
+ *     `app_id` on the verifying match.
+ */
+export async function findSlackBotByTeamAndApp(
+  teamId: string,
+  apiAppId: string,
+): Promise<SlackBotCandidate | null> {
+  const rows = await query(
+    BotRegistryRow,
+    `SELECT id, tenant_id, agent_id, platform, credentials_version, enabled, platform_identity
+       FROM platform_bot_configs
+      WHERE enabled = true
+        AND platform = 'slack'
+        AND platform_identity->>'team_id' = $1
+        AND platform_identity->>'app_id' = $2
+      LIMIT 2`,
+    [teamId, apiAppId],
+  );
+  if (rows.length === 0) return null;
+  // Two rows for the same (team_id, app_id) means the same Slack app is
+  // registered against multiple agents in the same tenant — degenerate
+  // config but technically valid. Fall back to the caller-side enumerate
+  // so signature verification picks the right one.
+  if (rows.length > 1) return null;
+  const candidates = await rowsToSlackCandidates(rows, { team_id: teamId, api_app_id: apiAppId });
+  return candidates[0] ?? null;
+}
+
+/**
+ * Enumerate-style lookup used when the surgical path can't resolve a
+ * single row: the bot's `app_id` hasn't been persisted yet (first
+ * webhook after install, or pre-migration row), or two agents share
+ * the same `(team_id, app_id)` pair. Caller verifies each candidate's
+ * signature; on a match it should call `persistSlackAppIdIfMissing` so
+ * the next event takes the surgical path.
+ *
+ * Capped at 10 candidates per team_id; a tenant with more concurrent
+ * Slack apps for the same workspace probably has a config-hygiene
+ * issue worth surfacing rather than silently brute-forcing.
+ */
+export async function listSlackBotsByTeamId(teamId: string): Promise<SlackBotCandidate[]> {
+  const rows = await query(
+    BotRegistryRow,
+    `SELECT id, tenant_id, agent_id, platform, credentials_version, enabled, platform_identity
+       FROM platform_bot_configs
+      WHERE enabled = true
+        AND platform = 'slack'
+        AND platform_identity->>'team_id' = $1
+      ORDER BY created_at DESC
+      LIMIT 10`,
+    [teamId],
+  );
+  return rowsToSlackCandidates(rows, { team_id: teamId });
+}
+
+/**
+ * One-time backfill: write `api_app_id` into the bot's
+ * `platform_identity` so future webhooks can resolve via
+ * `findSlackBotByTeamAndApp` instead of enumerating. No-op if the row
+ * already has an app_id (don't clobber operator-supplied values; don't
+ * overwrite if they happen to mismatch — surfaces the mismatch via
+ * normal verify failure on the next event).
+ */
+export async function persistSlackAppIdIfMissing(
+  tenantId: TenantId,
+  agentId: AgentId,
+  apiAppId: string,
+): Promise<void> {
+  try {
+    await execute(
+      `UPDATE platform_bot_configs
+         SET platform_identity = jsonb_set(
+               platform_identity,
+               '{app_id}',
+               to_jsonb($4::text),
+               true
+             ),
+             updated_at = now()
+       WHERE tenant_id = $1
+         AND agent_id = $2
+         AND platform = 'slack'
+         AND (platform_identity->>'app_id' IS NULL
+              OR platform_identity->>'app_id' = '')`,
+      [tenantId, agentId, "slack", apiAppId],
+    );
+  } catch (err) {
+    logger.warn("persistSlackAppIdIfMissing: best-effort UPDATE failed", {
+      tenant_id: tenantId,
+      agent_id: agentId,
+      api_app_id: apiAppId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
