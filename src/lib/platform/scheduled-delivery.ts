@@ -55,6 +55,66 @@ interface ChannelPostingAdapter {
   postMessage?: (threadId: string, message: string) => Promise<unknown>;
 }
 
+/**
+ * Extract the agent's final reply text from a completed message's
+ * transcript blob. The blob is NDJSON, written by the runner. We scan
+ * for:
+ *   1. The terminal `result` event's `result` field (Claude Agent SDK
+ *      sets this to the assistant's final text).
+ *   2. An `assistant` event's `content[].text` (Vercel AI runner format
+ *      and a fallback for runs where `result.result` is empty).
+ *
+ * Returns null when the transcript has no recoverable reply text — the
+ * caller should skip channel delivery (nothing useful to post).
+ */
+export async function extractAgentReplyText(
+  transcriptBlobUrl: string,
+): Promise<string | null> {
+  let body: string;
+  try {
+    const res = await fetch(transcriptBlobUrl);
+    if (!res.ok) return null;
+    body = await res.text();
+  } catch {
+    return null;
+  }
+
+  const lines = body.split("\n").filter((l) => l.trim().length > 0);
+
+  // Pass 1: scan from the end for the terminal `result` event.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const evt = JSON.parse(lines[i]) as { type?: string; result?: unknown };
+      if (evt.type === "result" && typeof evt.result === "string" && evt.result.length > 0) {
+        return evt.result;
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  // Pass 2: fall back to the LAST assistant event with text content.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const evt = JSON.parse(lines[i]) as {
+        type?: string;
+        message?: { content?: Array<{ type?: string; text?: string }> };
+      };
+      if (evt.type === "assistant" && Array.isArray(evt.message?.content)) {
+        const text = evt
+          .message!.content!.filter((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 0)
+          .map((b) => b.text!)
+          .join("\n");
+        if (text.length > 0) return text;
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  return null;
+}
+
 export interface ScheduleDeliveryArgs {
   tenantId: TenantId;
   agentId: AgentId;

@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { queryOne } from "@/db";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { verifyCronSecret } from "@/lib/cron-auth";
-import { AgentRowInternal, TenantRow, ScheduleRow } from "@/lib/validation";
+import { AgentRowInternal, TenantRow, ScheduleRow, SessionMessageRow } from "@/lib/validation";
 import {
   reserveSessionAndMessage,
   type DispatchInput,
@@ -15,7 +15,10 @@ import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
 import { start } from "workflow/api";
 import { dispatchWorkflow } from "@/lib/workflows/dispatch-workflow";
-import { deliverScheduleReplyToChannel } from "@/lib/platform/scheduled-delivery";
+import {
+  deliverScheduleReplyToChannel,
+  extractAgentReplyText,
+} from "@/lib/platform/scheduled-delivery";
 import { z } from "zod";
 import type { AgentId, TenantId } from "@/lib/types";
 
@@ -97,6 +100,8 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     sessionId: warmSessionId,
     prompt: schedule.prompt,
     schedule_id,
+    targetPlatform: schedule.target_platform,
+    targetChannel: schedule.target_channel,
   });
 });
 
@@ -122,6 +127,8 @@ async function runViaWorkflow(args: {
   sessionId: string | undefined;
   prompt: string;
   schedule_id: string;
+  targetPlatform: "slack" | "discord" | null;
+  targetChannel: string | null;
 }): Promise<Response> {
   // Build the same DispatchInput shape the shim uses, so reserve and the
   // workflow body see identical inputs.
@@ -219,6 +226,50 @@ async function runViaWorkflow(args: {
         run_id: run.runId,
         message_id: out.messageId,
       });
+
+      // Channel delivery — if the schedule has a target_platform +
+      // target_channel set, post the agent's reply text there. The
+      // CHECK constraint `chk_sched_target_paired` (migration 041)
+      // guarantees both fields are set or both null, so seeing one
+      // implies the other. PR #51's removal of the legacy drain loop
+      // dropped this hookup; this re-wires it onto the workflow path.
+      if (args.targetPlatform && args.targetChannel) {
+        try {
+          const message = await queryOne(
+            SessionMessageRow,
+            "SELECT * FROM session_messages WHERE id = $1",
+            [out.messageId],
+          );
+          const blobUrl = message?.transcript_blob_url ?? null;
+          const text = blobUrl ? await extractAgentReplyText(blobUrl) : null;
+          if (text) {
+            await deliverScheduleReplyToChannel({
+              tenantId: args.tenantId,
+              agentId: args.agentId,
+              scheduleId: args.schedule_id,
+              targetPlatform: args.targetPlatform,
+              targetChannel: args.targetChannel,
+              text,
+            });
+          } else {
+            logger.warn("Scheduled run (workflow): no reply text to post", {
+              schedule_id: args.schedule_id,
+              message_id: out.messageId,
+              has_blob: !!blobUrl,
+            });
+          }
+        } catch (err) {
+          // Best-effort delivery — don't fail the cron if posting fails.
+          logger.warn("Scheduled run (workflow): channel delivery threw", {
+            schedule_id: args.schedule_id,
+            message_id: out.messageId,
+            target_platform: args.targetPlatform,
+            target_channel: args.targetChannel,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       return jsonResponse({
         status: "completed",
         message_id: out.messageId,
