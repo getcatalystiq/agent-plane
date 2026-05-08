@@ -396,6 +396,17 @@ async function consumeAndStreamSlack(
   // agent works.
   const toolTitleById = new Map<string, string>();
 
+  // The Claude Agent SDK runner emits BOTH per-token `text_delta` events
+  // (during streaming) AND a final `assistant` message carrying the same
+  // complete text in `content[].text`. Yielding both produces a doubled
+  // reply in Slack ("Hello worldHello world"). Track whether text_delta
+  // arrived for the current turn; if yes, drop the assistant text blocks
+  // for that turn but still emit tool_use blocks (those don't appear in
+  // text_delta). Reset on each assistant message so a non-streaming turn
+  // mid-conversation still gets its text yielded from the assistant
+  // event.
+  let textDeltaSeenThisTurn = false;
+
   const textStream: AsyncIterable<string | EmittedStreamChunk> = (async function* () {
     const reader = readable.getReader();
     try {
@@ -408,11 +419,13 @@ async function consumeAndStreamSlack(
 
         if (evt.type === "text_delta" && typeof evt.text === "string" && evt.text.length > 0) {
           emittedAnyText = true;
+          textDeltaSeenThisTurn = true;
           yield evt.text;
         } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
             if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+              if (textDeltaSeenThisTurn) continue;
               emittedAnyText = true;
               yield block.text;
             } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
@@ -428,6 +441,7 @@ async function consumeAndStreamSlack(
               };
             }
           }
+          textDeltaSeenThisTurn = false;
         } else if (evt.type === "user" && evt.message && typeof evt.message === "object") {
           // The Claude Agent SDK delivers tool results inside a `user` role
           // message wrapper. content[] holds tool_result blocks correlated
@@ -590,6 +604,11 @@ async function consumeAndEditDiscord(
   let hasPosted = false;
   let postFailed = false;
   let resultEventCount = 0;
+  // See note in consumeAndStreamSlack: the Claude SDK runner emits both
+  // text_delta deltas AND a final `assistant` message with the same text.
+  // Skip the assistant text blocks when text_delta already streamed the
+  // turn so responseText doesn't accumulate the same content twice.
+  let textDeltaSeenThisTurn = false;
 
   // Show Discord's native typing indicator so the user sees
   // immediate feedback while the agent generates its reply. Mirrors
@@ -627,22 +646,25 @@ async function consumeAndEditDiscord(
         // Streaming runner path: per-token deltas accumulate into responseText.
         responseText += evt.text;
         chunksSinceFlush += 1;
+        textDeltaSeenThisTurn = true;
       } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
-        // Non-streaming runner path (Claude Agent SDK emits full messages,
-        // not text_delta chunks). Each `assistant` event carries one
-        // complete message in `message.content[].text`. Concatenate the
-        // text blocks from this turn into responseText so the final
-        // flush has something to post. Multi-turn runs emit multiple
-        // assistant events, each with its own message_id and content —
-        // appending preserves the chronological order of the agent's
-        // turns.
+        // Non-streaming-runner fallback. The Claude Agent SDK emits BOTH
+        // text_delta deltas (when the runner forwards them via emit) AND
+        // a final `assistant` message carrying the full text. If
+        // text_delta already streamed this turn, drop the duplicate text
+        // blocks here — otherwise we accumulate "HelloHello". Tool-only
+        // turns (assistant message with only tool_use blocks) don't carry
+        // text and are unaffected. Multi-turn runs emit multiple
+        // assistant events; the per-turn flag resets after each.
         const blocks = evt.message.content ?? [];
         for (const block of blocks) {
           if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+            if (textDeltaSeenThisTurn) continue;
             responseText += block.text;
             chunksSinceFlush += 1;
           }
         }
+        textDeltaSeenThisTurn = false;
       } else if (evt.type === "error") {
         const errorText = typeof evt.message === "string" ? evt.message : "error";
         if (!postFailed) {
