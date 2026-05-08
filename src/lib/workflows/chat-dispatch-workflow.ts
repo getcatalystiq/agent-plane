@@ -508,19 +508,21 @@ async function consumeAndStreamSlack(
   const toolTitleById = new Map<string, string>();
 
   // The Claude Agent SDK runner emits BOTH per-token `text_delta` events
-  // (during streaming) AND a final `assistant` message carrying the same
-  // complete text in `content[].text`. Naively yielding both doubles the
-  // reply in Slack; naively skipping the assistant text removes a useful
-  // commit checkpoint that the Slack adapter's StreamingMarkdownRenderer
-  // relies on (it holds back any text past the last \n until the stream
-  // finishes — so the trailing punctuation of a single-paragraph reply
-  // would only land at renderer.finish() instead of mid-stream).
+  // AND a final `assistant` message carrying the same complete text in
+  // `content[].text`. Earlier revs tried to yield the suffix of the
+  // assistant text not already streamed via deltas (`textRemainderAfterDeltas`)
+  // plus a "\n" flush trigger. That worked when every delta arrived, but
+  // when deltas are partially dropped (writeChunkStep PR #62 swallows
+  // per-chunk errors; runner POST retries can exhaust), the prefix
+  // mismatch fell back to yielding the FULL assistant.text — which
+  // combined with the partial deltas already in the renderer's
+  // accumulated buffer produced a doubled / scrambled reply in Slack.
   //
-  // Resolution: yield the SUFFIX of the assistant text that wasn't
-  // already streamed as deltas. Empty in the steady-state (no double)
-  // and non-empty when the assistant carries trailing characters
-  // (final newline, post-tool punctuation) — which acts as the
-  // mid-stream commit trigger users perceive as "smooth".
+  // Current rule: deltas are the streaming source of truth. Skip text
+  // on assistant events when any delta arrived; only yield assistant.text
+  // for non-streaming runners (no deltas at all). The Slack adapter's
+  // `renderer.finish()` runs when this generator returns and flushes the
+  // trailing held-back line naturally — no manual "\n" trigger needed.
   let perTurnDeltaText = "";
 
   const textStream: AsyncIterable<string | EmittedStreamChunk> = (async function* () {
@@ -541,31 +543,16 @@ async function consumeAndStreamSlack(
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
             if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-              const remainder = textRemainderAfterDeltas(block.text, perTurnDeltaText);
-              // Force the Slack adapter's StreamingMarkdownRenderer to
-              // commit any text it's holding back. The renderer's
-              // `getCommittableText()` slices to the LAST `\n` and
-              // discards everything after — so a typical short single-
-              // paragraph reply (no `\n` anywhere) sits 100% buffered
-              // until `renderer.finish()` runs at end-of-stream, which
-              // only fires after the runner's `result` event traverses
-              // the WDK pipeline (~1-2s). User-perceived: "agent is
-              // done but Slack hangs."
+              // Streaming runners: rely on text_delta events. The
+              // assistant event's text is already covered (or partially
+              // covered with sporadic drops). Yielding it here would
+              // double the reply when deltas dropped under load.
               //
-              // Yielding "\n" here advances the renderer's accumulated
-              // tail past a newline boundary, getCommittableText now
-              // returns everything, the adapter calls
-              // chat.appendStream once, and Slack renders the full
-              // reply. The result event then only needs to run
-              // streamer.stop() — which is fast.
-              //
-              // Skip when the assistant text already ends with `\n`
-              // (no double-newline trailing whitespace).
-              const needsFlushTrigger = !block.text.endsWith("\n");
-              const toYield = remainder + (needsFlushTrigger ? "\n" : "");
-              if (toYield.length > 0) {
+              // Non-streaming runners: no deltas arrive — yield the
+              // assistant text once so the user gets a reply at all.
+              if (perTurnDeltaText.length === 0) {
                 emittedAnyText = true;
-                yield toYield;
+                yield block.text;
               }
             } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
               const title = block.name;
