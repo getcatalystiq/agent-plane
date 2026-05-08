@@ -38,7 +38,10 @@ import { NextRequest, after } from "next/server";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
 import { withErrorHandler } from "@/lib/api";
-import { findOrLoadSlackBotByTeamId } from "@/lib/platform/bot";
+import {
+  findOrLoadSlackBotByTeamId,
+  listSlackBotSigningSecrets,
+} from "@/lib/platform/bot";
 import { getDecryptedCredentials, type SlackCredentials } from "@/lib/platform/operations";
 import type { TenantId, AgentId } from "@/lib/types";
 
@@ -117,14 +120,54 @@ async function maybeHandleFirstTimeChallenge(
   ts: number,
   sigHeader: string | null,
 ): Promise<Response> {
+  // Slack's url_verification body has NO `team_id`, so we cannot look
+  // up a single bot to verify against. Try in order:
+  //   1. The legacy global env-var fallback (SLACK_SIGNING_SECRET) —
+  //      kept for the single-bot deploy + dual-accept rotation case.
+  //   2. Every enabled Slack bot's per-bot signing secret. The user has
+  //      already saved this app's credentials in admin BEFORE pasting
+  //      the URL into Event Subscriptions; the matching secret is in
+  //      the DB already. Brute force is bounded by the bot cache cap.
+  //
+  // Only echoes the `challenge` on a verified signature, and ONLY for
+  // body type === "url_verification" — never for real events. Same
+  // SEC-R2-001 posture as the prior global-fallback-only path.
   const env = getEnv();
-  const fallback = env.SLACK_SIGNING_SECRET;
-  if (!fallback) return unhandledResponse();
-  if (!(await verifySlackV0(rawBody, ts, sigHeader, fallback))) return unhandledResponse();
+  const candidates: Array<{ source: string; secret: string }> = [];
+  if (env.SLACK_SIGNING_SECRET) {
+    candidates.push({ source: "global_fallback", secret: env.SLACK_SIGNING_SECRET });
+  }
+  if (env.SLACK_SIGNING_SECRET_PREVIOUS) {
+    candidates.push({ source: "global_fallback_previous", secret: env.SLACK_SIGNING_SECRET_PREVIOUS });
+  }
+  try {
+    const perBot = await listSlackBotSigningSecrets();
+    for (const b of perBot) {
+      candidates.push({ source: `agent:${b.agentId}`, secret: b.signingSecret });
+    }
+  } catch (err) {
+    logger.warn("slack-webhook: listSlackBotSigningSecrets failed (challenge handshake)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
-  // Signature valid against the global fallback. Only respond to
-  // url_verification — anything else gets unhandled (we don't want to
-  // accept real events on the global secret bypass per SEC-R2-001).
+  if (candidates.length === 0) return unhandledResponse();
+
+  let matchedSource: string | null = null;
+  for (const c of candidates) {
+    if (await verifySlackV0(rawBody, ts, sigHeader, c.secret)) {
+      matchedSource = c.source;
+      break;
+    }
+  }
+
+  if (!matchedSource) {
+    logger.warn("slack-webhook: url_verification signature did not match any registered secret", {
+      candidates_tried: candidates.length,
+    });
+    return unhandledResponse();
+  }
+
   let parsed: SlackEventBody;
   try {
     parsed = JSON.parse(rawBody) as SlackEventBody;
@@ -132,7 +175,7 @@ async function maybeHandleFirstTimeChallenge(
     return unhandledResponse();
   }
   if (parsed.type === "url_verification" && typeof parsed.challenge === "string") {
-    logger.info("slack-webhook: first-time url_verification accepted via global fallback secret");
+    logger.info("slack-webhook: url_verification accepted", { source: matchedSource });
     return new Response(parsed.challenge, {
       status: 200,
       headers: { "Content-Type": "text/plain" },

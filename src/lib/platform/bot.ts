@@ -267,6 +267,57 @@ export function getBot(platform: ChatPlatform, agentId: AgentId): CachedBot | nu
   return botCache.get(botKey(platform, agentId)) ?? null;
 }
 
+/**
+ * Return every enabled Slack bot's signing secret, decrypted. Used by
+ * the webhook route's first-time `url_verification` handshake — Slack's
+ * challenge body has NO `team_id`, so we cannot identify which bot
+ * signed the request and must try each registered secret in turn.
+ *
+ * Output is unordered (insertion order of the cache is the only
+ * guarantee). Caller should iterate until one signature verifies. The
+ * common case is "one or two registered Slack bots", so the brute
+ * force is fine. We cap at the bot cache size (200) regardless.
+ *
+ * Failures to decrypt are skipped silently (best-effort) — the caller
+ * just won't be able to verify against that bot's secret.
+ */
+export async function listSlackBotSigningSecrets(): Promise<
+  Array<{ tenantId: TenantId; agentId: AgentId; signingSecret: string }>
+> {
+  const rows = await query(
+    BotRegistryRow,
+    `SELECT id, tenant_id, agent_id, platform, credentials_version, enabled, platform_identity
+       FROM platform_bot_configs
+      WHERE enabled = true AND platform = 'slack'
+      ORDER BY created_at ASC
+      LIMIT $1`,
+    [MAX_BOT_CACHE_ENTRIES],
+  );
+  const out: Array<{ tenantId: TenantId; agentId: AgentId; signingSecret: string }> = [];
+  for (const row of rows) {
+    try {
+      const creds = await getDecryptedCredentials(
+        row.tenant_id as TenantId,
+        row.agent_id as AgentId,
+        "slack",
+      );
+      if (!creds || creds.platform !== "slack") continue;
+      const slackCreds = creds as SlackCredentials;
+      out.push({
+        tenantId: row.tenant_id as TenantId,
+        agentId: row.agent_id as AgentId,
+        signingSecret: slackCreds.signingSecret,
+      });
+    } catch (err) {
+      logger.warn("listSlackBotSigningSecrets: decrypt skipped", {
+        agent_id: row.agent_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // refreshBots — system-scope query (RLS bypass), excludes credentials_enc
 // ---------------------------------------------------------------------------
