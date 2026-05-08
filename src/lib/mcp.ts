@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { getOrCreateComposioMcpServer } from "./composio";
 import { execute } from "@/db";
 import { logger } from "./logger";
@@ -5,9 +6,12 @@ import {
   getActiveConnections,
   getMcpServersByIds,
   getOrRefreshToken,
+  getTenantSlackAlertConfig,
   markConnectionFailed,
+  getCallbackBaseUrl,
 } from "./mcp-connections";
 import { validatePublicUrl } from "./mcp-oauth";
+import { postSlackMcpFailureAlert } from "./notifications/slack";
 import type { AgentInternal } from "./validation";
 import type { AgentId, TenantId, McpServerId, McpConnectionId } from "./types";
 
@@ -142,15 +146,67 @@ export async function buildMcpConfig(
             mcp_server_id: server?.id,
             error: msg,
           });
-          await markConnectionFailed(
-            conn.id as McpConnectionId,
-            tenantId as TenantId,
-          ).catch((markErr) => {
+          let transition: { was_active: boolean } | null = null;
+          try {
+            transition = await markConnectionFailed(
+              conn.id as McpConnectionId,
+              tenantId as TenantId,
+            );
+          } catch (markErr) {
             logger.warn("Failed to mark MCP connection as failed", {
               connection_id: conn.id,
               error: markErr instanceof Error ? markErr.message : String(markErr),
             });
-          });
+          }
+
+          // Slack alert on the active->failed transition only. Idempotent: a
+          // connection that was already 'failed' returns was_active=false and
+          // does not re-notify (R4). Fire-and-forget via `after()` so a slow
+          // or broken webhook never adds latency to the run start (R6).
+          if (transition?.was_active) {
+            const serverName = server?.name ?? "unknown";
+            const errorMessage = msg;
+            const agentId = agent.id;
+            const agentName = agent.name;
+            try {
+              after(async () => {
+                try {
+                  const config = await getTenantSlackAlertConfig(
+                    tenantId as TenantId,
+                  );
+                  if (!config) return;
+                  await postSlackMcpFailureAlert({
+                    webhookUrl: config.webhookUrl,
+                    tenantName: config.tenantName,
+                    agentName,
+                    agentId,
+                    serverName,
+                    errorMessage,
+                    baseUrl: getCallbackBaseUrl(),
+                  });
+                } catch (alertErr) {
+                  logger.warn("Slack alert dispatch failed", {
+                    agent_id: agentId,
+                    error:
+                      alertErr instanceof Error
+                        ? alertErr.message
+                        : String(alertErr),
+                  });
+                }
+              });
+            } catch (afterErr) {
+              // `after()` throws when called outside a request context (e.g.,
+              // ad-hoc scripts). The connection is still marked failed; we
+              // just don't get a Slack notification this run.
+              logger.warn("after() unavailable; Slack alert skipped", {
+                agent_id: agentId,
+                error:
+                  afterErr instanceof Error
+                    ? afterErr.message
+                    : String(afterErr),
+              });
+            }
+          }
         }
       }
     }

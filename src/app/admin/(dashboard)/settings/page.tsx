@@ -5,12 +5,17 @@ import { z } from "zod";
 import { CompanyForm } from "./company-form";
 import { ApiKeysSection } from "./api-keys-section";
 import { ClawSoulsSection } from "./clawsouls-section";
+import { SlackAlertsSection } from "./slack-alerts-section";
 import { DedupeRulesManager } from "./dedupe-rules-manager";
 import { DeleteCompanyButton } from "./delete-company-button";
 
 export const dynamic = "force-dynamic";
 
-const TenantWithTokenFlag = TenantRow.extend({ has_subscription_token: z.boolean(), has_clawsouls_token: z.boolean() });
+const TenantWithTokenFlag = TenantRow.extend({
+  has_subscription_token: z.boolean(),
+  has_clawsouls_token: z.boolean(),
+  has_slack_alert_webhook: z.boolean(),
+});
 
 export default async function SettingsPage() {
   const cookieStore = await cookies();
@@ -30,7 +35,8 @@ export default async function SettingsPage() {
             timezone, logo_url, subscription_base_url, subscription_token_expires_at,
             spend_period_start, created_at,
             subscription_token_enc IS NOT NULL AS has_subscription_token,
-            clawsouls_api_token_enc IS NOT NULL AS has_clawsouls_token
+            clawsouls_api_token_enc IS NOT NULL AS has_clawsouls_token,
+            slack_alert_webhook_url_enc IS NOT NULL AS has_slack_alert_webhook
      FROM tenants WHERE id = $1`,
     [tenantId],
   );
@@ -71,6 +77,12 @@ export default async function SettingsPage() {
 
       {/* ClawSouls Registry */}
       <ClawSoulsSection tenantId={tenant.id} hasToken={tenant.has_clawsouls_token} />
+
+      {/* Slack Alerts */}
+      <SlackAlertsSection
+        tenantId={tenant.id}
+        hasWebhook={tenant.has_slack_alert_webhook}
+      />
 
       {/* Webhook Dedupe Rules */}
       <DedupeRulesManager tenantId={tenant.id} />
