@@ -366,12 +366,10 @@ export const TenantRow = z.object({
   subscription_base_url: z.string().nullable().default(null),
   subscription_token_expires_at: z.coerce.string().nullable().default(null),
   spend_period_start: z.coerce.string(),
-  // Per-tenant workflow dispatch override deny-list. Keys match trigger names
-  // (api/schedule/webhook/a2a/cleanup/admin); values are booleans.
-  // Empty object = follow global env-var toggle. Tenant override wins when set.
-  workflow_dispatch_overrides: z
-    .record(z.string(), z.boolean())
-    .default({}),
+  // (Legacy `workflow_dispatch_overrides` JSONB removed from the schema —
+  // the column may still exist on the DB but no code reads it. The
+  // workflow-vs-legacy toggle no longer exists; all triggers run
+  // through the WDK workflow path unconditionally.)
   created_at: z.coerce.string(),
 });
 

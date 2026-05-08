@@ -22,9 +22,30 @@
  */
 
 import { logger } from "@/lib/logger";
-import { resolveCachedBot } from "@/lib/platform/bot";
-import type { ChatPlatform } from "@/lib/platform/operations";
+import { getOrCreateBot, type CachedBot } from "@/lib/platform/bot";
+import { getBotConfig, type ChatPlatform } from "@/lib/platform/operations";
 import type { TenantId, AgentId } from "@/lib/types";
+
+// Inlined `resolveCachedBot` — chat-dispatch-workflow.ts has the same
+// helper as a module-private function. Inlining here avoids exporting
+// it from a workflow file (which has sandbox constraints). Future
+// cleanup can hoist the helper into bot.ts so both files share one
+// definition.
+async function resolveCachedBot(
+  tenantId: TenantId,
+  agentId: AgentId,
+  platform: ChatPlatform,
+): Promise<CachedBot | null> {
+  const config = await getBotConfig(tenantId, agentId, platform);
+  if (!config) return null;
+  return getOrCreateBot({
+    tenantId,
+    agentId,
+    platform,
+    credentialsVersion: config.credentials_version,
+    platformIdentity: config.platform_identity,
+  });
+}
 
 interface ChannelPostingAdapter {
   postChannelMessage?: (channelId: string, message: string) => Promise<unknown>;

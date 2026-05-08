@@ -20,6 +20,8 @@ A multi-tenant platform for running AI agents in isolated Vercel Sandboxes, expo
 
 The legacy `runs` table and `/api/runs*` surface were dropped at cutover (migration `033_runs_sessions_unify.sql`). Historical run rows were not migrated — every prior run is gone, and any external `/api/runs/:id` URLs return 404. Sessions own all execution from this point forward.
 
+The legacy in-process dispatch path (`dispatchSessionMessage()` direct calls + the `WORKFLOW_DISPATCH_*` env toggles + `LEGACY_DISPATCH_GLASS_BREAK` + `tenants.workflow_dispatch_overrides`) was retired alongside the chat-platform-bots work. All six triggers (api/admin/schedule/webhook/a2a/cleanup) now run through the WDK workflow path unconditionally via `dispatchOrWorkflowDispatch()` in `src/lib/workflows/dispatch-shim.ts`. The `dispatchSessionMessage` function still exists as an internal helper used by the workflow steps, but no public route calls it directly. The toggle file (`src/lib/workflows/toggle.ts`) was deleted; the per-tenant override JSONB column on `tenants` is no longer read (column kept on disk; cleanup is a separate DROP COLUMN migration).
+
 ### Execution flow (unified)
 
 Every execution — public REST, schedule cron, webhook delivery, A2A — funnels through the single dispatch chokepoint `dispatchSessionMessage()` in `src/lib/dispatcher.ts`:

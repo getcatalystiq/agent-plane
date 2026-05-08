@@ -97,15 +97,21 @@ vi.mock("@/lib/webhook-dedupe", () => ({
 }));
 
 vi.mock("@/lib/dispatcher", () => ({
+  // Kept here so call sites that still import `dispatchSessionMessage` from
+  // the dispatcher don't fail to resolve. The webhook route no longer calls
+  // it directly — it goes through `dispatchOrWorkflowDispatch` (mocked
+  // below). The mock identity is reused so the legacy assertion we'll
+  // re-route still has a target.
   dispatchSessionMessage: mocks.dispatchSessionMessage,
 }));
 
-// U8: webhook route now goes through dispatchOrWorkflowDispatch. Stub the
-// shim's shouldUseWorkflow to deterministic-false so the legacy path
-// (dispatchSessionMessage above) is taken — this test file pins the
-// legacy contract; workflow-path coverage lives in dispatch-shim tests.
-vi.mock("@/lib/workflows/toggle", () => ({
-  shouldUseWorkflow: vi.fn().mockResolvedValue(false),
+// Webhook route entry point — `dispatchOrWorkflowDispatch` is the unified
+// shim that always runs through the WDK workflow path now (legacy was
+// retired). We mock it directly and reuse the same `dispatchSessionMessage`
+// vi.fn() so the existing test assertions on call count translate cleanly.
+vi.mock("@/lib/workflows/dispatch-shim", () => ({
+  dispatchOrWorkflowDispatch: (...args: unknown[]) =>
+    mocks.dispatchSessionMessage(...args),
 }));
 
 vi.mock("@/lib/session-messages", () => ({
