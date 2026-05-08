@@ -131,6 +131,134 @@ export async function startChatDispatchWorkflow(
 }
 
 // ---------------------------------------------------------------------------
+// Bounded chat-consume state
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-iteration result for the bounded consume step. The workflow body
+ * loops on these results, re-invoking the step from `nextIndex` with
+ * the updated `state` until `done` is true.
+ *
+ * `done`        — set when the inner readable yielded a terminal event
+ *                 (`result` / `error` / `kind: "terminal"`) OR when the
+ *                 readable closed naturally (rare; means the inner run
+ *                 finished without us seeing a terminal — treated as a
+ *                 silent end).
+ * `sawTerminal` — true only on the terminal-event path. Drives the
+ *                 zombie-cancel guard in the workflow body: if the body
+ *                 exits without sawTerminal, we fire a cancel against
+ *                 the inner run so it doesn't churn for another 12 min.
+ */
+export interface ChatConsumeStepResult {
+  nextIndex: number;
+  state: ChatConsumeState;
+  done: boolean;
+  sawTerminal: boolean;
+}
+
+/**
+ * Serializable consume-side state that survives WDK step boundaries.
+ *
+ * The workflow body holds this between successive `consumeAndPostStep`
+ * invocations and threads it back in. WDK serializes step inputs and
+ * outputs via JSON-friendly serde; everything here is plain data
+ * (no Maps, Sets, or class instances).
+ *
+ * Fields are platform-mixed because the workflow body doesn't know the
+ * platform until startInnerDispatchStep returns and it routes into
+ * `consumeAndPostStep`. Slack ignores the Discord-only fields and
+ * vice versa.
+ */
+export interface ChatConsumeState {
+  // Common — accumulated across iterations
+  /** Full agent reply text accumulated so far (delta + assistant). */
+  responseText: string;
+  /** Chars sealed into prior (rolled-over / posted) messages. The
+   *  current open message displays `responseText.slice(committedLength)`. */
+  committedLength: number;
+  /** Per-turn delta accumulator for the assistant-event remainder
+   *  logic. Cleared on each assistant event end. */
+  perTurnDeltaText: string;
+  /** tool_use_id -> tool name (for task_update titles on tool_result
+   *  arrival or terminal sweep). */
+  toolTitles: Record<string, string>;
+  /** tool_use ids that have NOT yet received a tool_result. Swept on
+   *  terminal so the Slack StreamingPlan UI doesn't render stale
+   *  in_progress tasks as red ⚠️ failures. */
+  openToolIds: string[];
+  /** Set when any text has been emitted to the platform (text_delta
+   *  or assistant.text). Used by the empty-readable guard. */
+  emittedAnyText: boolean;
+  /** Captured `result.result` text when the runner only emitted a
+   *  final result (no streaming text). Used as the post body for the
+   *  result-fallback path. */
+  resultFallbackText: string | null;
+  /** Sticky agent-error message string. When set on terminal, the
+   *  finalize step calls markBotError. */
+  sawAgentError: string | null;
+
+  // Discord-only — Slack iterations ignore these.
+  /** Discord: id of the currently-open Slack/Discord message, or null
+   *  when we've sealed and the next post creates a new one. */
+  messageId: string | null;
+  /** Discord: have we successfully posted at least one message yet? */
+  hasPosted: boolean;
+  /** Discord: sentinel set after any post fails (avoids cascade fails). */
+  postFailed: boolean;
+  /** Discord: chunks accumulated since the last platform post (drives
+   *  flush gate). */
+  chunksSinceFlush: number;
+  /** Discord: chunks remaining in a 429-driven backoff. */
+  backoffChunks: number;
+  /** Discord: count of `result` events seen (used by empty-readable
+   *  guard). */
+  resultEventCount: number;
+}
+
+function initialChatConsumeState(): ChatConsumeState {
+  return {
+    responseText: "",
+    committedLength: 0,
+    perTurnDeltaText: "",
+    toolTitles: {},
+    openToolIds: [],
+    emittedAnyText: false,
+    resultFallbackText: null,
+    sawAgentError: null,
+    messageId: null,
+    hasPosted: false,
+    postFailed: false,
+    chunksSinceFlush: 0,
+    backoffChunks: 0,
+    resultEventCount: 0,
+  };
+}
+
+/**
+ * Wall-clock budget per consume step iteration. The workflow body
+ * re-invokes consumeAndPostStep until terminal, so this need only be
+ * comfortably below the function host's actual cap (Vercel docs say
+ * 800s on Pro Fluid, but we observed an empirical 120s wall on the
+ * queue HTTP callback path — see PR #84). 60s leaves plenty of
+ * headroom for the wind-down (close Slack stream, save state)
+ * regardless of which cap is real.
+ */
+const CONSUME_STEP_DEADLINE_MS = 60_000;
+
+/**
+ * Read-side quiet timeout: if the inner readable hasn't yielded a
+ * chunk in this long inside one step iteration, we exit with done:
+ * false so the workflow body can re-enter with a fresh deadline. The
+ * inner run is presumed still active (hot path: the agent is
+ * thinking); the cancel guard fires only when the body decides to
+ * stop the loop without sawTerminal.
+ *
+ * Without this, a long agent thinking pause inside one iteration
+ * would deplete the deadline budget on a single read() call.
+ */
+const CONSUME_STEP_QUIET_MS = 12_000;
+
+// ---------------------------------------------------------------------------
 // Workflow body
 // ---------------------------------------------------------------------------
 
@@ -175,43 +303,87 @@ export async function chatDispatchWorkflow(
 
   if (started.kind === "abandoned") return;
 
-  // 4. Stream consumption + posting moved into a step. WDK forbids
-  //    `getRun()` from inside a `"use workflow"` body — the runtime
-  //    throws USER_ERROR with "The workflow environment doesn't allow
-  //    this runtime usage of getRun". The chat workflow originally did
-  //    the iteration inline for replay-deterministic step boundaries,
-  //    but that pattern conflicts with the WDK runtime rule. The step
-  //    captures the entire iterate-and-post lifecycle; durability now
-  //    sits at the step boundary (a function-host crash mid-stream
-  //    restarts the whole step, which re-reads from index 0 of the
-  //    inner workflow's readable).
+  // 4. Stream consumption — looped from the workflow body across many
+  //    bounded sub-step invocations. Each consumeAndPostStep call:
+  //      - reads from getReadable({ startIndex }) to resume where the
+  //        prior iteration left off
+  //      - processes events for at most CONSUME_STEP_DEADLINE_MS
+  //      - returns { nextIndex, state, done, sawTerminal }
   //
-  //    Trade-off accepted: less granular durability vs. correctness.
-  //    A future PR can re-add per-chunk replay determinism by passing
-  //    `startIndex` between successive consumeAndPostStep retries
-  //    (WDK supports getReadable({ startIndex })).
-  // consumeAndPostStep also runs the markBotEvent tail at the end,
-  // collapsing what used to be a separate finalizeChatStep boundary.
-  const consumeResult = await consumeAndPostStep(input, started.innerRunId, started.kind === "orphan");
+  //    Why this shape: PR #84's zombie-cancel guard handled the
+  //    *symptom* of `consumeAndPostStep` getting cut off at the
+  //    Vercel function host's queue-callback cap (~120s in practice
+  //    even on Pro Fluid). The body-loop pattern here is the
+  //    *architectural* fix — a workflow body has no per-function
+  //    timeout (only the WDK 4h run TTL), so the body can re-invoke
+  //    a fresh bounded step indefinitely until the agent reply
+  //    actually terminates. A 14-minute Slack reply now renders fully
+  //    instead of being silently truncated mid-token.
+  //
+  //    Trade-off (intentional, documented in U0 spike):
+  //      - Each step boundary forces a fresh Slack chat.startStream
+  //        on the next iteration → one new Slack message per ~60s.
+  //        The user already sees this rollover behavior at 90s
+  //        (slack-streamer's existing soft cap); we're just making
+  //        seams a bit more frequent. Discord's post-then-edit loop
+  //        threads `state.messageId` through, so its UX is unchanged.
+  //      - A function-host crash mid-iteration restarts that single
+  //        iteration from `state` — the Slack message it was filling
+  //        gets duplicated, but every prior sealed message is intact.
+  //
+  //    Replay-determinism note: WDK replays the workflow body on
+  //    function recycle by walking the event log of completed steps.
+  //    Each consumeAndPostStep call is one event, so the loop length
+  //    is bounded by the number of step calls we ever made (typically
+  //    1–15 for normal-length replies). Replay must finish within
+  //    REPLAY_TIMEOUT_MS (240s in WDK 4.2.x), so the loop scales to
+  //    ~hundreds of iterations before that becomes a concern.
+  let consumeIndex = 0;
+  let consumeState: ChatConsumeState = initialChatConsumeState();
+  let consumeDone = false;
+  let sawTerminal = false;
 
-  // 5. Zombie-cancel guard. If consumeAndPostStep returned without
-  //    observing a terminal (`result` / `error` / `kind: "terminal"`)
-  //    event, the chat function bailed early — most commonly because
-  //    Vercel's function host hit maxDuration mid-stream (a 120s wall
-  //    on Pro Lambda; up to 800s on Pro Fluid; either is reachable on
-  //    a marathon agent reply). The chat workflow run terminates here,
-  //    but the *inner* dispatch workflow is a separate WDK run on
-  //    independent function lifecycles — its writeChunkSteps keep
-  //    firing for the FULL agent runtime (we observed 12-min zombies
-  //    where the user-visible reply ended at 2:00 but the inner run
-  //    churned to 14:00, burning sandbox minutes, transcript blob
-  //    bytes, and tenant budget on output the user never saw).
-  //
-  //    Cancel the inner run here so the dispatcher's finalize path
+  while (!consumeDone) {
+    const result = await consumeAndPostStep(
+      input,
+      started.innerRunId,
+      started.kind === "orphan",
+      consumeIndex,
+      consumeState,
+    );
+    consumeState = result.state;
+    consumeIndex = result.nextIndex;
+    consumeDone = result.done;
+    sawTerminal = result.sawTerminal;
+  }
+
+  // 5. Finalize delivery: reaction swap (👀 → ✅/❌) + markBotEvent.
+  //    Lives in its own step because reactions and DB writes are I/O
+  //    and must run in step context, not the workflow body. Used to be
+  //    folded into the consume step's finally block, but with the loop
+  //    now driving multiple iterations there's no single "this is the
+  //    last iteration" point inside the consume step — the body knows
+  //    when the loop exits.
+  await finalizeChatDeliveryStep(input, sawTerminal, consumeState);
+
+  // 6. Zombie-cancel guard. If the body exited the loop without
+  //    observing a terminal event, the inner dispatch workflow may
+  //    still be running. Cancel it so the dispatcher's finalize path
   //    runs promptly (sandbox stop, message status mark) instead of
   //    waiting for the cleanup-sessions watchdog (`max_runtime + 120s`
   //    grace, 720s default).
-  if (!consumeResult.sawTerminal) {
+  //
+  //    Reachable cases:
+  //      - The loop terminated because reader.read() returned done
+  //        without a terminal event (rare; would mean the inner run
+  //        completed via cancel/expiry).
+  //      - A future bug in the consume step exits the body abnormally.
+  //
+  //    With the loop's wall-clock unboundedness, the original "chat
+  //    function killed at 120s" path that motivated this guard in
+  //    PR #84 should no longer occur. Keeping the guard as belt-and-
+  //    suspenders is cheap.
+  if (!sawTerminal) {
     await cancelInnerRunStep(started.innerRunId, input.tenantId, input.agentId);
   }
 }
@@ -230,49 +402,76 @@ type StartedDispatch =
   | { kind: "orphan"; innerRunId: string };
 
 /**
- * Consume the inner dispatchWorkflow's NDJSON readable and post chunks
- * to the chat platform. WDK forbids `getRun()` from inside a workflow
- * body — it must run inside a step. The step owns the entire iterate-
- * and-post lifecycle so the workflow body stays in pure orchestration
- * mode.
+ * Consume one bounded slice of the inner dispatchWorkflow's NDJSON
+ * readable and post any text/structured chunks to the chat platform.
  *
- * State machine (was inlined in the workflow body before WDK runtime
- * rejected the inline getRun() call):
+ * Each invocation is bounded by `CONSUME_STEP_DEADLINE_MS` (60s by
+ * default). The workflow body loops these calls, threading
+ * `startIndex` and `state` through, until the iteration returns
+ * `done: true` (terminal observed OR the inner readable closed).
  *
- *   responseText     — accumulated full agent reply.
+ * WDK forbids `getRun()` inside a `"use workflow"` body — `getReadable`
+ * must run inside a step. This function is that step. The body's
+ * loop is the architectural fix that survives any function-host
+ * timeout cap (Vercel's queue-callback path empirically dies at
+ * ~120s; Pro Fluid's documented max is 800s; either is reachable on
+ * a marathon agent reply). One bounded step iteration vastly under
+ * either cap, re-invoked many times, equals unbounded total runtime.
+ *
+ * State machine (now externalized into ChatConsumeState so it
+ * survives between iterations):
+ *
+ *   responseText     — accumulated full agent reply (across all
+ *                      iterations; not reset per iteration).
  *   committedLength  — chars sealed into PRIOR (rolled-over) messages.
- *                      Advances ONLY on rollover, never on edit. The
- *                      open (current) message displays
+ *                      Advances ONLY on rollover. The open (current)
+ *                      message displays
  *                      responseText.slice(committedLength).
- *   messageId        — id of the open message (null = no open message,
- *                      next post creates one). Goes null on rollover.
- *   chunksSinceFlush — # text_delta chunks since the last successful
- *                      post/edit. Replaces the wall-clock edit gate
- *                      so replay hits the same step boundaries.
+ *   messageId        — Discord-only: id of the open message
+ *                      (null = no open message, next post creates one).
+ *                      Slack opens a fresh chat.startStream every
+ *                      iteration so this is unused there.
+ *   openToolIds      — tool_uses without a matching tool_result.
+ *                      Swept to "complete" on terminal so Slack's
+ *                      StreamingPlan UI doesn't render stale red ⚠️
+ *                      icons (sub-agent tool path).
  *
- * Durability trade-off: a function-host crash mid-stream restarts the
- * whole step, which re-reads from index 0 of the inner readable. WDK
- * step-result caching means a completed step is replayed verbatim, so
- * normal replays don't re-post. A future PR can re-add per-chunk
- * granularity by passing `startIndex` between successive consume
- * retries (WDK supports `getReadable({ startIndex })`).
+ * Slack iteration shape (one new chat.startStream per call):
+ *   - Open a stream session for THIS iteration only.
+ *   - Read events until deadline OR terminal.
+ *   - Close the stream cleanly. The next iteration opens a new one,
+ *     which Slack renders as a fresh message (visible seam — same as
+ *     the existing 90s-soft-cap rollover, just more frequent).
+ *
+ * Discord iteration shape (continuous post-then-edit):
+ *   - Reuses `state.messageId` across iterations: a single Discord
+ *     message keeps growing via .editMessage until it hits the
+ *     character cap and rolls over to a fresh post. The state
+ *     threading preserves the existing UX exactly.
+ *
+ * Durability trade-off: a function-host crash mid-iteration restarts
+ * THAT iteration only, re-reading from `startIndex`. Prior iterations
+ * are sealed in WDK's event log and not replayed. The Slack message
+ * being filled when the crash happened gets duplicated; everything
+ * before is intact.
  */
 async function consumeAndPostStep(
   input: ChatTriggerInput,
   innerRunId: string,
   isOrphan: boolean,
-): Promise<{ sawTerminal: boolean }> {
+  startIndex: number,
+  state: ChatConsumeState,
+): Promise<ChatConsumeStepResult> {
   "use step";
 
   // Same anti-retry posture as startInnerDispatchStep: a throw out of
   // this step triggers WDK's auto-retry with multi-minute backoff,
   // which on the chat path means the user sits waiting on Slack with
   // no reply while WDK respawns the step. Better to log + return
-  // cleanly so the run finalizes and the user gets a clear error
-  // signal (the existing 👀→❌ swap in the inner finally still fires
-  // because the inner try/finally is intact below).
+  // cleanly with done:true so the workflow body exits the loop and
+  // the cancel guard fires.
   try {
-    return await consumeAndPostStepBody(input, innerRunId, isOrphan);
+    return await consumeAndPostStepBody(input, innerRunId, isOrphan, startIndex, state);
   } catch (err) {
     logger.error("consumeAndPostStep: caught — returning cleanly (no WDK retry)", {
       tenant_id: input.tenantId,
@@ -280,13 +479,15 @@ async function consumeAndPostStep(
       platform: input.platform,
       thread_key: input.threadKey,
       inner_run_id: innerRunId,
+      start_index: startIndex,
       error_name: err instanceof Error ? err.constructor.name : "unknown",
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
-    // The catch path means we never observed a terminal — the workflow
-    // body's cancel guard will kill the inner run so we don't leak.
-    return { sawTerminal: false };
+    // Force loop exit on caught error so we don't tight-loop on a
+    // deterministic throw. The workflow body's cancel guard kills the
+    // inner run since sawTerminal stays false.
+    return { nextIndex: startIndex, state, done: true, sawTerminal: false };
   }
 }
 
@@ -294,11 +495,14 @@ async function consumeAndPostStepBody(
   input: ChatTriggerInput,
   innerRunId: string,
   isOrphan: boolean,
-): Promise<{ sawTerminal: boolean }> {
-  if (isOrphan) {
-    // Inner workflow is running but the placeholder UPDATE failed.
-    // Cleanup sweep reaps the row at the 15min TTL; retries for the
-    // same event_id will INSERT cleanly after that.
+  startIndex: number,
+  state: ChatConsumeState,
+): Promise<ChatConsumeStepResult> {
+  // The orphan log used to fire once at the start of the (single)
+  // consume step; with the body-loop pattern it would fire on every
+  // iteration, which is noisy. Only log on the first iteration
+  // (startIndex === 0) so existing observability stays unchanged.
+  if (isOrphan && startIndex === 0) {
     logger.warn("consumeAndPostStep: continuing with orphan placeholder", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
@@ -307,48 +511,14 @@ async function consumeAndPostStepBody(
     });
   }
 
-  // The 👀 receipt reaction + "Thinking…" status are added by
-  // ackReceiptStep, which runs in parallel with the dispatch dance so
-  // the user sees feedback within ~500ms instead of 2-3s. Here we just
-  // run the consumption and swap the receipt for ✅/❌ at the end.
-
-  // Platform fork: Slack has a native streaming API on its Chat SDK
-  // adapter (`adapter.stream(threadId, asyncIterable, options)`) that
-  // posts a single message and incrementally extends it as text chunks
-  // arrive — backed by Slack's chat.startStream / chat.appendStream /
-  // chat.stopStream APIs. It also drives Slack's own typing-style
-  // indicator throughout the stream lifecycle. Discord has no
-  // equivalent; we keep its existing post-then-edit loop.
-  let success = false;
-  let sawTerminal = false;
-  try {
-    const result = input.platform === "slack"
-      ? await consumeAndStreamSlack(input, innerRunId)
-      : await consumeAndEditDiscord(input, innerRunId);
-    sawTerminal = result.sawTerminal;
-    success = true;
-  } finally {
-    // Swap the receipt reaction for the terminal status. Best-effort
-    // (reactions are decorative; failures don't bubble).
-    await safeRemoveReaction(input, REACTION_RECEIPT);
-    await safeAddReaction(input, success ? REACTION_DONE : REACTION_ERROR);
-
-    // markBotEvent tail — was its own step boundary (finalizeChatStep)
-    // before; folded in here to skip a WDK step round-trip on every chat
-    // run. Best-effort write; the operator UI surfaces last_event but a
-    // failure here doesn't affect the user-visible reply.
-    try {
-      await markBotEvent(input.tenantId, input.agentId, input.platform);
-    } catch (err) {
-      logger.error("consumeAndPostStep: markBotEvent failed", {
-        tenant_id: input.tenantId,
-        agent_id: input.agentId,
-        platform: input.platform,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  return { sawTerminal };
+  // Platform fork. Slack has a native streaming API on its Chat SDK
+  // adapter; Discord uses post-then-edit. Each helper takes the
+  // current `state` and `startIndex`, runs ONE bounded iteration, and
+  // returns the updated values for the workflow body to thread into
+  // the next call.
+  return input.platform === "slack"
+    ? await consumeAndStreamSlack(input, innerRunId, startIndex, state)
+    : await consumeAndEditDiscord(input, innerRunId, startIndex, state);
 }
 
 // Slack/Discord both accept emoji shortcodes (no colons) on their
@@ -413,30 +583,41 @@ async function safeRemoveReaction(input: ChatTriggerInput, emoji: string): Promi
 }
 
 /**
- * Slack streaming path. Builds an `AsyncIterable<string>` from the
- * inner workflow's NDJSON readable (yielding text from text_delta
- * deltas when the runner is streaming, or from `assistant.content[].text`
- * blocks for non-streaming runners) and feeds it to
- * `adapter.stream(threadKey, asyncIterable, opts)`.
+ * Slack streaming path — bounded single iteration.
  *
- * On a runner that emits per-token `text_delta` events
- * (Claude Agent SDK with `includePartialMessages: true`), the user
- * sees the message materialize word-by-word in Slack's native
- * streaming UI — same effect as Slack's own AI assistant features.
+ * One invocation runs for at most CONSUME_STEP_DEADLINE_MS, opens a
+ * single chat.startStream session for the duration, posts events as
+ * they arrive, and closes the stream cleanly on exit. Returns the
+ * updated `state` and `nextIndex` so the workflow body can re-invoke
+ * with the next slice.
  *
- * On a runner that emits only one final `assistant` event, the
- * AsyncIterable yields one big chunk and Slack still renders it
- * via the streaming UI (typing indicator → final message).
+ * Each iteration creates a fresh Slack message (chat.startStream
+ * returns a new ts every time). The user sees rollover seams between
+ * iterations — same UX as the existing `slack-streamer` rollover, just
+ * driven by step boundaries instead of the streamer's internal
+ * 90s soft / 150s hard caps.
  *
- * Slack's stream API requires `recipientUserId` and `recipientTeamId`
- * for the AI assistant context. We pull them from `input.authorId`
- * (the Slack user who @-mentioned the bot) and the cached bot's
- * `slackTeamId` (populated when the bot was loaded into the registry).
+ * Behavior:
+ * - Reads from getReadable({ startIndex: state.startIndex }) — picks
+ *   up where the prior iteration left off.
+ * - Tracks per-iteration delta-vs-assistant logic via `state.perTurnDeltaText`
+ *   (resets on assistant turn end, not on iteration boundary).
+ * - Sticky-state fields (sawAgentError, emittedAnyText, resultFallbackText,
+ *   responseText, committedLength) are restored from `state` and updated.
+ * - On terminal (`result` / `error`): sweeps openToolIds (open tool_uses
+ *   that never got a tool_result, e.g. sub-agent path) so Slack's
+ *   StreamingPlan UI doesn't render stale red ⚠️ icons.
+ *
+ * Post-stream guards (markBotError on agent-emitted error, empty-readable
+ * acknowledgement, result-fallback post) run only on `done: true` so they
+ * fire exactly once per chat reply, not per iteration.
  */
 async function consumeAndStreamSlack(
   input: ChatTriggerInput,
   innerRunId: string,
-): Promise<{ sawTerminal: boolean }> {
+  startIndex: number,
+  state: ChatConsumeState,
+): Promise<ChatConsumeStepResult> {
   const cached = await resolveCachedBot(input.tenantId, input.agentId, "slack");
   if (!cached) {
     logger.error("consumeAndStreamSlack: bot config missing", {
@@ -446,9 +627,9 @@ async function consumeAndStreamSlack(
     });
     await markBotErrorStep(input, "bot_config_missing");
     // bot config errors are NOT a "didn't see terminal" condition — there's
-    // no inner run to cancel because we never started consuming. Treat as
-    // terminal so the caller doesn't try to cancel.
-    return { sawTerminal: true };
+    // no inner run to cancel because we never started consuming. Force
+    // loop exit with sawTerminal so the cancel guard doesn't fire.
+    return { nextIndex: startIndex, state, done: true, sawTerminal: true };
   }
 
   // We bypass `adapter.stream` and call `client.chatStream` directly via the
@@ -462,66 +643,31 @@ async function consumeAndStreamSlack(
       tenant_id: input.tenantId,
       agent_id: input.agentId,
     });
-    return await consumeAndEditDiscord(input, innerRunId);
+    return await consumeAndEditDiscord(input, innerRunId, startIndex, state);
   }
 
-  // The "Thinking…" status / typing indicator was hoisted to
-  // ackReceiptStep so it fires in parallel with the dispatch dance.
-
-  const readable = getRun<string>(innerRunId).getReadable<string>();
-
-  // Track stream-driver state across the AsyncIterable so the post-
-  // stream guards (markBotError on agent-emitted error, empty-readable
-  // acknowledgement) have the necessary context.
-  let sawAgentError: string | null = null;
-  let emittedAnyText = false;
-  let resultFallbackText: string | null = null;
-  // Set when the readable yielded a terminal-class event (`result` or
-  // `error`). If this stays false on exit, the caller knows the chat
-  // function is bailing early — most likely because the host hit a
-  // function maxDuration cap (Pro Lambda's ~120s, or Pro Fluid's 800s on
-  // a marathon agent reply). Used to drive the inner-run cancel guard so
-  // we don't leave a 12-minute zombie inner workflow churning compute
-  // and storage on a reply the user already gave up on.
+  // Resume from prior iteration's state, then track local mutations.
+  // Sticky-across-iterations: sawAgentError, emittedAnyText, resultFallbackText.
+  // These move back into `state` at the bottom of the function.
+  let sawAgentError: string | null = state.sawAgentError;
+  let emittedAnyText = state.emittedAnyText;
+  let resultFallbackText: string | null = state.resultFallbackText;
   let sawTerminal = false;
+  let perTurnDeltaText = state.perTurnDeltaText;
 
-  // Tool-call task tracking. When the agent emits a tool_use block, we
-  // emit a TaskUpdateChunk with status "in_progress" so Slack's
-  // StreamingPlan UI shows the tool call as a visible step. When the
-  // matching tool_result arrives (in a subsequent `user` role message),
-  // we emit status "complete" (or "error" when is_error=true) with the
-  // same id. Without this, multi-tool agent runs look like a long pause
-  // between text chunks; with it, the user sees "🔧 search_docs(...) → ✅"
-  // while the agent works.
-  //
-  // openToolIds tracks tool_uses that have NOT yet received a tool_result.
-  // The Claude Agent SDK's `Agent` (sub-agent) tool does not always emit a
-  // standard tool_result block — the sub-agent's output gets folded back
-  // into the parent's next assistant turn instead. Without a flush, those
-  // tool_use task_updates stay at "in_progress" forever; Slack renders
-  // stale tasks with a red ⚠️ icon, masquerading as failures. On the
-  // result/terminal event we sweep openToolIds and emit "complete" for
-  // anything that never resolved, so the UI lands on a clean state.
-  const toolTitleById = new Map<string, string>();
-  const openToolIds = new Set<string>();
+  // Hydrate Map/Set from the serialized state.
+  const toolTitleById = new Map<string, string>(Object.entries(state.toolTitles));
+  const openToolIds = new Set<string>(state.openToolIds);
 
-  // The Claude Agent SDK runner emits BOTH per-token `text_delta` events
-  // AND a final `assistant` message carrying the same complete text in
-  // `content[].text`. Earlier revs tried to yield the suffix of the
-  // assistant text not already streamed via deltas (`textRemainderAfterDeltas`)
-  // plus a "\n" flush trigger. That worked when every delta arrived, but
-  // when deltas are partially dropped (writeChunkStep PR #62 swallows
-  // per-chunk errors; runner POST retries can exhaust), the prefix
-  // mismatch fell back to yielding the FULL assistant.text — which
-  // combined with the partial deltas already in the renderer's
-  // accumulated buffer produced a doubled / scrambled reply in Slack.
-  //
-  // Current rule: deltas are the streaming source of truth. Skip text
-  // on assistant events when any delta arrived; only yield assistant.text
-  // for non-streaming runners (no deltas at all). The Slack adapter's
-  // `renderer.finish()` runs when this generator returns and flushes the
-  // trailing held-back line naturally — no manual "\n" trigger needed.
-  let perTurnDeltaText = "";
+  let nextIndex = startIndex;
+  const deadline = Date.now() + CONSUME_STEP_DEADLINE_MS;
+  let lastReadAt = Date.now();
+  // Set true when we deliberately stop iterating because we hit the
+  // deadline — distinguishes "ran out of budget, body should re-invoke"
+  // from "saw terminal" / "readable closed naturally".
+  let exitedDueToDeadline = false;
+
+  const readable = getRun<string>(innerRunId).getReadable<string>({ startIndex });
 
   // P5 — coalesce yields: bunching small text_deltas before they cross the
   // streamToSlack boundary collapses N small `streamer.append` awaits into
@@ -541,8 +687,26 @@ async function consumeAndStreamSlack(
     }
     try {
       while (true) {
+        // Bounded-iteration guards. The body re-invokes with our
+        // returned `nextIndex` so deferred chunks are not dropped.
+        if (Date.now() > deadline) {
+          exitedDueToDeadline = true;
+          break;
+        }
+        // Quiet timeout: if the readable hasn't yielded anything in
+        // CONSUME_STEP_QUIET_MS, exit cleanly so the body can re-enter
+        // with a fresh deadline. The agent is presumed still active
+        // (likely thinking); the cancel guard fires only when the
+        // body decides to stop the loop without sawTerminal.
+        if (Date.now() - lastReadAt > CONSUME_STEP_QUIET_MS) {
+          exitedDueToDeadline = true;
+          break;
+        }
+
         const { value, done } = await reader.read();
         if (done) break;
+        lastReadAt = Date.now();
+        nextIndex += 1;
         if (typeof value !== "string") continue;
         const evt = parseNdjsonLine(value);
         if (!evt) continue;
@@ -661,28 +825,32 @@ async function consumeAndStreamSlack(
           break;
         }
       }
-      // Sweep any tool_uses we never saw a tool_result for. The Claude
-      // Agent SDK's `Agent` (sub-agent) tool folds its output back into
-      // the parent's next assistant turn rather than emitting a discrete
-      // tool_result block, so the corresponding task_update we sent at
-      // status "in_progress" stays open. Slack's StreamingPlan UI renders
-      // stale in_progress tasks as a red ⚠️ — visually identical to a
-      // real failure. Closing them out here keeps the final card honest.
-      for (const openId of openToolIds) {
-        if (pendingText.length > 0) {
-          yield pendingText;
-          pendingText = "";
+      // Sweep tool_uses on TERMINAL ONLY. On a deadline-driven exit we
+      // want openToolIds to carry forward into the next iteration so a
+      // tool_result that arrives later can still close the matching
+      // task_update. Sweeping on deadline would mark every still-running
+      // tool as "complete", causing a flicker (complete then re-opens
+      // when the next iteration sees the SDK's tool_use again).
+      if (sawTerminal) {
+        for (const openId of openToolIds) {
+          if (pendingText.length > 0) {
+            yield pendingText;
+            pendingText = "";
+          }
+          const title = toolTitleById.get(openId) ?? openId;
+          yield {
+            type: "task_update",
+            id: openId,
+            title,
+            status: "complete",
+          };
         }
-        const title = toolTitleById.get(openId) ?? openId;
-        yield {
-          type: "task_update",
-          id: openId,
-          title,
-          status: "complete",
-        };
+        openToolIds.clear();
       }
-      openToolIds.clear();
-      // Drain any pending coalesced text on close.
+      // Drain any pending coalesced text on close. Safe even on
+      // deadline-exit — we yield the partial text now, and the next
+      // iteration's chat.startStream picks up from there in a fresh
+      // Slack message (visible seam, but no dropped bytes).
       if (pendingText.length > 0) {
         yield pendingText;
         pendingText = "";
@@ -693,6 +861,7 @@ async function consumeAndStreamSlack(
   })();
 
   let bytesYieldedAtFailure = 0;
+  let streamFailed = false;
   try {
     const result = await streamToSlack({
       bot: cached,
@@ -708,6 +877,7 @@ async function consumeAndStreamSlack(
     });
     bytesYieldedAtFailure = result.bytesYielded;
   } catch (err) {
+    streamFailed = true;
     // P3 — surface bytes-yielded so we can tell "Slack rejected our append"
     // (we yielded everything, API kicked us out) from "we never finished
     // yielding" (function host kill / readable closed early). The render
@@ -723,9 +893,8 @@ async function consumeAndStreamSlack(
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
-    // On stream failure, try a one-shot post so the agent's reply still
-    // lands somewhere visible. Use whatever text accumulated (sawAgent
-    // error gets appended as suffix). Best-effort.
+    // On stream failure inside this iteration, try a one-shot post so
+    // the agent's reply still lands somewhere visible. Best-effort.
     try {
       const fallbackText = resultFallbackText
         ?? (sawAgentError ? `_(agent stopped early: ${sawAgentError})_` : "_(agent reply unavailable)_");
@@ -742,113 +911,149 @@ async function consumeAndStreamSlack(
     } catch {
       // ignore — will be retried by user
     }
-    if (sawAgentError) await markBotErrorStep(input, sawAgentError);
-    return { sawTerminal };
   }
 
-  if (sawAgentError) {
-    await markBotErrorStep(input, sawAgentError);
-    return { sawTerminal };
-  }
+  // Save back the iteration's mutations into the state object so the
+  // body's next call resumes correctly.
+  const updatedState: ChatConsumeState = {
+    ...state,
+    perTurnDeltaText,
+    toolTitles: Object.fromEntries(toolTitleById),
+    openToolIds: [...openToolIds],
+    emittedAnyText,
+    resultFallbackText,
+    sawAgentError,
+  };
 
-  // Empty-readable guard. The stream completed but emitted no text and
-  // no fallback — surface the silent-bot UX.
-  if (!emittedAnyText && resultFallbackText === null) {
-    logger.warn("consumeAndStreamSlack: inner dispatch produced no output", {
-      tenant_id: input.tenantId,
-      agent_id: input.agentId,
-      thread_key: input.threadKey,
-      inner_run_id: innerRunId,
-      saw_terminal: sawTerminal,
-    });
-    try {
+  // Decide whether the body's loop should exit (`done: true`) or
+  // re-invoke (`done: false`).
+  //
+  //   sawTerminal=true                → done (terminal observed).
+  //   streamFailed=true               → done (don't loop on a broken
+  //                                     Slack stream; the fallback post
+  //                                     above already wrote what we had).
+  //   exitedDueToDeadline=true        → not done (re-invoke with new deadline).
+  //   exitedDueToDeadline=false &&
+  //     readable returned done        → done (rare; inner run ended
+  //                                     without a terminal event).
+  const done = sawTerminal || streamFailed || !exitedDueToDeadline;
+
+  // Post-stream guards run ONCE per chat reply — only on the
+  // last iteration (`done: true`) and only when we observed terminal
+  // (no point in firing the silent-bot guard if we exited because the
+  // body decided to stop without terminal — the cancel guard in the
+  // workflow body handles that case).
+  if (done && sawTerminal) {
+    if (sawAgentError) {
+      await markBotErrorStep(input, sawAgentError);
+    } else if (!emittedAnyText && resultFallbackText !== null) {
+      // Result-fallback path: non-streaming runner that yielded no
+      // assistant text but had a final `result` string. Post it as a
+      // single message (no stream).
       await postOrEditStep({
         tenantId: input.tenantId,
         agentId: input.agentId,
         platform: input.platform,
         threadId: input.threadKey,
-        text: "_(agent produced no output — please retry)_",
+        text: resultFallbackText,
         existingMessageId: null,
         seal: false,
         continuation: false,
       });
-    } catch (err) {
-      logger.error("consumeAndStreamSlack: empty-readable acknowledgement failed", {
+    } else if (!emittedAnyText && resultFallbackText === null) {
+      // Empty-readable guard: agent produced no output. Surface the
+      // silent-bot UX so the user gets some signal.
+      logger.warn("consumeAndStreamSlack: inner dispatch produced no output", {
         tenant_id: input.tenantId,
-        error: err instanceof Error ? err.message : String(err),
+        agent_id: input.agentId,
+        thread_key: input.threadKey,
+        inner_run_id: innerRunId,
       });
-      await markBotErrorStep(
-        input,
-        `inner dispatch produced no output AND acknowledgement post failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      try {
+        await postOrEditStep({
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          platform: input.platform,
+          threadId: input.threadKey,
+          text: "_(agent produced no output — please retry)_",
+          existingMessageId: null,
+          seal: false,
+          continuation: false,
+        });
+      } catch (err) {
+        logger.error("consumeAndStreamSlack: empty-readable acknowledgement failed", {
+          tenant_id: input.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await markBotErrorStep(
+          input,
+          `inner dispatch produced no output AND acknowledgement post failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
-    return { sawTerminal };
   }
 
-  // Result-fallback path: non-streaming runner that yielded no
-  // assistant text but had a final `result` string. Post it as a
-  // single message (no stream).
-  if (!emittedAnyText && resultFallbackText !== null) {
-    await postOrEditStep({
-      tenantId: input.tenantId,
-      agentId: input.agentId,
-      platform: input.platform,
-      threadId: input.threadKey,
-      text: resultFallbackText,
-      existingMessageId: null,
-      seal: false,
-      continuation: false,
-    });
-  }
-  return { sawTerminal };
+  return { nextIndex, state: updatedState, done, sawTerminal };
 }
 
 /**
- * Discord (and adapter.stream-unavailable) path. Original post-then-
- * edit loop preserved verbatim — Discord has no streaming API and the
- * loop has been hardened across multiple review rounds with edge cases
- * (rollover, 429 backoff, error path, empty-readable guard) we don't
- * want to re-implement.
+ * Discord (and adapter.stream-unavailable) path — bounded single
+ * iteration. Mirrors `consumeAndStreamSlack`'s shape: takes/returns
+ * `state` + `nextIndex`, runs for at most CONSUME_STEP_DEADLINE_MS,
+ * exits cleanly on terminal OR deadline. The workflow body re-invokes
+ * with the updated values.
+ *
+ * Discord has no streaming API, so we use the post-then-edit loop:
+ * the same Discord message is updated in place via .editMessage as
+ * text accumulates, and rolled over to a fresh post when the
+ * 2000-char cap approaches. The state's `messageId` threads the
+ * currently-open Discord message id across iterations so the user
+ * sees one continuous message that grows over time (no extra seams
+ * from step boundaries — all visible rollovers are real character-cap
+ * rollovers).
  */
 async function consumeAndEditDiscord(
   input: ChatTriggerInput,
   innerRunId: string,
-): Promise<{ sawTerminal: boolean }> {
-  const readable = getRun<string>(innerRunId).getReadable<string>();
+  startIndex: number,
+  state: ChatConsumeState,
+): Promise<ChatConsumeStepResult> {
+  const readable = getRun<string>(innerRunId).getReadable<string>({ startIndex });
   const reader = readable.getReader();
   const limits = PLATFORM_LIMITS[input.platform];
   const SEAL_SUFFIX_OVERHEAD = 4;
   const maxPerMessage = limits.maxPerMessage - SEAL_SUFFIX_OVERHEAD;
   const CHUNKS_PER_FLUSH = Math.max(1, Math.ceil(EDIT_FLUSH_INTERVAL_MS / APPROX_CHUNK_INTERVAL_MS));
 
-  let responseText = "";
-  let committedLength = 0;
-  let messageId: string | null = null;
-  let backoffChunks = 0;
-  let chunksSinceFlush = 0;
-  let hasPosted = false;
-  let postFailed = false;
-  let resultEventCount = 0;
-  // Mirror of consumeAndStreamSlack's `sawTerminal` — true once we
-  // observe a `result`, `error`, or `kind: "terminal"` event from the
-  // inner readable. Used by the caller to drive the inner-run cancel
-  // guard when the chat function bails before terminal (function host
-  // hit maxDuration, etc.).
+  // Restore from state.
+  let responseText = state.responseText;
+  let committedLength = state.committedLength;
+  let messageId: string | null = state.messageId;
+  let backoffChunks = state.backoffChunks;
+  let chunksSinceFlush = state.chunksSinceFlush;
+  let hasPosted = state.hasPosted;
+  let postFailed = state.postFailed;
+  let resultEventCount = state.resultEventCount;
+  let perTurnDeltaText = state.perTurnDeltaText;
   let sawTerminal = false;
-  // See note in consumeAndStreamSlack: the Claude SDK runner emits both
-  // text_delta deltas AND a final `assistant` message with the same text.
-  // Track per-turn delta text so the assistant block can contribute only
-  // any trailing characters the deltas missed (newlines, end punctuation)
-  // — keeps responseText accurate without doubling.
-  let perTurnDeltaText = "";
 
-  // Discord's native typing indicator is fired by ackReceiptStep, in
-  // parallel with the dispatch dance, before this step runs.
+  let nextIndex = startIndex;
+  const deadline = Date.now() + CONSUME_STEP_DEADLINE_MS;
+  let lastReadAt = Date.now();
+  // Tracks an early-return path so we don't post-flush twice on
+  // already-handled terminal/error branches.
+  let earlyReturn = false;
 
   try {
     while (true) {
+      // Bounded-iteration guard — mirror of consumeAndStreamSlack.
+      if (Date.now() > deadline) break;
+      if (Date.now() - lastReadAt > CONSUME_STEP_QUIET_MS) break;
+
       const { value: ndjsonLine, done } = await reader.read();
       if (done) break;
+      lastReadAt = Date.now();
+      nextIndex += 1;
       if (typeof ndjsonLine !== "string") continue;
       const evt = parseNdjsonLine(ndjsonLine);
       if (!evt) continue;
@@ -885,7 +1090,8 @@ async function consumeAndEditDiscord(
           await flushAndFinishStep({ input, text: tailWithError, existingMessageId: messageId });
         }
         await markBotErrorStep(input, errorText);
-        return { sawTerminal };
+        earlyReturn = true;
+        break;
       } else if (evt.type === "result" || evt.kind === "terminal") {
         sawTerminal = true;
         // Fallback: if no `assistant` event seeded responseText (e.g. a
@@ -965,7 +1171,7 @@ async function consumeAndEditDiscord(
       error: err instanceof Error ? err.message : String(err),
     });
     await markBotErrorStep(input, err instanceof Error ? err.message : String(err));
-    return { sawTerminal };
+    earlyReturn = true;
   } finally {
     try {
       reader.releaseLock();
@@ -974,62 +1180,95 @@ async function consumeAndEditDiscord(
     }
   }
 
-  // Final flush — flush any remaining open-message text.
-  if (!postFailed && responseText.length > committedLength) {
-    const tail = responseText.slice(committedLength);
-    const formatted = formatForPlatform(input.platform, tail, { partial: false });
-    if (formatted.flushable.trim().length > 0) {
-      const capped = formatted.flushable.length > maxPerMessage
-        ? formatted.flushable.slice(0, maxPerMessage)
-        : formatted.flushable;
-      await postOrEditStep({
-        tenantId: input.tenantId,
-        agentId: input.agentId,
-        platform: input.platform,
-        threadId: input.threadKey,
-        text: capped,
-        existingMessageId: messageId,
-        seal: false,
-        continuation: hasPosted && !messageId,
+  // Save back the iteration's mutations into the state object for the
+  // next call.
+  const updatedState: ChatConsumeState = {
+    ...state,
+    responseText,
+    committedLength,
+    perTurnDeltaText,
+    messageId,
+    hasPosted,
+    postFailed,
+    chunksSinceFlush,
+    backoffChunks,
+    resultEventCount,
+  };
+
+  // Decide whether the body's loop should exit.
+  //   sawTerminal=true                → done (terminal observed).
+  //   earlyReturn=true                → done (inner-iteration error
+  //                                     already markBotError'd).
+  //   readable returned done w/o
+  //     deadline expiring              → done (rare; inner run ended
+  //                                     without terminal).
+  //   deadline expired                → not done (re-invoke).
+  const exitedDueToDeadline =
+    !sawTerminal && !earlyReturn && Date.now() > deadline;
+  const done = sawTerminal || earlyReturn || !exitedDueToDeadline;
+
+  // On the final iteration only, run the post-stream guards: final
+  // flush of remaining open-message text, then empty-readable guard.
+  // These must NOT fire on intermediate iterations or we'd post the
+  // empty-readable banner mid-reply.
+  if (done && sawTerminal) {
+    // Final flush — flush any remaining open-message text.
+    if (!postFailed && responseText.length > committedLength) {
+      const tail = responseText.slice(committedLength);
+      const formatted = formatForPlatform(input.platform, tail, { partial: false });
+      if (formatted.flushable.trim().length > 0) {
+        const capped = formatted.flushable.length > maxPerMessage
+          ? formatted.flushable.slice(0, maxPerMessage)
+          : formatted.flushable;
+        await postOrEditStep({
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          platform: input.platform,
+          threadId: input.threadKey,
+          text: capped,
+          existingMessageId: messageId,
+          seal: false,
+          continuation: hasPosted && !messageId,
+        });
+      }
+    }
+
+    // Empty-readable guard. `hasPosted` only becomes true after a real
+    // flush succeeds. Native typing indicator auto-clears when no
+    // message arrives, so a silent run leaves no residue beyond this
+    // acknowledgement post.
+    if (!hasPosted && !postFailed && resultEventCount === 0 && responseText === "") {
+      logger.warn("consumeAndPostStep: inner dispatch produced no output", {
+        tenant_id: input.tenantId,
+        agent_id: input.agentId,
+        thread_key: input.threadKey,
+        inner_run_id: innerRunId,
       });
+      try {
+        await postOrEditStep({
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          platform: input.platform,
+          threadId: input.threadKey,
+          text: "_(agent produced no output — please retry)_",
+          existingMessageId: null,
+          seal: false,
+          continuation: false,
+        });
+      } catch (err) {
+        logger.error("consumeAndPostStep: empty-readable acknowledgement failed", {
+          tenant_id: input.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await markBotErrorStep(
+          input,
+          `inner dispatch produced no output AND acknowledgement post failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
-  // Empty-readable guard. With native typing indicators (no placeholder
-  // post), `hasPosted` is the right tell again — it only becomes true
-  // after a real flush succeeds. The native typing indicator auto-clears
-  // when no message arrives, so a silent run leaves no residue beyond
-  // this acknowledgement post.
-  if (!hasPosted && !postFailed && resultEventCount === 0 && responseText === "") {
-    logger.warn("consumeAndPostStep: inner dispatch produced no output", {
-      tenant_id: input.tenantId,
-      agent_id: input.agentId,
-      thread_key: input.threadKey,
-      inner_run_id: innerRunId,
-    });
-    try {
-      await postOrEditStep({
-        tenantId: input.tenantId,
-        agentId: input.agentId,
-        platform: input.platform,
-        threadId: input.threadKey,
-        text: "_(agent produced no output — please retry)_",
-        existingMessageId: null,
-        seal: false,
-        continuation: false,
-      });
-    } catch (err) {
-      logger.error("consumeAndPostStep: empty-readable acknowledgement failed", {
-        tenant_id: input.tenantId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      await markBotErrorStep(
-        input,
-        `inner dispatch produced no output AND acknowledgement post failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-  return { sawTerminal };
+  return { nextIndex, state: updatedState, done, sawTerminal };
 }
 
 // Placeholder rows have all three nullable until the winner UPDATEs.
@@ -1630,6 +1869,55 @@ async function cancelInnerRunStep(
       agent_id: agentId,
       inner_run_id: innerRunId,
       error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Final-delivery step: reaction swap (👀 → ✅/❌) + markBotEvent. Runs
+ * once after the workflow body's consume loop terminates (whether
+ * normally on terminal or abnormally on a future bug exit). Lives in
+ * its own step because reactions and DB writes are I/O and must run
+ * in step context, not the workflow body.
+ *
+ * Pre-refactor (PR #84 and earlier), this work lived in
+ * `consumeAndPostStepBody`'s `finally` block. With the body-loop
+ * pattern that block would fire on every iteration — for a 14-minute
+ * agent reply, that's ~14 markBotEvent writes and ~14 reaction swaps,
+ * polluting the operator UI's last_event timestamp and Slack's
+ * reaction history. Pulling it into a single tail step keeps
+ * observability clean.
+ *
+ * Best-effort throughout: reactions are decorative, markBotEvent is
+ * an operator-visibility write. Failures are logged and swallowed so
+ * a transient API hiccup here doesn't trigger a WDK retry storm.
+ */
+async function finalizeChatDeliveryStep(
+  input: ChatTriggerInput,
+  sawTerminal: boolean,
+  state: ChatConsumeState,
+): Promise<void> {
+  "use step";
+  // Treat sawAgentError OR an early body-exit-without-terminal as
+  // "error" for the reaction swap. The user gets a visible signal
+  // without us having to thread additional bookkeeping through the
+  // loop.
+  const success = sawTerminal && !state.sawAgentError;
+
+  // Swap the receipt 👀 for ✅/❌. Best-effort.
+  await safeRemoveReaction(input, REACTION_RECEIPT);
+  await safeAddReaction(input, success ? REACTION_DONE : REACTION_ERROR);
+
+  // markBotEvent — populates last_event timestamp the operator UI
+  // surfaces. Best-effort.
+  try {
+    await markBotEvent(input.tenantId, input.agentId, input.platform);
+  } catch (err) {
+    logger.error("finalizeChatDeliveryStep: markBotEvent failed", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      platform: input.platform,
       error: err instanceof Error ? err.message : String(err),
     });
   }
