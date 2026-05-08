@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { Sandbox } from "@vercel/sandbox";
 import { queryOne } from "@/db";
 import { withErrorHandler } from "@/lib/api";
@@ -42,18 +42,19 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
     return new Response("", { status: 200, headers: ndjsonHeaders() });
   }
 
-  const session = await queryOne(
+  const initialSession = await queryOne(
     SessionRow,
     "SELECT * FROM sessions WHERE id = $1",
     [sessionId],
   );
-  if (!session) throw new NotFoundError("Session not found");
-  if (!session.sandbox_id) {
-    return NextResponse.json(
-      { error: { code: "conflict", message: "No sandbox for this session" } },
-      { status: 409 },
-    );
-  }
+  if (!initialSession) throw new NotFoundError("Session not found");
+  // NOTE: do not 409 on null sandbox_id. The chat-workflow path reserves
+  // the message row in `running` before the inner dispatchWorkflow's
+  // prepareSandboxAndLaunchStep populates session.sandbox_id, so the admin
+  // page can land in a window where status='running' but sandbox_id is
+  // still null. A 409 made the page bail (no `Streaming…` pill, no events,
+  // "No transcript available" stuck until manual refresh). Stream a 200
+  // and poll for sandbox_id inside the loop.
 
   const encoder = new TextEncoder();
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -66,6 +67,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
 
   (async () => {
     let sandbox: Sandbox | null = null;
+    let attachedSandboxId: string | null = null;
     let lastLineCount = offset;
     let detached = false;
 
@@ -112,9 +114,38 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
     };
 
     try {
-      sandbox = await Sandbox.get({ sandboxId: session.sandbox_id! });
-
       while (!detached) {
+        // Re-read the session row each iteration. Picks up a sandbox_id
+        // that gets populated mid-stream (chat-workflow's runner-launch
+        // step lags reserve), and lets us bail cleanly if the session is
+        // stopped underneath us.
+        const session = await queryOne(
+          SessionRow,
+          "SELECT * FROM sessions WHERE id = $1",
+          [sessionId],
+        );
+
+        if (!session || session.status === "stopped") {
+          break;
+        }
+
+        if (!session.sandbox_id) {
+          // Sandbox not provisioned yet (or was cleared by stop/reset).
+          // Stay connected and let the heartbeat keep the page alive.
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          continue;
+        }
+
+        // (Re)attach to the current sandbox. If sandbox_id changed since
+        // last attach (cold-start respawn), drop the cached handle and
+        // reconnect against the new id. lastLineCount stays valid because
+        // each runner spawn writes to a fresh `transcript-<messageId>.ndjson`
+        // — the same messageId the admin route is polling.
+        if (sandbox === null || attachedSandboxId !== session.sandbox_id) {
+          sandbox = await Sandbox.get({ sandboxId: session.sandbox_id });
+          attachedSandboxId = session.sandbox_id;
+        }
+
         const buf = await sandbox.readFileToBuffer({ path: transcriptPath });
         if (buf) {
           const text = buf.toString("utf-8");
