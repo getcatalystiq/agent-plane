@@ -46,6 +46,7 @@ import {
   APPROX_CHUNK_INTERVAL_MS,
   EDIT_FLUSH_INTERVAL_MS,
   MAX_RATE_LIMITED_BACKOFF_CHUNKS,
+  PLACEHOLDER_THINKING_TEXT,
 } from "@/lib/platform/limits";
 import { tryConsumeChannelToken, drainChannelToken } from "@/lib/platform/redis-bucket";
 import {
@@ -236,6 +237,39 @@ async function consumeAndPostStep(
   let postFailed = false;
   let resultEventCount = 0;
 
+  // Post a placeholder immediately so the user gets visible feedback that
+  // the bot received the message. Without this, non-streaming runners
+  // (Claude Agent SDK) emit one big `assistant` event at the end and the
+  // user stares at silence for 2-15s before the reply lands. The
+  // placeholder gets edited in-place by every subsequent flush via the
+  // existing `messageId` + edit path. If the placeholder post fails, we
+  // continue without it — the final flush will create a fresh message.
+  const placeholderText = PLACEHOLDER_THINKING_TEXT[input.platform];
+  const placeholderResult = await postOrEditStep({
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    platform: input.platform,
+    threadId: input.threadKey,
+    text: placeholderText,
+    existingMessageId: null,
+    seal: false,
+    continuation: false,
+  });
+  if (placeholderResult.ok) {
+    messageId = placeholderResult.messageId;
+    hasPosted = true;
+    // committedLength stays 0 — the placeholder is NOT real content; the
+    // first edit replaces it entirely, not appends to it.
+  } else {
+    logger.warn("consumeAndPostStep: placeholder post failed; falling back to non-placeholder flow", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      rate_limited: placeholderResult.rateLimited,
+      error: placeholderResult.error,
+    });
+  }
+
   try {
     while (true) {
       const { value: ndjsonLine, done } = await reader.read();
@@ -381,13 +415,20 @@ async function consumeAndPostStep(
     }
   }
 
-  // Empty-readable guard.
-  if (!hasPosted && !postFailed && resultEventCount === 0 && responseText === "") {
+  // Empty-readable guard. The "_Thinking…_" placeholder set hasPosted=true
+  // even with no real content, so we gate on `responseText === ""` +
+  // `resultEventCount === 0` here (committedLength is the right tell that
+  // no real content has been flushed — it stays at 0 until a rollover
+  // seals a message). If a placeholder exists, EDIT it in place to surface
+  // the silent-bot UX instead of posting a new message and leaving the
+  // placeholder dangling.
+  if (!postFailed && resultEventCount === 0 && responseText === "" && committedLength === 0) {
     logger.warn("consumeAndPostStep: inner dispatch produced no output", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
       inner_run_id: innerRunId,
+      had_placeholder: messageId !== null,
     });
     try {
       await postOrEditStep({
@@ -396,7 +437,7 @@ async function consumeAndPostStep(
         platform: input.platform,
         threadId: input.threadKey,
         text: "_(agent produced no output — please retry)_",
-        existingMessageId: null,
+        existingMessageId: messageId,
         seal: false,
         continuation: false,
       });
