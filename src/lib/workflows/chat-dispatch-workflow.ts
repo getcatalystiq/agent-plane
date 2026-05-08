@@ -15,7 +15,8 @@
  *     accumulate into responseText; every 1.5s OR on rollover, call
  *     postOrEditStep with the formatted slice. Discord 429 + Retry-After
  *     dynamically lengthens the edit gate per channel.
- *   - Step: finalizeChatStep — markBotEvent + cleanup.
+ *   - markBotEvent tail folded into consumeAndPostStep (was a separate
+ *     finalizeChatStep boundary).
  *
  * Resumption (durability claim): on function-host recycle, WDK re-enters
  * the workflow body at the last completed step boundary. The
@@ -123,10 +124,20 @@ export async function chatDispatchWorkflow(
     ? await persistAttachmentsStep(input)
     : [];
 
-  // 3. Reserve session + message and start the inner dispatchWorkflow.
+  // 3. Reserve session + message and start the inner dispatchWorkflow,
+  //    in parallel with firing the receipt ack (👀 + "Thinking…" status).
+  //    The dispatch dance (dedupe insert + reserve + start + placeholder
+  //    UPDATE) takes 1-3s; previously the user saw zero feedback during
+  //    that window. The ack step resolves the bot adapter and hits Slack
+  //    directly, so 👀 lands within ~500ms regardless of how slow the
+  //    dispatch happens to be.
   let started: StartedDispatch;
   try {
-    started = await startInnerDispatchStep(input, persisted);
+    const [, dispatchResult] = await Promise.all([
+      ackReceiptStep(input),
+      startInnerDispatchStep(input, persisted),
+    ]);
+    started = dispatchResult;
   } catch (err) {
     logger.error("chatDispatchWorkflow: dispatch start failed", {
       tenant_id: input.tenantId,
@@ -155,9 +166,9 @@ export async function chatDispatchWorkflow(
   //    A future PR can re-add per-chunk replay determinism by passing
   //    `startIndex` between successive consumeAndPostStep retries
   //    (WDK supports getReadable({ startIndex })).
+  // consumeAndPostStep also runs the markBotEvent tail at the end,
+  // collapsing what used to be a separate finalizeChatStep boundary.
   await consumeAndPostStep(input, started.innerRunId, started.kind === "orphan");
-
-  await finalizeChatStep(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,12 +231,10 @@ async function consumeAndPostStep(
     });
   }
 
-  // 👀 receipt reaction — visible "I see this" signal on the user's
-  // original message before any text reply lands. Wrapped so a
-  // reaction failure (missing scope, bot can't react in DMs, etc.)
-  // never blocks the actual reply. Removed below on success/error
-  // and replaced with ✅/❌ so the user gets a status pill.
-  await safeAddReaction(input, REACTION_RECEIPT);
+  // The 👀 receipt reaction + "Thinking…" status are added by
+  // ackReceiptStep, which runs in parallel with the dispatch dance so
+  // the user sees feedback within ~500ms instead of 2-3s. Here we just
+  // run the consumption and swap the receipt for ✅/❌ at the end.
 
   // Platform fork: Slack has a native streaming API on its Chat SDK
   // adapter (`adapter.stream(threadId, asyncIterable, options)`) that
@@ -247,6 +256,21 @@ async function consumeAndPostStep(
     // (reactions are decorative; failures don't bubble).
     await safeRemoveReaction(input, REACTION_RECEIPT);
     await safeAddReaction(input, success ? REACTION_DONE : REACTION_ERROR);
+
+    // markBotEvent tail — was its own step boundary (finalizeChatStep)
+    // before; folded in here to skip a WDK step round-trip on every chat
+    // run. Best-effort write; the operator UI surfaces last_event but a
+    // failure here doesn't affect the user-visible reply.
+    try {
+      await markBotEvent(input.tenantId, input.agentId, input.platform);
+    } catch (err) {
+      logger.error("consumeAndPostStep: markBotEvent failed", {
+        tenant_id: input.tenantId,
+        agent_id: input.agentId,
+        platform: input.platform,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 
@@ -260,6 +284,84 @@ const REACTION_ERROR = "x";
 interface ReactingAdapter {
   addReaction?: (threadId: string, messageId: string, emoji: string) => Promise<void>;
   removeReaction?: (threadId: string, messageId: string, emoji: string) => Promise<void>;
+}
+
+interface TypingAdapter {
+  startTyping?: (threadId: string, status?: string) => Promise<void>;
+}
+
+/**
+ * Fire the user-visible ack — 👀 reaction on the original message AND a
+ * platform-native typing indicator (Slack's assistant.threads.setStatus
+ * with "Thinking…" when AI Apps is configured; Discord's typing event
+ * otherwise) — as a step that the workflow body races against
+ * `startInnerDispatchStep`. Resolves the bot adapter once and dispatches
+ * both calls in parallel so neither waits on the other.
+ *
+ * Strictly best-effort: every external call is `Promise.allSettled` so
+ * one failing call cannot mask the other, and an entire-step failure is
+ * swallowed so it cannot corrupt the workflow body's `Promise.all`.
+ */
+async function ackReceiptStep(input: ChatTriggerInput): Promise<void> {
+  "use step";
+
+  try {
+    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
+    if (!cached) return;
+
+    const reactingAdapter = cached.adapter as unknown as ReactingAdapter;
+    const typingAdapter = cached.adapter as unknown as TypingAdapter;
+
+    const tasks: Promise<unknown>[] = [];
+
+    if (
+      input.replyToMessageId &&
+      typeof reactingAdapter.addReaction === "function"
+    ) {
+      tasks.push(
+        reactingAdapter.addReaction(
+          input.threadKey,
+          input.replyToMessageId,
+          REACTION_RECEIPT,
+        ),
+      );
+    }
+
+    if (typeof typingAdapter.startTyping === "function") {
+      // Slack reads the second arg as `assistant.threads.setStatus`. Discord
+      // ignores it (its adapter signature is `startTyping(threadId)`). One
+      // call shape works for both — the constant string is harmless on
+      // platforms that don't render it.
+      tasks.push(
+        input.platform === "slack"
+          ? typingAdapter.startTyping(input.threadKey, "Thinking…")
+          : typingAdapter.startTyping(input.threadKey),
+      );
+    }
+
+    const results = await Promise.allSettled(tasks);
+    for (const r of results) {
+      if (r.status === "rejected") {
+        logger.warn("ackReceiptStep: adapter call failed (best-effort)", {
+          tenant_id: input.tenantId,
+          agent_id: input.agentId,
+          platform: input.platform,
+          thread_key: input.threadKey,
+          error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        });
+      }
+    }
+  } catch (err) {
+    // Whole-step failure is swallowed so the workflow body's Promise.all
+    // doesn't see a rejection (rejection would skip startInnerDispatchStep's
+    // result and route into the catch).
+    logger.warn("ackReceiptStep: bot resolution failed (best-effort)", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      platform: input.platform,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function safeAddReaction(input: ChatTriggerInput, emoji: string): Promise<void> {
@@ -354,28 +456,8 @@ async function consumeAndStreamSlack(
     return await consumeAndEditDiscord(input, innerRunId);
   }
 
-  // Show an immediate "Thinking…" status. When the bot has Slack's AI
-  // Apps feature configured + `assistant:write` scope, this drives
-  // assistant.threads.setStatus and renders rich loading text in the
-  // assistant panel. Without those, it falls back to Slack's default
-  // typing indicator. Both modes auto-clear when the next post lands.
-  // Best-effort — typing/status failure must NOT block the actual
-  // reply (PR #38 + the regression PR #43 hardened the same path).
-  const startTypingAdapter = cached.adapter as unknown as {
-    startTyping?: (threadId: string, status?: string) => Promise<void>;
-  };
-  if (typeof startTypingAdapter.startTyping === "function") {
-    try {
-      await startTypingAdapter.startTyping(input.threadKey, "Thinking…");
-    } catch (err) {
-      logger.warn("consumeAndStreamSlack: startTyping(status='Thinking…') failed", {
-        tenant_id: input.tenantId,
-        agent_id: input.agentId,
-        thread_key: input.threadKey,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // The "Thinking…" status / typing indicator was hoisted to
+  // ackReceiptStep so it fires in parallel with the dispatch dance.
 
   const readable = getRun<string>(innerRunId).getReadable<string>();
 
@@ -618,29 +700,8 @@ async function consumeAndEditDiscord(
   // — keeps responseText accurate without doubling.
   let perTurnDeltaText = "";
 
-  // Show Discord's native typing indicator so the user sees
-  // immediate feedback while the agent generates its reply. Mirrors
-  // the Slack path on main (PR #38): no placeholder post, no edit-out
-  // residue. The indicator clears when the first real post lands.
-  //
-  // Best-effort: a typing-indicator failure must NOT block the actual
-  // reply. Wrap in try/catch.
-  try {
-    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
-    if (cached) {
-      const adapter = cached.adapter as { startTyping?: (threadId: string, status?: string) => Promise<void> };
-      if (typeof adapter.startTyping === "function") {
-        await adapter.startTyping(input.threadKey);
-      }
-    }
-  } catch (err) {
-    logger.warn("consumeAndEditDiscord: startTyping failed (best-effort, non-blocking)", {
-      tenant_id: input.tenantId,
-      agent_id: input.agentId,
-      thread_key: input.threadKey,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // Discord's native typing indicator is fired by ackReceiptStep, in
+  // parallel with the dispatch dance, before this step runs.
 
   try {
     while (true) {
@@ -1399,21 +1460,6 @@ async function markBotErrorStep(input: ChatTriggerInput, message: string): Promi
       agent_id: input.agentId,
       platform: input.platform,
       original_message: message,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
-async function finalizeChatStep(input: ChatTriggerInput): Promise<void> {
-  "use step";
-  // Round-5 review #6: same treatment for markBotEvent.
-  try {
-    await markBotEvent(input.tenantId, input.agentId, input.platform);
-  } catch (err) {
-    logger.error("finalizeChatStep: failed to write last_event", {
-      tenant_id: input.tenantId,
-      agent_id: input.agentId,
-      platform: input.platform,
       error: err instanceof Error ? err.message : String(err),
     });
   }

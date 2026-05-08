@@ -248,8 +248,15 @@ export async function prepareSandboxAndLaunchStep(
     session_id: prepared.session.id,
     message_id: prepared.messageId,
   });
-  await setWorkflowRunId(prepared.session.id, input.tenantId, `wdk_v1_${runId}`);
-  const sandboxRef = await ensureSandboxImpl(input, prepared);
+  // setWorkflowRunId is an idempotent UPDATE on the session row; it does
+  // not depend on the sandbox. Race it against ensureSandboxImpl so the
+  // ~50-200ms DB latency overlaps with the (much heavier) sandbox work
+  // instead of stacking before it. launchRunnerImpl still waits for the
+  // sandbox.
+  const [, sandboxRef] = await Promise.all([
+    setWorkflowRunId(prepared.session.id, input.tenantId, `wdk_v1_${runId}`),
+    ensureSandboxImpl(input, prepared),
+  ]);
   await launchRunnerImpl(input, prepared, sandboxRef);
   logger.info("prepareSandboxAndLaunchStep: complete", {
     run_id: runId,
