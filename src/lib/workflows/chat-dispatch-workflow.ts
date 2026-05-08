@@ -513,9 +513,30 @@ async function consumeAndStreamSlack(
           for (const block of blocks) {
             if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
               const remainder = textRemainderAfterDeltas(block.text, perTurnDeltaText);
-              if (remainder.length > 0) {
+              // Force the Slack adapter's StreamingMarkdownRenderer to
+              // commit any text it's holding back. The renderer's
+              // `getCommittableText()` slices to the LAST `\n` and
+              // discards everything after — so a typical short single-
+              // paragraph reply (no `\n` anywhere) sits 100% buffered
+              // until `renderer.finish()` runs at end-of-stream, which
+              // only fires after the runner's `result` event traverses
+              // the WDK pipeline (~1-2s). User-perceived: "agent is
+              // done but Slack hangs."
+              //
+              // Yielding "\n" here advances the renderer's accumulated
+              // tail past a newline boundary, getCommittableText now
+              // returns everything, the adapter calls
+              // chat.appendStream once, and Slack renders the full
+              // reply. The result event then only needs to run
+              // streamer.stop() — which is fast.
+              //
+              // Skip when the assistant text already ends with `\n`
+              // (no double-newline trailing whitespace).
+              const needsFlushTrigger = !block.text.endsWith("\n");
+              const toYield = remainder + (needsFlushTrigger ? "\n" : "");
+              if (toYield.length > 0) {
                 emittedAnyText = true;
-                yield remainder;
+                yield toYield;
               }
             } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
               const title = block.name;
