@@ -245,17 +245,43 @@ async function consumeAndPostStep(
       if (!evt) continue;
 
       if (evt.type === "text_delta" && typeof evt.text === "string") {
+        // Streaming runner path: per-token deltas accumulate into responseText.
         responseText += evt.text;
         chunksSinceFlush += 1;
+      } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
+        // Non-streaming runner path (Claude Agent SDK emits full messages,
+        // not text_delta chunks). Each `assistant` event carries one
+        // complete message in `message.content[].text`. Concatenate the
+        // text blocks from this turn into responseText so the final
+        // flush has something to post. Multi-turn runs emit multiple
+        // assistant events, each with its own message_id and content —
+        // appending preserves the chronological order of the agent's
+        // turns.
+        const blocks = evt.message.content ?? [];
+        for (const block of blocks) {
+          if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+            responseText += block.text;
+            chunksSinceFlush += 1;
+          }
+        }
       } else if (evt.type === "error") {
+        const errorText = typeof evt.message === "string" ? evt.message : "error";
         if (!postFailed) {
           const tail = responseText.slice(committedLength);
-          const tailWithError = `${tail}\n\n_(agent stopped early: ${evt.message ?? "error"})_`;
+          const tailWithError = `${tail}\n\n_(agent stopped early: ${errorText})_`;
           await flushAndFinishStep({ input, text: tailWithError, existingMessageId: messageId });
         }
-        await markBotErrorStep(input, evt.message ?? "agent_error");
+        await markBotErrorStep(input, errorText);
         return;
       } else if (evt.type === "result" || evt.kind === "terminal") {
+        // Fallback: if no `assistant` event seeded responseText (e.g. a
+        // runner that only emits the final `result`), use the result
+        // string itself. Skip if responseText already has content from
+        // assistant or text_delta events.
+        if (responseText.length === 0 && typeof evt.result === "string" && evt.result.length > 0) {
+          responseText = evt.result;
+          chunksSinceFlush += 1;
+        }
         resultEventCount += 1;
         break;
       }
@@ -984,11 +1010,28 @@ async function finalizeChatStep(input: ChatTriggerInput): Promise<void> {
 // NDJSON parser — chunks the dispatcher writeChunkStep emits via getWritable
 // ---------------------------------------------------------------------------
 
+interface AssistantContentBlock {
+  type?: string;
+  text?: string;
+}
+
+interface AssistantMessage {
+  content?: AssistantContentBlock[];
+}
+
 interface ParsedEvent {
   type?: string;
   kind?: string;
   text?: string;
-  message?: string;
+  // `message` is overloaded across event types in the inner stream.
+  // - On `type: "error"` it's a string (error message text).
+  // - On `type: "assistant"` it's the SDK message object with content blocks
+  //   carrying the agent reply text.
+  message?: string | AssistantMessage;
+  // On `type: "result"` Claude SDK emits a top-level `result` field with the
+  // final assembled string — used as a fallback if the assistant blocks were
+  // somehow empty.
+  result?: string;
 }
 
 function parseNdjsonLine(raw: string): ParsedEvent | null {
