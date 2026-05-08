@@ -336,6 +336,36 @@ async function consumeAndStreamSlack(
     return;
   }
 
+  // PR #38 originally fired adapter.startTyping at the top of
+  // consumeAndPostStep; PR #40 split the dispatcher into platform
+  // helpers and dropped the explicit call from the Slack path,
+  // assuming adapter.stream's *native* streaming UI would supply the
+  // typing indicator. That assumption holds ONLY when the bot has
+  // Slack's AI Apps feature configured + the `assistant:write` scope —
+  // adapter.stream then drives chat.startStream / chat.appendStream /
+  // chat.stopStream which renders the streaming-text-with-typing UI.
+  //
+  // Without AI Apps config, adapter.stream falls back to plain
+  // chat.postMessage + chat.update (no typing indicator at all). To
+  // keep the receipt UX consistent across both configurations, fire
+  // the explicit startTyping here. It auto-clears when the first
+  // post lands. Best-effort.
+  const startTypingAdapter = cached.adapter as unknown as {
+    startTyping?: (threadId: string, status?: string) => Promise<void>;
+  };
+  if (typeof startTypingAdapter.startTyping === "function") {
+    try {
+      await startTypingAdapter.startTyping(input.threadKey);
+    } catch (err) {
+      logger.warn("consumeAndStreamSlack: startTyping failed (best-effort, non-blocking)", {
+        tenant_id: input.tenantId,
+        agent_id: input.agentId,
+        thread_key: input.threadKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const adapter = cached.adapter as unknown as {
     stream?: (
       threadId: string,
