@@ -398,14 +398,19 @@ async function consumeAndStreamSlack(
 
   // The Claude Agent SDK runner emits BOTH per-token `text_delta` events
   // (during streaming) AND a final `assistant` message carrying the same
-  // complete text in `content[].text`. Yielding both produces a doubled
-  // reply in Slack ("Hello worldHello world"). Track whether text_delta
-  // arrived for the current turn; if yes, drop the assistant text blocks
-  // for that turn but still emit tool_use blocks (those don't appear in
-  // text_delta). Reset on each assistant message so a non-streaming turn
-  // mid-conversation still gets its text yielded from the assistant
-  // event.
-  let textDeltaSeenThisTurn = false;
+  // complete text in `content[].text`. Naively yielding both doubles the
+  // reply in Slack; naively skipping the assistant text removes a useful
+  // commit checkpoint that the Slack adapter's StreamingMarkdownRenderer
+  // relies on (it holds back any text past the last \n until the stream
+  // finishes — so the trailing punctuation of a single-paragraph reply
+  // would only land at renderer.finish() instead of mid-stream).
+  //
+  // Resolution: yield the SUFFIX of the assistant text that wasn't
+  // already streamed as deltas. Empty in the steady-state (no double)
+  // and non-empty when the assistant carries trailing characters
+  // (final newline, post-tool punctuation) — which acts as the
+  // mid-stream commit trigger users perceive as "smooth".
+  let perTurnDeltaText = "";
 
   const textStream: AsyncIterable<string | EmittedStreamChunk> = (async function* () {
     const reader = readable.getReader();
@@ -419,15 +424,17 @@ async function consumeAndStreamSlack(
 
         if (evt.type === "text_delta" && typeof evt.text === "string" && evt.text.length > 0) {
           emittedAnyText = true;
-          textDeltaSeenThisTurn = true;
+          perTurnDeltaText += evt.text;
           yield evt.text;
         } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
             if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-              if (textDeltaSeenThisTurn) continue;
-              emittedAnyText = true;
-              yield block.text;
+              const remainder = textRemainderAfterDeltas(block.text, perTurnDeltaText);
+              if (remainder.length > 0) {
+                emittedAnyText = true;
+                yield remainder;
+              }
             } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
               const title = block.name;
               const details = summarizeToolInput(block.input);
@@ -441,7 +448,7 @@ async function consumeAndStreamSlack(
               };
             }
           }
-          textDeltaSeenThisTurn = false;
+          perTurnDeltaText = "";
         } else if (evt.type === "user" && evt.message && typeof evt.message === "object") {
           // The Claude Agent SDK delivers tool results inside a `user` role
           // message wrapper. content[] holds tool_result blocks correlated
@@ -606,9 +613,10 @@ async function consumeAndEditDiscord(
   let resultEventCount = 0;
   // See note in consumeAndStreamSlack: the Claude SDK runner emits both
   // text_delta deltas AND a final `assistant` message with the same text.
-  // Skip the assistant text blocks when text_delta already streamed the
-  // turn so responseText doesn't accumulate the same content twice.
-  let textDeltaSeenThisTurn = false;
+  // Track per-turn delta text so the assistant block can contribute only
+  // any trailing characters the deltas missed (newlines, end punctuation)
+  // — keeps responseText accurate without doubling.
+  let perTurnDeltaText = "";
 
   // Show Discord's native typing indicator so the user sees
   // immediate feedback while the agent generates its reply. Mirrors
@@ -646,25 +654,25 @@ async function consumeAndEditDiscord(
         // Streaming runner path: per-token deltas accumulate into responseText.
         responseText += evt.text;
         chunksSinceFlush += 1;
-        textDeltaSeenThisTurn = true;
+        perTurnDeltaText += evt.text;
       } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
-        // Non-streaming-runner fallback. The Claude Agent SDK emits BOTH
-        // text_delta deltas (when the runner forwards them via emit) AND
-        // a final `assistant` message carrying the full text. If
-        // text_delta already streamed this turn, drop the duplicate text
-        // blocks here — otherwise we accumulate "HelloHello". Tool-only
-        // turns (assistant message with only tool_use blocks) don't carry
-        // text and are unaffected. Multi-turn runs emit multiple
-        // assistant events; the per-turn flag resets after each.
+        // The Claude Agent SDK emits BOTH text_delta deltas AND a final
+        // assistant message carrying the same text. Append only the
+        // remainder so responseText doesn't double when both fire, while
+        // still capturing trailing characters the deltas may have missed.
+        // Non-streaming runners (no text_delta) get the full text via the
+        // remainder helper's empty-deltas branch.
         const blocks = evt.message.content ?? [];
         for (const block of blocks) {
           if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-            if (textDeltaSeenThisTurn) continue;
-            responseText += block.text;
-            chunksSinceFlush += 1;
+            const remainder = textRemainderAfterDeltas(block.text, perTurnDeltaText);
+            if (remainder.length > 0) {
+              responseText += remainder;
+              chunksSinceFlush += 1;
+            }
           }
         }
-        textDeltaSeenThisTurn = false;
+        perTurnDeltaText = "";
       } else if (evt.type === "error") {
         const errorText = typeof evt.message === "string" ? evt.message : "error";
         if (!postFailed) {
@@ -1466,6 +1474,29 @@ interface ParsedEvent {
 type EmittedStreamChunk =
   | { type: "task_update"; id: string; title: string; status: "pending" | "in_progress" | "complete" | "error"; details?: string; output?: string }
   | { type: "markdown_text"; text: string };
+
+/**
+ * Compute the portion of the final assistant text that wasn't already
+ * streamed via per-token text_delta events. Returns "" when the deltas
+ * match the assistant text exactly (the steady-state) — yielding "" is a
+ * no-op to the Slack/Discord renderer. Returns the trailing remainder
+ * when the assistant carries content the deltas don't (e.g. a final
+ * newline, end-of-message punctuation, or text held back by the
+ * StreamingMarkdownRenderer waiting for a safe markdown boundary).
+ *
+ * Falls back to the full assistant text when deltas don't appear as a
+ * prefix — that case shouldn't happen in practice (the SDK emits text_delta
+ * events whose concatenation equals the final assistant block), but the
+ * fallback keeps the assistant text on screen rather than silently
+ * dropping it. A pathological mismatch is preferable to a missing reply.
+ */
+function textRemainderAfterDeltas(assistantText: string, deltaText: string): string {
+  if (deltaText.length === 0) return assistantText;
+  if (assistantText.startsWith(deltaText)) {
+    return assistantText.slice(deltaText.length);
+  }
+  return assistantText;
+}
 
 /** Render a tool_use input as a one-line task subtitle. */
 function summarizeToolInput(input: unknown): string | undefined {
