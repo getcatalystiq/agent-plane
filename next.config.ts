@@ -18,6 +18,24 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  async rewrites() {
+    return [
+      // WDK queue-callback proxy: route the framework's POST traffic
+      // through wrappers that translate the framework's own
+      // MessageNotAvailableError 500 (queue dedup, expected) to a 200.
+      // See `src/app/api/internal/wdk-step-proxy/route.ts` for full
+      // rationale. Sits under `/api/internal/` so middleware's public-
+      // path bypass leaves it open to the external WDK queue.
+      {
+        source: "/.well-known/workflow/v1/step",
+        destination: "/api/internal/wdk-step-proxy",
+      },
+      {
+        source: "/.well-known/workflow/v1/flow",
+        destination: "/api/internal/wdk-flow-proxy",
+      },
+    ];
+  },
   async headers() {
     return [
       {
