@@ -214,6 +214,11 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
                     <li><code className="text-foreground">channels:history</code> — read public-channel thread context</li>
                     <li><code className="text-foreground">groups:history</code> — read private-channel thread context</li>
                     <li><code className="text-foreground">im:history</code> — read DM thread context (if message.im subscribed)</li>
+                    <li>
+                      <code className="text-foreground">users:read</code> — required by the connect-time
+                      {" "}workspace-size probe. Without it the connect fails with
+                      {" "}<code className="text-foreground">Could not verify workspace size: slack_missing_scope</code>.
+                    </li>
                   </ul>
                 </div>
                 <div className="mt-2 ml-1">
