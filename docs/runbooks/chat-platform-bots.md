@@ -146,6 +146,23 @@ When Slack events don't arrive:
    `stale_timestamp`, or `unhandled` returns.
 3. Confirm the bot is invited to the channel where the @mention happens.
 
+### In-flight UX (second message in the same thread)
+
+When a user sends a second chat message in a thread before the first one
+finishes, the dispatcher rejects it via the per-session in-flight cap of
+1 (`ConcurrencyLimitError` from `src/lib/dispatcher.ts`). This is by
+design: a session can only have one message in `running` at a time. The
+chat workflow's `startInnerDispatchStep` catches the error, posts a
+short busy reply ("Still working on your last message — one moment."),
+and abandons the second message. Operators triaging "the bot ignored my
+follow-up" complaints should look for `failure_kind: "in_flight"` in
+the `startInnerDispatchStep: caught` log line — that confirms the
+busy-reply path fired and the message was intentionally dropped, not
+lost. The wording lives in `busyReplyText()` in
+`src/lib/workflows/chat-dispatch-workflow.ts`. Queueing the second
+message is intentionally not implemented; users who need that should
+wait for the first reply before sending the next.
+
 ## Migration 037 deploy gate
 
 Migration `037_chat_event_dedupe_claim_pattern.sql` lands the placeholder

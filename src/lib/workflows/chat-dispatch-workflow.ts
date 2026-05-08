@@ -33,6 +33,7 @@ import {
   type RunnerChunk,
 } from "@/lib/workflows/dispatch-workflow";
 import { reserveSessionAndMessage, type PreparedExecution } from "@/lib/dispatcher";
+import { ConcurrencyLimitError } from "@/lib/errors";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
 import { withTenantTransaction } from "@/db";
@@ -980,16 +981,26 @@ async function startInnerDispatchStep(
   try {
     return await startInnerDispatchStepBody(input, persisted, bridgeClaimed);
   } catch (err) {
+    const failureKind = classifyDispatchFailure(err);
     logger.error("startInnerDispatchStep: caught — returning abandoned (no WDK retry)", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       platform: input.platform,
       event_id: input.eventId,
       thread_key: input.threadKey,
+      failure_kind: failureKind,
       error_name: err instanceof Error ? err.constructor.name : "unknown",
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
+    // For the per-session in-flight cap (user sent a second chat message
+    // before the first finished), post a short busy reply so the user
+    // sees a response rather than a stuck "Thinking…" indicator.
+    // postBusyReplyStep already swallows its own errors, so this can't
+    // re-introduce the WDK retry storm the outer try/catch is preventing.
+    if (failureKind === "in_flight") {
+      await postBusyReplyStep(input, "in_flight");
+    }
     return { kind: "abandoned" };
   }
 }
@@ -1492,12 +1503,13 @@ async function postOrEditStep(input: PostOrEditStepInput): Promise<PostOrEditRes
   return result;
 }
 
-async function postBusyReplyStep(input: ChatTriggerInput, which: "agent" | "user"): Promise<void> {
+async function postBusyReplyStep(
+  input: ChatTriggerInput,
+  which: "agent" | "user" | "in_flight",
+): Promise<void> {
   "use step";
 
-  const text = which === "user"
-    ? "I'm rate-limited for you specifically — wait a minute before retrying."
-    : "I'm currently busy across the board — wait a few minutes before retrying.";
+  const text = busyReplyText(which);
 
   try {
     const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
@@ -1507,9 +1519,35 @@ async function postBusyReplyStep(input: ChatTriggerInput, which: "agent" | "user
     logger.warn("postBusyReplyStep: failed", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
+      which,
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+function busyReplyText(which: "agent" | "user" | "in_flight"): string {
+  switch (which) {
+    case "user":
+      return "I'm rate-limited for you specifically — wait a minute before retrying.";
+    case "in_flight":
+      return "Still working on your last message — one moment.";
+    case "agent":
+    default:
+      return "I'm currently busy across the board — wait a few minutes before retrying.";
+  }
+}
+
+/**
+ * Pure error classifier for the `startInnerDispatchStep` catch block.
+ * Returns `"in_flight"` iff the caught error is a `ConcurrencyLimitError`
+ * (the per-session in-flight cap from `dispatcher.ts`). All other inputs
+ * — including non-Error values from the `unknown` catch type — return
+ * `"other"`. Pure: no I/O, no side effects, safe to unit-test.
+ */
+export function classifyDispatchFailure(
+  err: unknown,
+): "in_flight" | "other" {
+  return err instanceof ConcurrencyLimitError ? "in_flight" : "other";
 }
 
 async function flushAndFinishStep(opts: {

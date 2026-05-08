@@ -60,7 +60,15 @@ vi.mock("@/lib/mcp-connections", () => ({
   getCallbackBaseUrl: vi.fn(() => "http://test.local"),
 }));
 
-import { __testing, StaleClaimError } from "@/lib/workflows/chat-dispatch-workflow";
+import {
+  __testing,
+  StaleClaimError,
+  classifyDispatchFailure,
+} from "@/lib/workflows/chat-dispatch-workflow";
+import {
+  ConcurrencyLimitError,
+  BudgetExceededError,
+} from "@/lib/errors";
 
 const tenantId = "00000000-0000-0000-0000-000000000001" as TenantId;
 
@@ -360,5 +368,36 @@ describe("recoverLostClaim", () => {
     await drainPollBudget(); // re-poll exhausts → returns abandoned (no throw)
     const result = await promise;
     expect(result).toEqual({ kind: "abandoned", attempts: 6 });
+  });
+});
+
+describe("classifyDispatchFailure", () => {
+  it("returns 'in_flight' for ConcurrencyLimitError with the in-flight message", () => {
+    const err = new ConcurrencyLimitError(
+      "ContextId session has an in-flight message",
+    );
+    expect(classifyDispatchFailure(err)).toBe("in_flight");
+  });
+
+  it("returns 'in_flight' for ConcurrencyLimitError with the default message (no message-string match)", () => {
+    expect(classifyDispatchFailure(new ConcurrencyLimitError())).toBe(
+      "in_flight",
+    );
+  });
+
+  it("returns 'other' for a plain Error", () => {
+    expect(classifyDispatchFailure(new Error("anything else"))).toBe("other");
+  });
+
+  it("returns 'other' for adjacent AppError subclasses (e.g. BudgetExceededError)", () => {
+    expect(classifyDispatchFailure(new BudgetExceededError())).toBe("other");
+  });
+
+  it("returns 'other' for non-Error inputs from the unknown catch type", () => {
+    expect(classifyDispatchFailure(undefined)).toBe("other");
+    expect(classifyDispatchFailure(null)).toBe("other");
+    expect(classifyDispatchFailure("a string")).toBe("other");
+    expect(classifyDispatchFailure(42)).toBe("other");
+    expect(classifyDispatchFailure({ message: "duck-typed" })).toBe("other");
   });
 });
