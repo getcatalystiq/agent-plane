@@ -269,8 +269,50 @@ export const POST = withErrorHandler(async (req: NextRequest) => {
 
     const verified = await verifySlackV0(rawBody, ts, sigHeader, signingSecret);
     if (!verified) {
+      // DIAG: when the verify fails, log enough to triangulate WHY without
+      // leaking full secrets or signatures. Compare:
+      //   - secret_len + secret_head/tail (4 chars each) → did the right
+      //     value land in the DB?
+      //   - body_len + body_head_hash (sha256 first 16 chars of the raw
+      //     body) → was the body mutated in transit?
+      //   - sig_provided_prefix vs sig_expected_prefix (first 16 hex
+      //     chars of each v0 signature) → does the HMAC compute the same
+      //     bytes Slack signed?
+      //   - api_app_id (from the parsed body) → is this even the right
+      //     Slack app's signing secret? (multi-app accidental misroute)
+      let apiAppId: string | null = null;
+      try {
+        const parsed = JSON.parse(rawBody) as { api_app_id?: string };
+        if (typeof parsed.api_app_id === "string") apiAppId = parsed.api_app_id;
+      } catch {
+        // ignore
+      }
+      const sigMatch = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
+      const provided = sigMatch ? sigMatch[1].toLowerCase() : null;
+      const expected = await hmacSha256Hex(signingSecret, `v0:${ts}:${rawBody}`);
+      // Hash a prefix of the body so we can detect mutation without
+      // logging body content.
+      const bodyHashHead = await (async () => {
+        const h = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(rawBody.slice(0, 256)).buffer as ArrayBuffer,
+        );
+        return Array.from(new Uint8Array(h)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+      })();
       logger.warn("slack-webhook (deferred): signature mismatch — event dropped", {
         agent_id: targetBot.agentId,
+        team_id: teamId,
+        api_app_id: apiAppId,
+        secret_len: signingSecret.length,
+        secret_head: signingSecret.slice(0, 4),
+        secret_tail: signingSecret.slice(-4),
+        body_len: rawBody.length,
+        body_head_hash: bodyHashHead,
+        ts_header: ts,
+        sig_header_present: sigHeader !== null,
+        sig_header_format_ok: !!sigMatch,
+        sig_provided_prefix: provided ? provided.slice(0, 16) : null,
+        sig_expected_prefix: expected.slice(0, 16),
       });
       return;
     }
