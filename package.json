@@ -33,7 +33,8 @@
     "migrate": "npx tsx src/db/migrate.ts",
     "create-tenant": "npx tsx scripts/create-tenant.ts",
     "create-api-key": "npx tsx scripts/create-api-key.ts",
-    "bench:session": "tsx scripts/bench-session-boot.ts"
+    "bench:session": "tsx scripts/bench-session-boot.ts",
+    "postinstall": "node scripts/patch-wdk-maxduration.mjs"
   },
   "dependencies": {
     "@a2a-js/sdk": "0.3.12",
