@@ -642,6 +642,13 @@ export const ScheduleRow = z.object({
   injection_detected: z.boolean().default(false),
   injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
   injection_patterns: z.array(z.string()).nullable().default(null),
+  // Migration 041: schedule-to-channel delivery via Chat SDK adapter.
+  // Both NULL = no platform delivery (default; agent output lives only in
+  // session_messages transcript). Both set = scheduled-runs cron posts the
+  // agent's final reply to the named channel via the cached bot's adapter.
+  // CHECK chk_sched_target_paired enforces the both-or-neither invariant.
+  target_platform: z.enum(["slack", "discord"]).nullable().default(null),
+  target_channel: z.string().nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -655,6 +662,9 @@ const scheduleBaseFields = {
   day_of_week: z.number().int().min(0).max(6).nullable(),
   prompt: z.string().min(1).max(100_000).nullable(),
   enabled: z.boolean(),
+  // Optional channel delivery — both fields together or both omitted.
+  target_platform: z.enum(["slack", "discord"]).nullable().optional(),
+  target_channel: z.string().min(1).max(64).nullable().optional(),
 };
 
 function addScheduleCrossFieldValidation<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
@@ -674,6 +684,19 @@ function addScheduleCrossFieldValidation<T extends z.ZodObject<z.ZodRawShape>>(s
     }
     if (data.enabled && freq === "manual") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "cannot enable a manual schedule", path: ["enabled"] });
+    }
+    // Channel delivery: both target fields must be set together or
+    // neither. Mirrors the chk_sched_target_paired CHECK constraint.
+    const tgtP = data.target_platform as string | null | undefined;
+    const tgtC = data.target_channel as string | null | undefined;
+    const tgtPSet = tgtP !== null && tgtP !== undefined;
+    const tgtCSet = tgtC !== null && tgtC !== undefined && tgtC !== "";
+    if (tgtPSet !== tgtCSet) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "target_platform and target_channel must both be set or both omitted",
+        path: [tgtPSet ? "target_channel" : "target_platform"],
+      });
     }
   });
 }

@@ -165,6 +165,17 @@ function ScheduleCard({
   const [prompt, setPrompt] = useState(schedule.prompt ?? "");
   const [enabled, setEnabled] = useState(schedule.enabled);
   const [name, setName] = useState(schedule.name ?? "");
+  // Optional channel delivery: when both fields are set, the
+  // scheduled-runs cron posts the agent's final reply to the named
+  // channel via the Chat SDK adapter (`adapter.postChannelMessage`).
+  // When either is empty the schedule has no platform delivery —
+  // agent output lives only in the session_messages transcript.
+  // Migration 041's chk_sched_target_paired CHECK enforces both-or-
+  // neither at the DB level.
+  const [targetPlatform, setTargetPlatform] = useState<"" | "slack" | "discord">(
+    (schedule.target_platform as "slack" | "discord" | null) ?? "",
+  );
+  const [targetChannel, setTargetChannel] = useState(schedule.target_channel ?? "");
 
   const showTimePicker = ["daily", "weekdays", "weekly"].includes(frequency);
   const showDayPicker = frequency === "weekly";
@@ -175,6 +186,7 @@ function ScheduleCard({
     setOp("saving");
     setError(null);
     try {
+      const trimmedChannel = targetChannel.trim();
       await adminFetch(`/agents/${agentId}/schedules/${schedule.id}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -184,6 +196,11 @@ function ScheduleCard({
           day_of_week: showDayPicker ? dayOfWeek : null,
           prompt: prompt.trim() || null,
           enabled: canEnable ? enabled : false,
+          // Both-or-neither: send both as null when either is empty.
+          // Mirrors validation.ts cross-field rule + the DB's
+          // chk_sched_target_paired CHECK constraint (migration 041).
+          target_platform: targetPlatform && trimmedChannel ? targetPlatform : null,
+          target_channel: targetPlatform && trimmedChannel ? trimmedChannel : null,
         }),
       });
       await onSaved();
@@ -289,6 +306,44 @@ function ScheduleCard({
             disabled={busy}
           />
         </FormField>
+      )}
+
+      {frequency !== "manual" && (
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Post agent reply to a channel <span className="text-muted-foreground font-normal">(optional)</span></div>
+          <p className="text-xs text-muted-foreground">
+            When set, the scheduled run&rsquo;s final reply is delivered to the named channel via the bot&rsquo;s Chat SDK adapter.
+            Leave both fields empty to keep output in the run transcript only. The bot must be installed in the workspace
+            for the chosen platform; for private channels (Slack <code>G…</code>, Discord threads) the bot must be a member.
+          </p>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Platform">
+              <Select
+                value={targetPlatform}
+                onChange={(e) => setTargetPlatform(e.target.value as "" | "slack" | "discord")}
+                disabled={busy}
+              >
+                <option value="">— none —</option>
+                <option value="slack">Slack</option>
+                <option value="discord">Discord</option>
+              </Select>
+            </FormField>
+            <FormField label="Channel ID">
+              <Input
+                value={targetChannel}
+                onChange={(e) => setTargetChannel(e.target.value)}
+                placeholder={
+                  targetPlatform === "discord"
+                    ? "e.g. 1234567890123456789"
+                    : targetPlatform === "slack"
+                      ? "e.g. C0ABCDEF12 or G0ABCDEF12"
+                      : "select a platform first"
+                }
+                disabled={busy || !targetPlatform}
+              />
+            </FormField>
+          </div>
+        </div>
       )}
 
       {(schedule.last_run_at || schedule.next_run_at) && (

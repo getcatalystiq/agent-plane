@@ -17,6 +17,7 @@ import { logger } from "@/lib/logger";
 import { shouldUseWorkflow } from "@/lib/workflows/toggle";
 import { start } from "workflow/api";
 import { dispatchWorkflow } from "@/lib/workflows/dispatch-workflow";
+import { deliverScheduleReplyToChannel } from "@/lib/platform/scheduled-delivery";
 import { z } from "zod";
 import type { AgentId, TenantId } from "@/lib/types";
 
@@ -133,6 +134,14 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     const decoder = new TextDecoder();
     let lineBuffer = "";
     let timedOut = false;
+    // Collect the agent's reply text for channel delivery (when the
+    // schedule has target_platform + target_channel set). Concatenates
+    // text blocks from `assistant` events plus a final `result.result`
+    // fallback. Mirrors the parsing in chat-dispatch-workflow.ts so
+    // streaming and non-streaming runners both produce a readable
+    // string.
+    let collectedReplyText = "";
+    let sawResultFallback = "";
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
@@ -167,6 +176,38 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
         for (const line of lines) {
           if (line.includes('"type":"stream_detached"')) {
             streamDetached = true;
+          }
+          // Best-effort reply-text collection for channel delivery.
+          // Substring-checks first to avoid JSON.parse on every line
+          // (most are text_delta during streaming runs). On match,
+          // parse and extract the relevant text fields.
+          if (
+            schedule.target_platform &&
+            schedule.target_channel &&
+            (line.includes('"type":"assistant"') || line.includes('"type":"result"') || line.includes('"type":"text_delta"'))
+          ) {
+            try {
+              const evt = JSON.parse(line) as {
+                type?: string;
+                text?: string;
+                result?: string;
+                message?: { content?: Array<{ type?: string; text?: string }> };
+              };
+              if (evt.type === "text_delta" && typeof evt.text === "string") {
+                collectedReplyText += evt.text;
+              } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
+                for (const block of evt.message.content ?? []) {
+                  if (block.type === "text" && typeof block.text === "string") {
+                    collectedReplyText += block.text;
+                  }
+                }
+              } else if (evt.type === "result" && typeof evt.result === "string") {
+                sawResultFallback = evt.result;
+              }
+            } catch {
+              // Partial line or non-JSON — ignore. The next iteration
+              // appends more bytes via the lineBuffer split.
+            }
           }
         }
       }
@@ -259,6 +300,36 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
   // the sandbox on the next cleanup tick.
   if (flippedMessage) {
     await casActiveToIdle(sessionId, tenantId, messageId).catch(() => {});
+  }
+
+  // Channel delivery — only if the schedule was configured to post
+  // its reply to a Slack/Discord channel. Best-effort; delivery
+  // failure doesn't flip the run to `failed` (the agent did its job;
+  // the post is just the operator's preferred output sink).
+  if (
+    schedule.target_platform &&
+    schedule.target_channel &&
+    !flippedMessage
+  ) {
+    const replyText = collectedReplyText.length > 0 ? collectedReplyText : sawResultFallback;
+    if (replyText.length > 0) {
+      await deliverScheduleReplyToChannel({
+        tenantId,
+        agentId,
+        scheduleId: schedule_id,
+        targetPlatform: schedule.target_platform as "slack" | "discord",
+        targetChannel: schedule.target_channel,
+        text: replyText,
+      });
+    } else {
+      logger.warn("Scheduled run: no reply text collected to deliver", {
+        schedule_id,
+        agent_id: agent.id,
+        message_id: messageId,
+        target_platform: schedule.target_platform,
+        target_channel: schedule.target_channel,
+      });
+    }
   }
 
   logger.info("Scheduled run completed", { schedule_id, agent_id: agent.id, message_id: messageId });
