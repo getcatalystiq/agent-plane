@@ -228,11 +228,27 @@ async function tryWorkflowCancel(
     });
     return false;
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // WDK throws "Cannot cancelled workflow run X because it has already
+    // finished with status 'completed'" when the run reached terminal
+    // before our cancel arrived. That's the cleanup cron's *desired*
+    // end state — no fallback, no warn. Same for already-cancelled /
+    // already-failed: the run is in a terminal state, the watchdog's
+    // job is done.
+    const ALREADY_TERMINAL_RE = /already finished with status '(completed|failed|cancelled|stopped)'/i;
+    if (ALREADY_TERMINAL_RE.test(msg)) {
+      logger.info("cleanup: workflow already terminal — no cancel needed", {
+        session_id: session.id,
+        run_id: rawRunId,
+        reason,
+      });
+      return true;
+    }
     logger.warn("cleanup: workflow cancel threw — falling back to legacy", {
       session_id: session.id,
       run_id: rawRunId,
       reason,
-      error: err instanceof Error ? err.message : String(err),
+      error: msg,
     });
     return false;
   }

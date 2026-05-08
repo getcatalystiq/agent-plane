@@ -19,22 +19,35 @@ const nextConfig: NextConfig = {
     ];
   },
   async rewrites() {
-    return [
-      // WDK queue-callback proxy: route the framework's POST traffic
-      // through wrappers that translate the framework's own
-      // MessageNotAvailableError 500 (queue dedup, expected) to a 200.
-      // See `src/app/api/internal/wdk-step-proxy/route.ts` for full
-      // rationale. Sits under `/api/internal/` so middleware's public-
-      // path bypass leaves it open to the external WDK queue.
-      {
-        source: "/.well-known/workflow/v1/step",
-        destination: "/api/internal/wdk-step-proxy",
-      },
-      {
-        source: "/.well-known/workflow/v1/flow",
-        destination: "/api/internal/wdk-flow-proxy",
-      },
-    ];
+    // CRITICAL: must be in `beforeFiles`, not the default `afterFiles`.
+    // The WDK-generated route at
+    // `src/app/.well-known/workflow/v1/{step,flow}/route.js` exists in
+    // the file system, so an `afterFiles` rewrite (the default when an
+    // array is returned directly) never fires — Next.js routes to the
+    // matched file first. `beforeFiles` runs the rewrite BEFORE the
+    // filesystem check, so the proxy is consulted first and the
+    // generated route is reached only via dynamic-import inside the
+    // proxy itself.
+    return {
+      beforeFiles: [
+        // WDK queue-callback proxy: route the framework's POST traffic
+        // through wrappers that translate the framework's own
+        // MessageNotAvailableError 500 (queue dedup, expected) to a 200.
+        // See `src/app/api/internal/wdk-step-proxy/route.ts` for full
+        // rationale. Sits under `/api/internal/` so middleware's public-
+        // path bypass leaves it open to the external WDK queue.
+        {
+          source: "/.well-known/workflow/v1/step",
+          destination: "/api/internal/wdk-step-proxy",
+        },
+        {
+          source: "/.well-known/workflow/v1/flow",
+          destination: "/api/internal/wdk-flow-proxy",
+        },
+      ],
+      afterFiles: [],
+      fallback: [],
+    };
   },
   async headers() {
     return [
