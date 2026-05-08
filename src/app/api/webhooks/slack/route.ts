@@ -167,23 +167,54 @@ async function maybeHandleFirstTimeChallenge(
   }
 
   if (!matchedSource) {
-    // List per-candidate secret_head/tail so the operator can see at a
-    // glance whether their newly-saved bot's secret made it into the
-    // candidate list AND whether the head/tail matches what's visible
-    // in the Slack app's Basic Info → Signing Secret. Common failure
-    // modes:
-    //   - The new bot row isn't in the candidates → save didn't persist
-    //     (UI/admin bug) or the row is `enabled=false`.
-    //   - The new bot row IS in the candidates but secret_head/tail
-    //     don't match Slack's UI value → wrong value pasted.
-    logger.warn("slack-webhook: url_verification signature did not match any registered secret", {
-      candidates_tried: candidates.length,
-      candidates: candidates.map((c) => ({
+    // No candidate verified. The candidates list (with secret head/tail)
+    // already disambiguates the wrong-paste case. To diagnose the
+    // operator-confirms-the-secret-matches case (HMAC compute differs
+    // even though the key is right), add timestamp + body fingerprints
+    // + per-candidate `sig_expected_prefix` so we can compare against
+    // Slack's `sig_provided_prefix`. Same shape PR #70 added for the
+    // deferred-event mismatch path.
+    const sigMatch = sigHeader?.match(/^v0=([0-9a-f]+)$/i);
+    const provided = sigMatch ? sigMatch[1].toLowerCase() : null;
+    const bodyHashHead = await (async () => {
+      const h = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(rawBody.slice(0, 256)).buffer as ArrayBuffer,
+      );
+      return Array.from(new Uint8Array(h)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+    })();
+    // url_verification body has no `api_app_id`, but it does include
+    // a `token` field (deprecated Verification Token). Log a prefix —
+    // helps disambiguate which Slack app the request is associated with
+    // when the operator has multiple apps.
+    let tokenPrefix: string | null = null;
+    try {
+      const peek = JSON.parse(rawBody) as { token?: unknown };
+      if (typeof peek.token === "string" && peek.token.length > 0) {
+        tokenPrefix = peek.token.slice(0, 6);
+      }
+    } catch {
+      // ignore
+    }
+    const candidatesWithExpected = await Promise.all(
+      candidates.map(async (c) => ({
         source: c.source,
         secret_len: c.secret.length,
         secret_head: c.secret.slice(0, 4),
         secret_tail: c.secret.slice(-4),
+        sig_expected_prefix: (await hmacSha256Hex(c.secret, `v0:${ts}:${rawBody}`)).slice(0, 16),
       })),
+    );
+    logger.warn("slack-webhook: url_verification signature did not match any registered secret", {
+      candidates_tried: candidates.length,
+      ts_header: ts,
+      body_len: rawBody.length,
+      body_head_hash: bodyHashHead,
+      verification_token_prefix: tokenPrefix,
+      sig_header_present: sigHeader !== null,
+      sig_header_format_ok: !!sigMatch,
+      sig_provided_prefix: provided ? provided.slice(0, 16) : null,
+      candidates: candidatesWithExpected,
     });
     return unhandledResponse();
   }
