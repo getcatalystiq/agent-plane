@@ -272,6 +272,30 @@ export function registerSlackHandlers(bot: Chat, input: SlackHandlerInput): void
       // Drop bot echoes.
       if (m.author?.isMe || m.author?.isBot) return;
 
+      // Slack chat-lib subscriptions persist forever once thread.subscribe()
+      // runs (no TTL on the underlying Redis SET). That meant a single
+      // long-ago @-mention left the bot firing on every human reply in the
+      // thread for the lifetime of the workspace — including chitchat
+      // between users who weren't talking to the bot at all (operator
+      // report 2026-05-08: bot replied to "hahaa" in a thread it had no
+      // current business in).
+      //
+      // Once a thread is subscribed, the chat lib routes @-mentions
+      // through this handler too (with `isMention=true`) instead of
+      // onNewMention, so requiring isMention here still lets users
+      // continue a conversation by @-mentioning. The trade-off vs.
+      // pre-fix behavior: users have to re-@-mention to keep the
+      // conversation going. Worth it to stop drive-by replies.
+      if (!m.isMention) {
+        logger.debug("slack onSubscribedMessage skipped (not a mention)", {
+          tenant_id: input.tenantId,
+          agent_id: input.agentId,
+          thread_key: t.id,
+          author_user_id: m.author?.userId,
+        });
+        return;
+      }
+
       await triggerChatWorkflow({
         tenantId: input.tenantId,
         agentId: input.agentId,

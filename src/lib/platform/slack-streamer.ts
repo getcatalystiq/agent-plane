@@ -36,11 +36,21 @@ import type { CachedBot } from "@/lib/platform/bot";
  *  cuts API call count ~8× without making short replies feel chunky. */
 const DEFAULT_BUFFER_SIZE = 2048;
 
-/** Hard cap on how long a single Slack stream may stay open before we
- *  proactively rollover. Slack's server-side timeout is undocumented; 90s
- *  is a conservative ceiling that has room to drop further if we observe
- *  earlier kills in practice. */
+/** Soft cap on how long a single Slack stream may stay open before we
+ *  proactively rollover at a markdown-clean boundary. Slack's server-side
+ *  timeout is undocumented; 90s is a conservative ceiling that has room
+ *  to drop further if we observe earlier kills in practice. */
 const DEFAULT_STREAM_MAX_OPEN_MS = 90_000;
+
+/** Hard cap on how long a single Slack stream may stay open. Once exceeded
+ *  we rollover even if the renderer is mid-token, because a long agent
+ *  reply that never emits a `\n` (one-paragraph answers — common when the
+ *  agent summarizes results) would otherwise sit on the soft cap forever
+ *  and get silently force-closed by Slack server-side, stranding the tail
+ *  in the renderer's holdback. The mid-token seam shows up as a brief
+ *  unclosed marker on the previous message and a clean continuation on
+ *  the next — strictly better UX than a missing reply. */
+const DEFAULT_STREAM_MAX_OPEN_HARD_MS = 150_000;
 
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -55,6 +65,10 @@ function getBufferSize(): number {
 
 function getStreamMaxOpenMs(): number {
   return readPositiveIntEnv("SLACK_STREAM_MAX_OPEN_MS", DEFAULT_STREAM_MAX_OPEN_MS);
+}
+
+function getStreamMaxOpenHardMs(): number {
+  return readPositiveIntEnv("SLACK_STREAM_MAX_OPEN_HARD_MS", DEFAULT_STREAM_MAX_OPEN_HARD_MS);
 }
 
 function debugEnabled(): boolean {
@@ -390,6 +404,7 @@ export async function streamToSlack(input: StreamToSlackInput): Promise<StreamTo
 
   const bufferSize = getBufferSize();
   const streamMaxOpenMs = getStreamMaxOpenMs();
+  const streamMaxOpenHardMs = getStreamMaxOpenHardMs();
   const debug = debugEnabled();
   const startedAt = Date.now();
   const timings = new AppendTimings();
@@ -414,6 +429,7 @@ export async function streamToSlack(input: StreamToSlackInput): Promise<StreamTo
       thread_ts: rawThreadTs,
       buffer_size: bufferSize,
       stream_max_open_ms: streamMaxOpenMs,
+      stream_max_open_hard_ms: streamMaxOpenHardMs,
       raw_newline_render: rawNewlineRenderEnabled(),
     });
   }
@@ -493,12 +509,22 @@ export async function streamToSlack(input: StreamToSlackInput): Promise<StreamTo
         renderer.push(chunk);
 
         // T1 — proactively rollover before Slack's server-side timeout.
-        if (
-          session.isOpen() &&
-          session.elapsedMs() > streamMaxOpenMs &&
-          atSafeBoundary()
-        ) {
-          await rollover("max_open_ms_exceeded");
+        // Two-tier policy:
+        //   - Soft cap (90s default): rollover only at a clean markdown
+        //     boundary (committable ends in \n or is empty) so the seam
+        //     between messages is invisible.
+        //   - Hard cap (150s default): rollover regardless of boundary.
+        //     Long single-paragraph replies have no internal newline, so
+        //     the soft cap would never fire and Slack would silently
+        //     force-close the stream — stranding the tail. A mid-token
+        //     seam is recoverable; a missing reply is not.
+        if (session.isOpen()) {
+          const open = session.elapsedMs();
+          if (open > streamMaxOpenHardMs) {
+            await rollover("max_open_hard_ms_exceeded");
+          } else if (open > streamMaxOpenMs && atSafeBoundary()) {
+            await rollover("max_open_ms_exceeded");
+          }
         }
 
         await flushDelta();
@@ -518,12 +544,13 @@ export async function streamToSlack(input: StreamToSlackInput): Promise<StreamTo
         if (chunk.text.length === 0) continue;
         bytesYielded += chunk.text.length;
         renderer.push(chunk.text);
-        if (
-          session.isOpen() &&
-          session.elapsedMs() > streamMaxOpenMs &&
-          atSafeBoundary()
-        ) {
-          await rollover("max_open_ms_exceeded");
+        if (session.isOpen()) {
+          const open = session.elapsedMs();
+          if (open > streamMaxOpenHardMs) {
+            await rollover("max_open_hard_ms_exceeded");
+          } else if (open > streamMaxOpenMs && atSafeBoundary()) {
+            await rollover("max_open_ms_exceeded");
+          }
         }
         await flushDelta();
       } else {

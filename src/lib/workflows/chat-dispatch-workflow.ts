@@ -454,11 +454,21 @@ async function consumeAndStreamSlack(
   // emit a TaskUpdateChunk with status "in_progress" so Slack's
   // StreamingPlan UI shows the tool call as a visible step. When the
   // matching tool_result arrives (in a subsequent `user` role message),
-  // we emit status "complete" with the same id. Without this, multi-
-  // tool agent runs look like a long pause between text chunks; with
-  // it, the user sees "🔧 search_docs(query='FDA') → ✅" while the
-  // agent works.
+  // we emit status "complete" (or "error" when is_error=true) with the
+  // same id. Without this, multi-tool agent runs look like a long pause
+  // between text chunks; with it, the user sees "🔧 search_docs(...) → ✅"
+  // while the agent works.
+  //
+  // openToolIds tracks tool_uses that have NOT yet received a tool_result.
+  // The Claude Agent SDK's `Agent` (sub-agent) tool does not always emit a
+  // standard tool_result block — the sub-agent's output gets folded back
+  // into the parent's next assistant turn instead. Without a flush, those
+  // tool_use task_updates stay at "in_progress" forever; Slack renders
+  // stale tasks with a red ⚠️ icon, masquerading as failures. On the
+  // result/terminal event we sweep openToolIds and emit "complete" for
+  // anything that never resolved, so the UI lands on a clean state.
   const toolTitleById = new Map<string, string>();
+  const openToolIds = new Set<string>();
 
   // The Claude Agent SDK runner emits BOTH per-token `text_delta` events
   // AND a final `assistant` message carrying the same complete text in
@@ -515,20 +525,30 @@ async function consumeAndStreamSlack(
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
             if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-              // Streaming runners: rely on text_delta events. The
-              // assistant event's text is already covered (or partially
-              // covered with sporadic drops). Yielding it here would
-              // double the reply when deltas dropped under load.
+              // Streaming runners: rely on text_delta events. When all
+              // deltas arrived, the assistant event's text is fully
+              // covered and yielding it again would double the reply.
+              // When deltas were partially dropped (writeChunkStep
+              // PR #62 swallows per-chunk errors; runner POST retries
+              // can exhaust under load), the partial deltas already
+              // form a clean prefix of the final assistant text — we
+              // yield the missing tail. On a prefix mismatch (rare:
+              // would mean delta and assistant texts diverge mid-
+              // stream), suppress the assistant text to keep the bug
+              // d5dd1e8 was fixing dead — partial-text in Slack is
+              // strictly better UX than scrambled-text.
               //
-              // Non-streaming runners: no deltas arrive — yield the
-              // assistant text once so the user gets a reply at all.
-              if (perTurnDeltaText.length === 0) {
+              // Non-streaming runners: perTurnDeltaText.length === 0,
+              // assistantTailAfterDeltas returns the full text so the
+              // user gets a reply at all.
+              const tail = assistantTailAfterDeltas(block.text, perTurnDeltaText);
+              if (tail.length > 0) {
                 emittedAnyText = true;
                 if (pendingText.length > 0) {
                   yield pendingText;
                   pendingText = "";
                 }
-                yield block.text;
+                yield tail;
               }
             } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
               // Flush any pending text before structured chunks so they
@@ -540,6 +560,7 @@ async function consumeAndStreamSlack(
               const title = block.name;
               const details = summarizeToolInput(block.input);
               toolTitleById.set(block.id, title);
+              openToolIds.add(block.id);
               yield {
                 type: "task_update",
                 id: block.id,
@@ -553,7 +574,9 @@ async function consumeAndStreamSlack(
         } else if (evt.type === "user" && evt.message && typeof evt.message === "object") {
           // The Claude Agent SDK delivers tool results inside a `user` role
           // message wrapper. content[] holds tool_result blocks correlated
-          // to the originating tool_use via `tool_use_id`.
+          // to the originating tool_use via `tool_use_id`. Honor the
+          // SDK's `is_error` flag so genuinely-failed tools render as the
+          // Slack ⚠️ task state instead of a misleading green checkmark.
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
             if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
@@ -567,11 +590,13 @@ async function consumeAndStreamSlack(
                 : Array.isArray(block.content)
                   ? block.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n")
                   : undefined;
+              const status: "complete" | "error" = block.is_error === true ? "error" : "complete";
+              openToolIds.delete(block.tool_use_id);
               yield {
                 type: "task_update",
                 id: block.tool_use_id,
                 title,
-                status: "complete",
+                status,
                 ...(output && output.length > 0 ? { output: output.length > 200 ? output.slice(0, 197) + "…" : output } : {}),
               };
             }
@@ -599,6 +624,27 @@ async function consumeAndStreamSlack(
           break;
         }
       }
+      // Sweep any tool_uses we never saw a tool_result for. The Claude
+      // Agent SDK's `Agent` (sub-agent) tool folds its output back into
+      // the parent's next assistant turn rather than emitting a discrete
+      // tool_result block, so the corresponding task_update we sent at
+      // status "in_progress" stays open. Slack's StreamingPlan UI renders
+      // stale in_progress tasks as a red ⚠️ — visually identical to a
+      // real failure. Closing them out here keeps the final card honest.
+      for (const openId of openToolIds) {
+        if (pendingText.length > 0) {
+          yield pendingText;
+          pendingText = "";
+        }
+        const title = toolTitleById.get(openId) ?? openId;
+        yield {
+          type: "task_update",
+          id: openId,
+          title,
+          status: "complete",
+        };
+      }
+      openToolIds.clear();
       // Drain any pending coalesced text on close.
       if (pendingText.length > 0) {
         yield pendingText;
@@ -1608,8 +1654,11 @@ interface AssistantContentBlock {
   input?: unknown;
   // tool_result blocks (live in `user` role messages, not assistant). The
   // `tool_use_id` correlates with the originating tool_use block's id so
-  // we can mark that task complete.
+  // we can mark that task complete. `is_error` (Claude Agent SDK) signals
+  // a failed tool execution — surfaced to Slack as task_update status
+  // "error" so users see the ⚠️ state instead of a misleading green ✅.
   tool_use_id?: string;
+  is_error?: boolean;
   content?: string | Array<{ type?: string; text?: string }>;
 }
 
@@ -1660,6 +1709,35 @@ function textRemainderAfterDeltas(assistantText: string, deltaText: string): str
     return assistantText.slice(deltaText.length);
   }
   return assistantText;
+}
+
+/**
+ * Slack-path variant of `textRemainderAfterDeltas` that does NOT fall back
+ * to the full assistant text on a prefix mismatch.
+ *
+ * Slack's renderer streams via `streamer.append({ markdown_text: delta })`,
+ * which appends to the in-flight message's body. Yielding the full assistant
+ * text on a prefix mismatch would APPEND it to the partial deltas already
+ * in the renderer's buffer, producing the doubled-and-scrambled reply that
+ * commit `d5dd1e8 fix(slack): skip assistant.text when any deltas arrived`
+ * was originally fixing.
+ *
+ * On the clean prefix case (deltas are a strict prefix of assistant.text —
+ * the common shape when writeChunkStep dropped trailing text_delta lines),
+ * yielding only the missing tail recovers the dropped content without any
+ * doubling risk: the renderer's accumulated buffer already contains the
+ * prefix, so appending only the suffix produces the full final message.
+ *
+ * On a real mismatch (rare), we yield "" — the user sees the partial
+ * deltas only. Partial-text in Slack is strictly better UX than scrambled
+ * text, matching the trade-off `d5dd1e8` made.
+ */
+function assistantTailAfterDeltas(assistantText: string, deltaText: string): string {
+  if (deltaText.length === 0) return assistantText;
+  if (assistantText.startsWith(deltaText)) {
+    return assistantText.slice(deltaText.length);
+  }
+  return "";
 }
 
 /** Render a tool_use input as a one-line task subtitle. */
