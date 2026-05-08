@@ -219,6 +219,35 @@ async function consumeAndPostStep(
 ): Promise<void> {
   "use step";
 
+  // Same anti-retry posture as startInnerDispatchStep: a throw out of
+  // this step triggers WDK's auto-retry with multi-minute backoff,
+  // which on the chat path means the user sits waiting on Slack with
+  // no reply while WDK respawns the step. Better to log + return
+  // cleanly so the run finalizes and the user gets a clear error
+  // signal (the existing 👀→❌ swap in the inner finally still fires
+  // because the inner try/finally is intact below).
+  try {
+    return await consumeAndPostStepBody(input, innerRunId, isOrphan);
+  } catch (err) {
+    logger.error("consumeAndPostStep: caught — returning cleanly (no WDK retry)", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      platform: input.platform,
+      thread_key: input.threadKey,
+      inner_run_id: innerRunId,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return;
+  }
+}
+
+async function consumeAndPostStepBody(
+  input: ChatTriggerInput,
+  innerRunId: string,
+  isOrphan: boolean,
+): Promise<void> {
   if (isOrphan) {
     // Inner workflow is running but the placeholder UPDATE failed.
     // Cleanup sweep reaps the row at the 15min TTL; retries for the
@@ -937,6 +966,37 @@ async function startInnerDispatchStep(
 ): Promise<StartedDispatch> {
   "use step";
 
+  // Wrapped in try/catch so a thrown error does NOT trigger WDK's
+  // automatic step retry. Production trace via `workflow inspect events`
+  // showed startInnerDispatchStep retrying multiple times — adding 1-3
+  // minutes of latency per chat run. WDK's retry backoff is the wrong
+  // contract for an interactive chat reply: the user is waiting and
+  // would rather see a quick "I had trouble" than a delayed reply 5
+  // minutes later. On any caught error: log loudly, return `abandoned`
+  // (clean exit path that the workflow body already handles), and let
+  // the cleanup-sessions cron sweep any orphan rows we created before
+  // the throw.
+  try {
+    return await startInnerDispatchStepBody(input, persisted);
+  } catch (err) {
+    logger.error("startInnerDispatchStep: caught — returning abandoned (no WDK retry)", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      platform: input.platform,
+      event_id: input.eventId,
+      thread_key: input.threadKey,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return { kind: "abandoned" };
+  }
+}
+
+async function startInnerDispatchStepBody(
+  input: ChatTriggerInput,
+  persisted: PersistedAttachment[],
+): Promise<StartedDispatch> {
   // DIAG: very-first-line breadcrumb so we can confirm the step body
   // is entered at all. If this log doesn't fire, WDK isn't running our
   // step body (deploy/registration issue). If it fires but later logs
