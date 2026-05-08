@@ -46,7 +46,6 @@ import {
   APPROX_CHUNK_INTERVAL_MS,
   EDIT_FLUSH_INTERVAL_MS,
   MAX_RATE_LIMITED_BACKOFF_CHUNKS,
-  PLACEHOLDER_THINKING_TEXT,
 } from "@/lib/platform/limits";
 import { tryConsumeChannelToken, drainChannelToken } from "@/lib/platform/redis-bucket";
 import {
@@ -237,36 +236,37 @@ async function consumeAndPostStep(
   let postFailed = false;
   let resultEventCount = 0;
 
-  // Post a placeholder immediately so the user gets visible feedback that
-  // the bot received the message. Without this, non-streaming runners
-  // (Claude Agent SDK) emit one big `assistant` event at the end and the
-  // user stares at silence for 2-15s before the reply lands. The
-  // placeholder gets edited in-place by every subsequent flush via the
-  // existing `messageId` + edit path. If the placeholder post fails, we
-  // continue without it — the final flush will create a fresh message.
-  const placeholderText = PLACEHOLDER_THINKING_TEXT[input.platform];
-  const placeholderResult = await postOrEditStep({
-    tenantId: input.tenantId,
-    agentId: input.agentId,
-    platform: input.platform,
-    threadId: input.threadKey,
-    text: placeholderText,
-    existingMessageId: null,
-    seal: false,
-    continuation: false,
-  });
-  if (placeholderResult.ok) {
-    messageId = placeholderResult.messageId;
-    hasPosted = true;
-    // committedLength stays 0 — the placeholder is NOT real content; the
-    // first edit replaces it entirely, not appends to it.
-  } else {
-    logger.warn("consumeAndPostStep: placeholder post failed; falling back to non-placeholder flow", {
+  // Show the platform's native typing indicator so the user sees
+  // immediate feedback ("Typing…") while the agent generates its reply.
+  // Slack uses `assistant.threads.setStatus` when the bot has the AI
+  // Apps feature + assistant:write scope; otherwise falls back to the
+  // default typing indicator. Discord uses its standard typing event.
+  // The indicator auto-clears when the next message posts to the
+  // thread, so no explicit stop call is needed.
+  //
+  // Replaces the prior "_Thinking…_" placeholder + edit pattern. The
+  // placeholder worked but produced an extra message in the thread
+  // history (the agent's first turn was always followed by the edited-
+  // out placeholder line). Native typing indicators don't leave a
+  // residue and work the same way human-to-human chat works.
+  //
+  // Best-effort: a typing-indicator failure (rate limit, missing scope,
+  // adapter error) must NOT block the actual reply. Wrap in try/catch
+  // and log a warn.
+  try {
+    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
+    if (cached) {
+      const adapter = cached.adapter as { startTyping?: (threadId: string, status?: string) => Promise<void> };
+      if (typeof adapter.startTyping === "function") {
+        await adapter.startTyping(input.threadKey);
+      }
+    }
+  } catch (err) {
+    logger.warn("consumeAndPostStep: startTyping failed (best-effort, non-blocking)", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
-      rate_limited: placeholderResult.rateLimited,
-      error: placeholderResult.error,
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 
@@ -415,20 +415,17 @@ async function consumeAndPostStep(
     }
   }
 
-  // Empty-readable guard. The "_Thinking…_" placeholder set hasPosted=true
-  // even with no real content, so we gate on `responseText === ""` +
-  // `resultEventCount === 0` here (committedLength is the right tell that
-  // no real content has been flushed — it stays at 0 until a rollover
-  // seals a message). If a placeholder exists, EDIT it in place to surface
-  // the silent-bot UX instead of posting a new message and leaving the
-  // placeholder dangling.
-  if (!postFailed && resultEventCount === 0 && responseText === "" && committedLength === 0) {
+  // Empty-readable guard. With native typing indicators (no placeholder
+  // post), `hasPosted` is the right tell again — it only becomes true
+  // after a real flush succeeds. The native typing indicator auto-clears
+  // when no message arrives, so a silent run leaves no residue beyond
+  // this acknowledgement post.
+  if (!hasPosted && !postFailed && resultEventCount === 0 && responseText === "") {
     logger.warn("consumeAndPostStep: inner dispatch produced no output", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
       inner_run_id: innerRunId,
-      had_placeholder: messageId !== null,
     });
     try {
       await postOrEditStep({
@@ -437,7 +434,7 @@ async function consumeAndPostStep(
         platform: input.platform,
         threadId: input.threadKey,
         text: "_(agent produced no output — please retry)_",
-        existingMessageId: messageId,
+        existingMessageId: null,
         seal: false,
         continuation: false,
       });

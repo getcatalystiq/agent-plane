@@ -35,13 +35,3 @@ export const EDIT_FLUSH_INTERVAL_MS = 1000;
 // retrying. Keeps the loop responsive on slow models and bounds
 // stream-buffer accumulation.
 export const MAX_RATE_LIMITED_BACKOFF_CHUNKS = 12;
-
-// Placeholder text posted at the start of consumeAndPostStep so users
-// see immediate feedback while the agent is generating its reply. Edited
-// in place by the first real flush. Kept short + uses platform-native
-// formatting (Slack uses single-asterisk italics, Discord uses
-// underscore italics).
-export const PLACEHOLDER_THINKING_TEXT: Record<ChatPlatform, string> = {
-  discord: "_Thinking…_",
-  slack: "_Thinking…_",
-};
