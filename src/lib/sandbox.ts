@@ -806,7 +806,10 @@ function claudeSdkStreamLoop(): string {
       if (message.type === 'stream_event') {
         const ev = message.event;
         if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-          console.log(JSON.stringify({ type: 'text_delta', text: ev.delta.text }));
+          // emit() (not console.log) so deltas enter __streamBuffer and reach
+          // resumeHook in real time. captureTranscript drops text_delta from
+          // the final blob, so this does not bloat storage.
+          emit({ type: 'text_delta', text: ev.delta.text });
         }
       } else if (message.type === 'result' && process.env.AGENT_PLANE_BILLING_SOURCE === 'subscription') {
         emit({ ...message, cost_usd: 0, total_cost_usd: 0 });
