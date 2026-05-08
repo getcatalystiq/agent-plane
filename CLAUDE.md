@@ -270,6 +270,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - `DATABASE_URL_UNPOOLED` is auto-set when Neon is linked via the Vercel integration
 - Security headers set via `next.config.ts`: HSTS, X-Content-Type-Options, X-Frame-Options DENY, Referrer-Policy
 - Vercel functions config: `app/api/sessions/**`, `app/api/admin/sessions/**`, and `app/api/a2a/**` have `supportsCancellation: true` for streaming cancellation. `app/api/runs/**` no longer exists.
+- **Fluid Compute is REQUIRED** for the chat workflow. The WDK builder (`@workflow/builders`) writes `maxDuration: 'max'` into the auto-generated `.well-known/workflow/v1/step.func` and `flow.func`. On Pro Lambda mode `'max'` resolves to ~120s, which silently truncates `consumeAndPostStep` mid-Slack-stream when the agent reply runs longer than that (3 confirmed cases of `consumeAndPostStep` cutting off at exactly 120.52s). On Pro Fluid mode `'max'` resolves to 800s. Toggle path: Vercel project → Settings → Functions → Fluid Compute. Until enabled, every long chat reply leaves a 12+ minute zombie inner workflow churning compute and storage on a reply the user never sees. The chat workflow now defensively cancels the inner run on early-exit (no terminal observed) so the zombie is short-lived even if Fluid is off, but Fluid is the proper fix.
 
 ## Sandbox & Runner
 

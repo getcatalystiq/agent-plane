@@ -192,7 +192,28 @@ export async function chatDispatchWorkflow(
   //    (WDK supports getReadable({ startIndex })).
   // consumeAndPostStep also runs the markBotEvent tail at the end,
   // collapsing what used to be a separate finalizeChatStep boundary.
-  await consumeAndPostStep(input, started.innerRunId, started.kind === "orphan");
+  const consumeResult = await consumeAndPostStep(input, started.innerRunId, started.kind === "orphan");
+
+  // 5. Zombie-cancel guard. If consumeAndPostStep returned without
+  //    observing a terminal (`result` / `error` / `kind: "terminal"`)
+  //    event, the chat function bailed early — most commonly because
+  //    Vercel's function host hit maxDuration mid-stream (a 120s wall
+  //    on Pro Lambda; up to 800s on Pro Fluid; either is reachable on
+  //    a marathon agent reply). The chat workflow run terminates here,
+  //    but the *inner* dispatch workflow is a separate WDK run on
+  //    independent function lifecycles — its writeChunkSteps keep
+  //    firing for the FULL agent runtime (we observed 12-min zombies
+  //    where the user-visible reply ended at 2:00 but the inner run
+  //    churned to 14:00, burning sandbox minutes, transcript blob
+  //    bytes, and tenant budget on output the user never saw).
+  //
+  //    Cancel the inner run here so the dispatcher's finalize path
+  //    runs promptly (sandbox stop, message status mark) instead of
+  //    waiting for the cleanup-sessions watchdog (`max_runtime + 120s`
+  //    grace, 720s default).
+  if (!consumeResult.sawTerminal) {
+    await cancelInnerRunStep(started.innerRunId, input.tenantId, input.agentId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +261,7 @@ async function consumeAndPostStep(
   input: ChatTriggerInput,
   innerRunId: string,
   isOrphan: boolean,
-): Promise<void> {
+): Promise<{ sawTerminal: boolean }> {
   "use step";
 
   // Same anti-retry posture as startInnerDispatchStep: a throw out of
@@ -263,7 +284,9 @@ async function consumeAndPostStep(
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
-    return;
+    // The catch path means we never observed a terminal — the workflow
+    // body's cancel guard will kill the inner run so we don't leak.
+    return { sawTerminal: false };
   }
 }
 
@@ -271,7 +294,7 @@ async function consumeAndPostStepBody(
   input: ChatTriggerInput,
   innerRunId: string,
   isOrphan: boolean,
-): Promise<void> {
+): Promise<{ sawTerminal: boolean }> {
   if (isOrphan) {
     // Inner workflow is running but the placeholder UPDATE failed.
     // Cleanup sweep reaps the row at the 15min TTL; retries for the
@@ -297,12 +320,12 @@ async function consumeAndPostStepBody(
   // indicator throughout the stream lifecycle. Discord has no
   // equivalent; we keep its existing post-then-edit loop.
   let success = false;
+  let sawTerminal = false;
   try {
-    if (input.platform === "slack") {
-      await consumeAndStreamSlack(input, innerRunId);
-    } else {
-      await consumeAndEditDiscord(input, innerRunId);
-    }
+    const result = input.platform === "slack"
+      ? await consumeAndStreamSlack(input, innerRunId)
+      : await consumeAndEditDiscord(input, innerRunId);
+    sawTerminal = result.sawTerminal;
     success = true;
   } finally {
     // Swap the receipt reaction for the terminal status. Best-effort
@@ -325,6 +348,7 @@ async function consumeAndPostStepBody(
       });
     }
   }
+  return { sawTerminal };
 }
 
 // Slack/Discord both accept emoji shortcodes (no colons) on their
@@ -412,7 +436,7 @@ async function safeRemoveReaction(input: ChatTriggerInput, emoji: string): Promi
 async function consumeAndStreamSlack(
   input: ChatTriggerInput,
   innerRunId: string,
-): Promise<void> {
+): Promise<{ sawTerminal: boolean }> {
   const cached = await resolveCachedBot(input.tenantId, input.agentId, "slack");
   if (!cached) {
     logger.error("consumeAndStreamSlack: bot config missing", {
@@ -421,7 +445,10 @@ async function consumeAndStreamSlack(
       thread_key: input.threadKey,
     });
     await markBotErrorStep(input, "bot_config_missing");
-    return;
+    // bot config errors are NOT a "didn't see terminal" condition — there's
+    // no inner run to cancel because we never started consuming. Treat as
+    // terminal so the caller doesn't try to cancel.
+    return { sawTerminal: true };
   }
 
   // We bypass `adapter.stream` and call `client.chatStream` directly via the
@@ -449,6 +476,14 @@ async function consumeAndStreamSlack(
   let sawAgentError: string | null = null;
   let emittedAnyText = false;
   let resultFallbackText: string | null = null;
+  // Set when the readable yielded a terminal-class event (`result` or
+  // `error`). If this stays false on exit, the caller knows the chat
+  // function is bailing early — most likely because the host hit a
+  // function maxDuration cap (Pro Lambda's ~120s, or Pro Fluid's 800s on
+  // a marathon agent reply). Used to drive the inner-run cancel guard so
+  // we don't leave a 12-minute zombie inner workflow churning compute
+  // and storage on a reply the user already gave up on.
+  let sawTerminal = false;
 
   // Tool-call task tracking. When the agent emits a tool_use block, we
   // emit a TaskUpdateChunk with status "in_progress" so Slack's
@@ -603,6 +638,7 @@ async function consumeAndStreamSlack(
           }
         } else if (evt.type === "error") {
           sawAgentError = typeof evt.message === "string" ? evt.message : "agent_error";
+          sawTerminal = true;
           // Surface the error as a final yielded line so it appears in
           // the streamed message tail (Slack's stream API doesn't have
           // a separate error channel — the user reads it in-thread).
@@ -615,6 +651,7 @@ async function consumeAndStreamSlack(
           }
           break;
         } else if (evt.type === "result" || evt.kind === "terminal") {
+          sawTerminal = true;
           if (!emittedAnyText && typeof evt.result === "string" && evt.result.length > 0) {
             // Non-streaming runner that only emitted a final result —
             // captured here so the empty-readable guard below can post
@@ -706,12 +743,12 @@ async function consumeAndStreamSlack(
       // ignore — will be retried by user
     }
     if (sawAgentError) await markBotErrorStep(input, sawAgentError);
-    return;
+    return { sawTerminal };
   }
 
   if (sawAgentError) {
     await markBotErrorStep(input, sawAgentError);
-    return;
+    return { sawTerminal };
   }
 
   // Empty-readable guard. The stream completed but emitted no text and
@@ -722,6 +759,7 @@ async function consumeAndStreamSlack(
       agent_id: input.agentId,
       thread_key: input.threadKey,
       inner_run_id: innerRunId,
+      saw_terminal: sawTerminal,
     });
     try {
       await postOrEditStep({
@@ -744,7 +782,7 @@ async function consumeAndStreamSlack(
         `inner dispatch produced no output AND acknowledgement post failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    return;
+    return { sawTerminal };
   }
 
   // Result-fallback path: non-streaming runner that yielded no
@@ -762,6 +800,7 @@ async function consumeAndStreamSlack(
       continuation: false,
     });
   }
+  return { sawTerminal };
 }
 
 /**
@@ -774,7 +813,7 @@ async function consumeAndStreamSlack(
 async function consumeAndEditDiscord(
   input: ChatTriggerInput,
   innerRunId: string,
-): Promise<void> {
+): Promise<{ sawTerminal: boolean }> {
   const readable = getRun<string>(innerRunId).getReadable<string>();
   const reader = readable.getReader();
   const limits = PLATFORM_LIMITS[input.platform];
@@ -790,6 +829,12 @@ async function consumeAndEditDiscord(
   let hasPosted = false;
   let postFailed = false;
   let resultEventCount = 0;
+  // Mirror of consumeAndStreamSlack's `sawTerminal` — true once we
+  // observe a `result`, `error`, or `kind: "terminal"` event from the
+  // inner readable. Used by the caller to drive the inner-run cancel
+  // guard when the chat function bails before terminal (function host
+  // hit maxDuration, etc.).
+  let sawTerminal = false;
   // See note in consumeAndStreamSlack: the Claude SDK runner emits both
   // text_delta deltas AND a final `assistant` message with the same text.
   // Track per-turn delta text so the assistant block can contribute only
@@ -833,14 +878,16 @@ async function consumeAndEditDiscord(
         perTurnDeltaText = "";
       } else if (evt.type === "error") {
         const errorText = typeof evt.message === "string" ? evt.message : "error";
+        sawTerminal = true;
         if (!postFailed) {
           const tail = responseText.slice(committedLength);
           const tailWithError = `${tail}\n\n_(agent stopped early: ${errorText})_`;
           await flushAndFinishStep({ input, text: tailWithError, existingMessageId: messageId });
         }
         await markBotErrorStep(input, errorText);
-        return;
+        return { sawTerminal };
       } else if (evt.type === "result" || evt.kind === "terminal") {
+        sawTerminal = true;
         // Fallback: if no `assistant` event seeded responseText (e.g. a
         // runner that only emits the final `result`), use the result
         // string itself. Skip if responseText already has content from
@@ -918,7 +965,7 @@ async function consumeAndEditDiscord(
       error: err instanceof Error ? err.message : String(err),
     });
     await markBotErrorStep(input, err instanceof Error ? err.message : String(err));
-    return;
+    return { sawTerminal };
   } finally {
     try {
       reader.releaseLock();
@@ -982,6 +1029,7 @@ async function consumeAndEditDiscord(
       );
     }
   }
+  return { sawTerminal };
 }
 
 // Placeholder rows have all three nullable until the winner UPDATEs.
@@ -1547,6 +1595,44 @@ async function postOrEditStep(input: PostOrEditStepInput): Promise<PostOrEditRes
   }
 
   return result;
+}
+
+/**
+ * Cancel an inner dispatch workflow run when the chat side gave up
+ * before observing a terminal event. Best-effort — swallows errors
+ * (logs them) so a cancel failure can't itself trigger a WDK retry
+ * storm on this step. The cleanup-sessions watchdog is the ultimate
+ * safety net (catches stuck `active` sessions past
+ * `max_runtime_seconds + 120s` grace).
+ *
+ * Why this lives in a step: `getRun()` is forbidden inside a
+ * `"use workflow"` body (it throws USER_ERROR — see the existing
+ * project memory note `reference_wdk_getrun_in_step`). The cancel
+ * call has to live in a `"use step"` function.
+ */
+async function cancelInnerRunStep(
+  innerRunId: string,
+  tenantId: TenantId,
+  agentId: AgentId,
+): Promise<void> {
+  "use step";
+
+  try {
+    await getRun(innerRunId).cancel();
+    logger.info("cancelInnerRunStep: cancelled inner run after chat early-exit", {
+      tenant_id: tenantId,
+      agent_id: agentId,
+      inner_run_id: innerRunId,
+    });
+  } catch (err) {
+    logger.error("cancelInnerRunStep: cancel failed (cleanup-sessions watchdog will reap)", {
+      tenant_id: tenantId,
+      agent_id: agentId,
+      inner_run_id: innerRunId,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function postBusyReplyStep(
