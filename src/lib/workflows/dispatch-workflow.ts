@@ -648,21 +648,80 @@ export async function writeChunkStep(
   // PERF: process lines in parallel — scrubSecrets + processLineAssets
   // are independent across lines; serial dispatch was leaving latency
   // on the table for batches of 5-10 lines.
-  const processed = await Promise.all(
-    chunk.lines.map(async (l) =>
-      scrubSecrets(await processLineAssets(l.line, tenantId, messageId)),
-    ),
-  );
-
-  const writer = getWritable<string>().getWriter();
+  //
+  // Wrapped in try/catch so a per-chunk programming bug (TypeError on
+  // malformed lines, etc.) does NOT throw out of this step. WDK retries
+  // a thrown step with backoff — observed in production as a 5-minute
+  // hang on the chat path (writeChunkStep threw → WDK retried 5min
+  // later → chat workflow's consumeAndPostStep blocked the whole time
+  // → user-visible "agent done but Slack hangs" symptom). Logging +
+  // continuing is the right behavior: the same chunk will hit the same
+  // bug on retry, so retrying buys us nothing; we'd rather drop a few
+  // chars of streamed text than freeze the whole reply.
   try {
-    // Single write call per batch; the writable is durable so the writes
-    // line up in order on subsequent reader pulls.
-    for (const line of processed) {
-      await writer.write(line);
+    if (!chunk || !Array.isArray(chunk.lines)) {
+      logger.error("writeChunkStep: malformed chunk (lines not array)", {
+        tenant_id: tenantId,
+        message_id: messageId,
+        chunk_kind: chunk?.kind,
+        lines_type: typeof chunk?.lines,
+      });
+      return;
     }
-  } finally {
-    writer.releaseLock();
+
+    const processed = await Promise.all(
+      chunk.lines.map(async (l, idx) => {
+        if (!l || typeof l.line !== "string") {
+          logger.warn("writeChunkStep: malformed line entry, skipping", {
+            tenant_id: tenantId,
+            message_id: messageId,
+            line_index: idx,
+            line_type: typeof l?.line,
+            event_type: l?.eventType,
+          });
+          return null;
+        }
+        try {
+          return scrubSecrets(await processLineAssets(l.line, tenantId, messageId));
+        } catch (err) {
+          logger.error("writeChunkStep: per-line processing threw", {
+            tenant_id: tenantId,
+            message_id: messageId,
+            line_index: idx,
+            event_type: l.eventType,
+            error_name: err instanceof Error ? err.constructor.name : "unknown",
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack : undefined,
+          });
+          return null;
+        }
+      }),
+    );
+
+    const writer = getWritable<string>().getWriter();
+    try {
+      for (const line of processed) {
+        if (line === null) continue;
+        await writer.write(line);
+      }
+    } finally {
+      writer.releaseLock();
+    }
+  } catch (err) {
+    // Last-resort catch — anything we missed above. Log loudly so we
+    // can see the actual error surface in Vercel logs (not the
+    // truncated "Queue callback error: [Type..." that WDK wraps it in).
+    logger.error("writeChunkStep: top-level catch", {
+      tenant_id: tenantId,
+      message_id: messageId,
+      chunk_kind: chunk?.kind,
+      chunk_line_count: Array.isArray(chunk?.lines) ? chunk.lines.length : -1,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    // Swallow — see comment above. Throwing causes a 5-min WDK retry
+    // hang that's worse than dropping this chunk's worth of bytes.
   }
 }
 

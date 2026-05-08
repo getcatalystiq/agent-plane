@@ -367,12 +367,18 @@ describe("dispatchWorkflow steps", () => {
         getWriter: () => writer,
       } as never);
 
+      // The step swallows write errors instead of re-throwing — a thrown
+      // step triggers a WDK retry with backoff, which was observed in
+      // production as a 5-minute hang on the chat path. We'd rather drop
+      // a chunk's worth of bytes than freeze the user's reply for
+      // minutes. Errors are logged loudly via logger.error so they
+      // surface in Vercel logs without poisoning the workflow.
       await expect(
         writeChunkStep(tenantId, messageId, {
           kind: "chunk",
           lines: [{ line: "x", eventType: "assistant" }],
         }),
-      ).rejects.toThrow("stream closed");
+      ).resolves.toBeUndefined();
 
       // Critical: lock release happens in `finally` so a write error
       // doesn't leave the writable in a stuck-locked state.
