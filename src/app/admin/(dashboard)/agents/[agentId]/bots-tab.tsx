@@ -200,6 +200,33 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
                 {", "}<code className="text-foreground">im:history</code> (if using DMs).
               </li>
               <li>
+                <strong className="text-foreground">Reactions:</strong> add <code className="text-foreground">reactions:write</code> to the
+                {" "}Bot Token Scopes. Used by the bot to add 👀 / ✅ / ❌ status reactions on the user's
+                {" "}message. Without it, the agent still replies but the reactions log a warning and don't appear.
+              </li>
+              <li>
+                <strong className="text-foreground">Presence (green dot):</strong> add <code className="text-foreground">users:write</code> to the
+                {" "}Bot Token Scopes. A daily cron calls <code className="text-foreground">users.setPresence(auto)</code>
+                {" "}so the bot shows online in the workspace member list. Without it, the bot stays grey.
+              </li>
+              <li>
+                <strong className="text-foreground">Agents & AI Apps</strong> (optional, recommended) — enables Slack's
+                {" "}native AI assistant UI (rich loading status, suggested follow-up prompts, thread titles).
+                <ul className="ml-5 mt-1 list-disc space-y-0.5">
+                  <li>
+                    Slack app config → <strong className="text-foreground">Agents & AI Apps</strong> → toggle on.
+                  </li>
+                  <li>
+                    Add <code className="text-foreground">assistant:write</code> to the Bot Token Scopes.
+                  </li>
+                  <li>
+                    Subscribe to bot events: <code className="text-foreground">assistant_thread_started</code>,
+                    {" "}<code className="text-foreground">assistant_thread_context_changed</code>.
+                  </li>
+                </ul>
+                Without this, the bot still works via @mentions — it just doesn't get the rich AI assistant UI.
+              </li>
+              <li>
                 <strong className="text-foreground">Reinstall to Workspace</strong> after adding scopes or events.
                 Without reinstall, scopes show in the UI but Slack fires no events.
               </li>

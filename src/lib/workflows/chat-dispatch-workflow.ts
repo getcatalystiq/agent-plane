@@ -384,6 +384,29 @@ async function consumeAndStreamSlack(
     return await consumeAndEditDiscord(input, innerRunId);
   }
 
+  // Show an immediate "Thinking…" status. When the bot has Slack's AI
+  // Apps feature configured + `assistant:write` scope, this drives
+  // assistant.threads.setStatus and renders rich loading text in the
+  // assistant panel. Without those, it falls back to Slack's default
+  // typing indicator. Both modes auto-clear when the next post lands.
+  // Best-effort — typing/status failure must NOT block the actual
+  // reply (PR #38 + the regression PR #43 hardened the same path).
+  const startTypingAdapter = cached.adapter as unknown as {
+    startTyping?: (threadId: string, status?: string) => Promise<void>;
+  };
+  if (typeof startTypingAdapter.startTyping === "function") {
+    try {
+      await startTypingAdapter.startTyping(input.threadKey, "Thinking…");
+    } catch (err) {
+      logger.warn("consumeAndStreamSlack: startTyping(status='Thinking…') failed", {
+        tenant_id: input.tenantId,
+        agent_id: input.agentId,
+        thread_key: input.threadKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const readable = getRun<string>(innerRunId).getReadable<string>();
 
   // Track stream-driver state across the AsyncIterable so the post-
