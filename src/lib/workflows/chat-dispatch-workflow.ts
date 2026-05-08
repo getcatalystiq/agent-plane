@@ -139,67 +139,101 @@ export async function chatDispatchWorkflow(
   }
 
   if (started.kind === "abandoned") return;
-  if (started.kind === "orphan") {
+
+  // 4. Stream consumption + posting moved into a step. WDK forbids
+  //    `getRun()` from inside a `"use workflow"` body — the runtime
+  //    throws USER_ERROR with "The workflow environment doesn't allow
+  //    this runtime usage of getRun". The chat workflow originally did
+  //    the iteration inline for replay-deterministic step boundaries,
+  //    but that pattern conflicts with the WDK runtime rule. The step
+  //    captures the entire iterate-and-post lifecycle; durability now
+  //    sits at the step boundary (a function-host crash mid-stream
+  //    restarts the whole step, which re-reads from index 0 of the
+  //    inner workflow's readable).
+  //
+  //    Trade-off accepted: less granular durability vs. correctness.
+  //    A future PR can re-add per-chunk replay determinism by passing
+  //    `startIndex` between successive consumeAndPostStep retries
+  //    (WDK supports getReadable({ startIndex })).
+  await consumeAndPostStep(input, started.innerRunId, started.kind === "orphan");
+
+  await finalizeChatStep(input);
+}
+
+// ---------------------------------------------------------------------------
+// Steps
+// ---------------------------------------------------------------------------
+
+// Sentinels let the step bail without throwing (WDK retries thrown
+// errors). `abandoned` returns when the circuit breaker fires after
+// markBotError; `orphan` returns when the inner workflow ran but the
+// placeholder UPDATE failed (cleanup sweep reaps the row at 15min).
+type StartedDispatch =
+  | { kind: "started"; innerRunId: string }
+  | { kind: "abandoned" }
+  | { kind: "orphan"; innerRunId: string };
+
+/**
+ * Consume the inner dispatchWorkflow's NDJSON readable and post chunks
+ * to the chat platform. WDK forbids `getRun()` from inside a workflow
+ * body — it must run inside a step. The step owns the entire iterate-
+ * and-post lifecycle so the workflow body stays in pure orchestration
+ * mode.
+ *
+ * State machine (was inlined in the workflow body before WDK runtime
+ * rejected the inline getRun() call):
+ *
+ *   responseText     — accumulated full agent reply.
+ *   committedLength  — chars sealed into PRIOR (rolled-over) messages.
+ *                      Advances ONLY on rollover, never on edit. The
+ *                      open (current) message displays
+ *                      responseText.slice(committedLength).
+ *   messageId        — id of the open message (null = no open message,
+ *                      next post creates one). Goes null on rollover.
+ *   chunksSinceFlush — # text_delta chunks since the last successful
+ *                      post/edit. Replaces the wall-clock edit gate
+ *                      so replay hits the same step boundaries.
+ *
+ * Durability trade-off: a function-host crash mid-stream restarts the
+ * whole step, which re-reads from index 0 of the inner readable. WDK
+ * step-result caching means a completed step is replayed verbatim, so
+ * normal replays don't re-post. A future PR can re-add per-chunk
+ * granularity by passing `startIndex` between successive consume
+ * retries (WDK supports `getReadable({ startIndex })`).
+ */
+async function consumeAndPostStep(
+  input: ChatTriggerInput,
+  innerRunId: string,
+  isOrphan: boolean,
+): Promise<void> {
+  "use step";
+
+  if (isOrphan) {
     // Inner workflow is running but the placeholder UPDATE failed.
     // Cleanup sweep reaps the row at the 15min TTL; retries for the
     // same event_id will INSERT cleanly after that.
-    logger.warn("chatDispatchWorkflow: continuing with orphan placeholder", {
+    logger.warn("consumeAndPostStep: continuing with orphan placeholder", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
-      inner_run_id: started.innerRunId,
+      inner_run_id: innerRunId,
     });
   }
 
-  // 4. Stream consumption — read the inner dispatcher's NDJSON chunks via
-  //    getRun().getReadable(). WDK's WorkflowReadableStream is a plain
-  //    ReadableStream — pump via getReader() rather than for-await (the
-  //    async-iterator surface isn't on the WDK type).
-  //
-  // DURABILITY (A1, review run 20260506-221948-2402b0ed P0 #3):
-  //   - The edit gate is **chunk-count based**, not Date.now() based, so
-  //     replay on function-host recycle hits the same step boundaries. A
-  //     non-deterministic Date.now() gate would shift step boundaries on
-  //     replay; WDK might cache step results at one boundary and re-execute
-  //     at a different boundary, causing duplicate posts.
-  //   - The readable is bounded by getTailIndex() with a watchdog: if the
-  //     inner workflow finishes without a terminal event in the chunk
-  //     stream, we still exit cleanly instead of hanging forever (the U0
-  //     spike's "WDK readables don't auto-close" trap).
-  //
-  // STATE MACHINE:
-  //   responseText     — accumulated full agent reply.
-  //   committedLength  — chars sealed into PRIOR (rolled-over) messages.
-  //                      Advances ONLY on rollover, never on edit. The
-  //                      open (current) message displays
-  //                      responseText.slice(committedLength).
-  //   messageId        — id of the open message (null = no open message,
-  //                      next post creates one). Goes null on rollover.
-  //   chunksSinceFlush — # text_delta chunks since the last successful
-  //                      post/edit. Replaces the wall-clock edit gate.
-  const readable = getRun<string>(started.innerRunId).getReadable<string>();
+  const readable = getRun<string>(innerRunId).getReadable<string>();
   const reader = readable.getReader();
   const limits = PLATFORM_LIMITS[input.platform];
   const SEAL_SUFFIX_OVERHEAD = 4;
   const maxPerMessage = limits.maxPerMessage - SEAL_SUFFIX_OVERHEAD;
-  // Flush every CHUNKS_PER_FLUSH text_delta accumulations. Derived from
-  // EDIT_FLUSH_INTERVAL_MS / APPROX_CHUNK_INTERVAL_MS so the wall-clock
-  // intent (~1 edit/sec) is documented at the source rather than encoded
-  // in arithmetic. Tuning either constant in limits.ts adjusts the cadence.
   const CHUNKS_PER_FLUSH = Math.max(1, Math.ceil(EDIT_FLUSH_INTERVAL_MS / APPROX_CHUNK_INTERVAL_MS));
 
   let responseText = "";
   let committedLength = 0;
   let messageId: string | null = null;
-  let backoffChunks = 0; // chunks to skip after a 429 before retrying
+  let backoffChunks = 0;
   let chunksSinceFlush = 0;
   let hasPosted = false;
   let postFailed = false;
-  // Round-4 review #4: track terminal events separately from text_deltas
-  // so the empty-readable guard can distinguish "agent ran successfully
-  // but produced only structured output" from "agent never emitted
-  // anything". Misfire on the former produces a misleading
-  // "no output — please retry" reply over a successful run.
   let resultEventCount = 0;
 
   try {
@@ -257,16 +291,13 @@ export async function chatDispatchWorkflow(
 
       if (!result.ok) {
         if (result.rateLimited) {
-          // Translate retry-after into a chunk-count backoff using the
-          // documented APPROX_CHUNK_INTERVAL_MS so the wall-clock target
-          // is readable without re-derivation.
           backoffChunks = Math.min(
             MAX_RATE_LIMITED_BACKOFF_CHUNKS,
             Math.max(2, Math.ceil(result.retryAfterMs / APPROX_CHUNK_INTERVAL_MS)),
           );
         } else {
           postFailed = true;
-          logger.error("chatDispatchWorkflow: post failed; sentinel set", {
+          logger.error("consumeAndPostStep: post failed; sentinel set", {
             tenant_id: input.tenantId,
             agent_id: input.agentId,
             error: result.error,
@@ -278,33 +309,17 @@ export async function chatDispatchWorkflow(
       chunksSinceFlush = 0;
       hasPosted = true;
       if (overflow) {
-        // Seal the current message. C-R2-2 fix (review run 20260506-232400-round2):
-        // committedLength tracks RAW responseText positions, not translated
-        // output positions. On Slack, mrkdwn translation shrinks the text
-        // (`**bold**` → `*bold*`); advancing by capped.length would skip
-        // raw chars equal to the translation delta. Use rawConsumed
-        // (the boundary in raw input chars) when the formatter passed
-        // its full output through (no cap-truncation); otherwise fall
-        // back to capped.length as a conservative under-advance (the
-        // user sees the next message start with a small overlap rather
-        // than skipping content).
         const sealedRaw = capped === formatted.flushable
           ? formatted.rawConsumed
           : capped.length;
         committedLength += sealedRaw;
         messageId = null;
       } else {
-        // Edit success: do NOT advance committedLength. The next tick will
-        // re-read responseText.slice(committedLength) — the same open
-        // message extended with new text.
         messageId = result.messageId;
       }
     }
   } catch (err) {
-    // ReadableStreamDefaultReader.read() throws when the underlying stream
-    // errors. Treat as soft-fail: post whatever's accumulated so the user
-    // sees something, then mark the bot error.
-    logger.error("chatDispatchWorkflow: stream iteration failed", {
+    logger.error("consumeAndPostStep: stream iteration failed", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       error: err instanceof Error ? err.message : String(err),
@@ -312,8 +327,6 @@ export async function chatDispatchWorkflow(
     await markBotErrorStep(input, err instanceof Error ? err.message : String(err));
     return;
   } finally {
-    // Release the reader so cancel() doesn't propagate to the inner workflow
-    // — releaseLock is no-op-safe.
     try {
       reader.releaseLock();
     } catch {
@@ -321,7 +334,7 @@ export async function chatDispatchWorkflow(
     }
   }
 
-  // 5. Final flush — flush any remaining open-message text.
+  // Final flush — flush any remaining open-message text.
   if (!postFailed && responseText.length > committedLength) {
     const tail = responseText.slice(committedLength);
     const formatted = formatForPlatform(input.platform, tail, { partial: false });
@@ -342,25 +355,13 @@ export async function chatDispatchWorkflow(
     }
   }
 
-  // Empty-readable guard. If the inner dispatch failed fast (transient
-  // runtime error, sandbox boot rejection, immediate validation failure)
-  // the readable closes with zero chunks AND zero terminal events —
-  // `hasPosted` stays false, `responseText` stays empty, the final-flush
-  // is a no-op. Without an explicit signal the user sees absolute silence.
-  //
-  // Round-4 review #4 refinements:
-  //   (a) Gate on `resultEventCount === 0` AND `responseText === ""` so
-  //       a successful run that emitted only structured `result` events
-  //       (no text_delta) does NOT trigger the misleading guard.
-  //   (b) On postOrEditStep failure inside the guard, call markBotError
-  //       so the operator surface (last_error column) reflects the
-  //       silent-bot UX. Logging alone is invisible to tenants.
+  // Empty-readable guard.
   if (!hasPosted && !postFailed && resultEventCount === 0 && responseText === "") {
-    logger.warn("chatDispatchWorkflow: inner dispatch produced no output", {
+    logger.warn("consumeAndPostStep: inner dispatch produced no output", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
-      inner_run_id: started.innerRunId,
+      inner_run_id: innerRunId,
     });
     try {
       await postOrEditStep({
@@ -374,7 +375,7 @@ export async function chatDispatchWorkflow(
         continuation: false,
       });
     } catch (err) {
-      logger.error("chatDispatchWorkflow: empty-readable acknowledgement failed", {
+      logger.error("consumeAndPostStep: empty-readable acknowledgement failed", {
         tenant_id: input.tenantId,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -384,22 +385,7 @@ export async function chatDispatchWorkflow(
       );
     }
   }
-
-  await finalizeChatStep(input);
 }
-
-// ---------------------------------------------------------------------------
-// Steps
-// ---------------------------------------------------------------------------
-
-// Sentinels let the step bail without throwing (WDK retries thrown
-// errors). `abandoned` returns when the circuit breaker fires after
-// markBotError; `orphan` returns when the inner workflow ran but the
-// placeholder UPDATE failed (cleanup sweep reaps the row at 15min).
-type StartedDispatch =
-  | { kind: "started"; innerRunId: string }
-  | { kind: "abandoned" }
-  | { kind: "orphan"; innerRunId: string };
 
 // Placeholder rows have all three nullable until the winner UPDATEs.
 const DedupeRow = z.object({
