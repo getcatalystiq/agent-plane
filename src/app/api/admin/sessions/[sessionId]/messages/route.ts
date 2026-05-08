@@ -81,8 +81,11 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const statusParam = url.searchParams.get("status");
   const status = statusParam ? SessionMessageStatusSchema.parse(statusParam) : undefined;
 
+  // Existence-only check — projection MUST match the validator.
+  // `SELECT id` against the full SessionRow schema throws ZodError on
+  // every call (the schema requires status, ephemeral, expires_at, …).
   const session = await queryOne(
-    SessionRow,
+    z.object({ id: z.string() }),
     "SELECT id FROM sessions WHERE id = $1",
     [sessionId],
   );
