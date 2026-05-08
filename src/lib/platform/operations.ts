@@ -551,8 +551,67 @@ export async function upsertBotConfig(input: UpsertBotConfigInput): Promise<Plat
       credentials_version: row.credentials_version,
       member_count_at_connect: probe.memberCount,
     });
+    invalidateBotConfig(input.tenantId, input.agentId, input.credentials.platform);
     return rowToPublic(row);
   });
+}
+
+// ---------------------------------------------------------------------------
+// In-process cache for getBotConfig
+// ---------------------------------------------------------------------------
+//
+// `getBotConfig` is called multiple times per chat workflow run by
+// `resolveCachedBot` inside chat-dispatch-workflow.ts (every
+// postOrEditStep, every safeAddReaction, every safeRemoveReaction).
+// Each call is a Neon round-trip + RLS transaction setup — ~10–30 ms
+// on warm pools, more on cold. A single streaming reply can issue
+// 4–10 of these on the hot path.
+//
+// This cache memoizes the result for 60 s, keyed by
+// (tenantId, agentId, platform). The TTL keeps the cache fresh enough
+// to pick up updates from refresh routines without forcing a manual
+// invalidation contract; the upsert + disable + rotate paths below
+// still actively invalidate so credential changes propagate
+// instantly within the same process.
+//
+// Cross-process invalidation: not handled. Different Vercel function
+// instances will see at most a 60 s lag after a credential update,
+// which matches the existing bot adapter cache's lag. If a tighter
+// SLO is needed later, this cache can subscribe to a Redis
+// pub/sub channel.
+
+interface ConfigCacheEntry {
+  value: PlatformBotConfigPublic | null;
+  expiresAt: number;
+}
+
+const CONFIG_CACHE_TTL_MS = 60_000;
+const CONFIG_CACHE_MAX_ENTRIES = 500;
+const configCache = new Map<string, ConfigCacheEntry>();
+
+function configCacheKey(
+  tenantId: TenantId,
+  agentId: AgentId,
+  platform: ChatPlatform,
+): string {
+  return `${platform}:${tenantId}:${agentId}`;
+}
+
+function rememberConfig(key: string, entry: ConfigCacheEntry): void {
+  configCache.set(key, entry);
+  while (configCache.size > CONFIG_CACHE_MAX_ENTRIES) {
+    const oldest = configCache.keys().next();
+    if (oldest.done) break;
+    configCache.delete(oldest.value);
+  }
+}
+
+function invalidateBotConfig(
+  tenantId: TenantId,
+  agentId: AgentId,
+  platform: ChatPlatform,
+): void {
+  configCache.delete(configCacheKey(tenantId, agentId, platform));
 }
 
 export async function getBotConfig(
@@ -560,7 +619,14 @@ export async function getBotConfig(
   agentId: AgentId,
   platform: ChatPlatform,
 ): Promise<PlatformBotConfigPublic | null> {
-  return withTenantTransaction(tenantId, async (tx) => {
+  const key = configCacheKey(tenantId, agentId, platform);
+  const cached = configCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+  if (cached) configCache.delete(key);
+
+  const value = await withTenantTransaction(tenantId, async (tx) => {
     const row = await tx.queryOne(
       PlatformBotConfigRow,
       `SELECT * FROM platform_bot_configs
@@ -569,6 +635,12 @@ export async function getBotConfig(
     );
     return row ? rowToPublic(row) : null;
   });
+
+  rememberConfig(key, {
+    value,
+    expiresAt: Date.now() + CONFIG_CACHE_TTL_MS,
+  });
+  return value;
 }
 
 export async function listBotConfigs(
@@ -619,7 +691,7 @@ export async function disableBotConfig(
   agentId: AgentId,
   platform: ChatPlatform,
 ): Promise<PlatformBotConfigPublic | null> {
-  return withTenantTransaction(tenantId, async (tx) => {
+  const result = await withTenantTransaction(tenantId, async (tx) => {
     const row = await tx.queryOne(
       PlatformBotConfigRow,
       `UPDATE platform_bot_configs SET enabled = false, updated_at = now()
@@ -629,6 +701,8 @@ export async function disableBotConfig(
     );
     return row ? rowToPublic(row) : null;
   });
+  invalidateBotConfig(tenantId, agentId, platform);
+  return result;
 }
 
 /**

@@ -5,11 +5,19 @@
  *   - 401 on missing X-Slack-Request-Timestamp
  *   - 401 on stale timestamp (>5 min skew)
  *   - 400 when team_id absent in first 4KB of body
- *   - 200 unhandled when team_id not in registry — DECRYPT NEVER CALLED
- *     (this is the security invariant in R12)
- *   - 401 on signature format mismatch
- *   - 401 on signature value mismatch
+ *   - 200 queued when team_id not in registry — bot lookup probed but
+ *     getDecryptedCredentials never called from the route (the route
+ *     gets candidates with their signing secret bundled by listSlackBotsByTeamId,
+ *     which is itself mocked here)
+ *   - 200 queued on signature value mismatch — body identical to the
+ *     unknown-team path, preserving the team_id oracle (P2 #18)
  *   - url_verification with valid signature returns the challenge
+ *
+ * Mock contract: the route imports five helpers from `@/lib/platform/bot`
+ * (`findSlackBotByTeamAndApp`, `getOrCreateBot`, `listSlackBotSigningSecrets`,
+ * `listSlackBotsByTeamId`, `persistSlackAppIdIfMissing`). All five must
+ * be mocked here — `vi.mock(..., factory)` with omitted exports leaves
+ * them undefined, which would crash the deferred `after()` path.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,15 +35,28 @@ vi.mock("@/lib/env", () => ({
   getEnv: () => env,
 }));
 
-const { findBotByTeamIdMock, decryptMock } = vi.hoisted(() => ({
-  findBotByTeamIdMock: vi.fn(),
+const {
+  findSlackBotByTeamAndAppMock,
+  listSlackBotsByTeamIdMock,
+  listSlackBotSigningSecretsMock,
+  getOrCreateBotMock,
+  persistSlackAppIdIfMissingMock,
+  decryptMock,
+} = vi.hoisted(() => ({
+  findSlackBotByTeamAndAppMock: vi.fn(),
+  listSlackBotsByTeamIdMock: vi.fn(),
+  listSlackBotSigningSecretsMock: vi.fn(),
+  getOrCreateBotMock: vi.fn(),
+  persistSlackAppIdIfMissingMock: vi.fn(),
   decryptMock: vi.fn(),
 }));
 
 vi.mock("@/lib/platform/bot", () => ({
-  // Route now calls findOrLoadSlackBotByTeamId (async) — the underlying
-  // shape from the route's POV is the same: returns a CachedBot or null.
-  findOrLoadSlackBotByTeamId: findBotByTeamIdMock,
+  findSlackBotByTeamAndApp: findSlackBotByTeamAndAppMock,
+  listSlackBotsByTeamId: listSlackBotsByTeamIdMock,
+  listSlackBotSigningSecrets: listSlackBotSigningSecretsMock,
+  getOrCreateBot: getOrCreateBotMock,
+  persistSlackAppIdIfMissing: persistSlackAppIdIfMissingMock,
 }));
 
 vi.mock("@/lib/platform/operations", () => ({
@@ -84,7 +105,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  findBotByTeamIdMock.mockReset();
+  findSlackBotByTeamAndAppMock.mockReset();
+  listSlackBotsByTeamIdMock.mockReset();
+  listSlackBotSigningSecretsMock.mockReset();
+  getOrCreateBotMock.mockReset();
+  persistSlackAppIdIfMissingMock.mockReset();
   decryptMock.mockReset();
 });
 
@@ -92,7 +117,8 @@ describe("Slack webhook strict ordering", () => {
   it("returns 401 on missing X-Slack-Request-Timestamp", async () => {
     const res = await POST(makeRequest('{"team_id":"T123"}', { "x-slack-signature": "v0=abc" }));
     expect(res.status).toBe(401);
-    expect(findBotByTeamIdMock).not.toHaveBeenCalled();
+    expect(listSlackBotsByTeamIdMock).not.toHaveBeenCalled();
+    expect(findSlackBotByTeamAndAppMock).not.toHaveBeenCalled();
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
@@ -105,7 +131,8 @@ describe("Slack webhook strict ordering", () => {
       }),
     );
     expect(res.status).toBe(401);
-    expect(findBotByTeamIdMock).not.toHaveBeenCalled();
+    expect(listSlackBotsByTeamIdMock).not.toHaveBeenCalled();
+    expect(findSlackBotByTeamAndAppMock).not.toHaveBeenCalled();
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
@@ -117,12 +144,17 @@ describe("Slack webhook strict ordering", () => {
       }),
     );
     expect(res.status).toBe(400);
-    expect(findBotByTeamIdMock).not.toHaveBeenCalled();
+    expect(listSlackBotsByTeamIdMock).not.toHaveBeenCalled();
+    expect(findSlackBotByTeamAndAppMock).not.toHaveBeenCalled();
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
   it("returns 200 queued and DOES NOT decrypt when team_id is unknown (deferred path drops silently)", async () => {
-    findBotByTeamIdMock.mockResolvedValueOnce(null);
+    // Body has no api_app_id → route skips the surgical lookup and goes
+    // straight to the enumerate-by-team_id fallback. An unknown team_id
+    // returns an empty candidate list; the deferred path drops without
+    // decrypting any credentials.
+    listSlackBotsByTeamIdMock.mockResolvedValueOnce([]);
     const res = await POST(
       makeRequest('{"team_id":"T999"}', {
         "x-slack-request-timestamp": nowSeconds(),
@@ -134,29 +166,40 @@ describe("Slack webhook strict ordering", () => {
     expect(json.status).toBe("queued");
     // The route's `after()` mock runs deferred work inline before the
     // response promise resolves, so the bot lookup HAS happened by now.
-    expect(findBotByTeamIdMock).toHaveBeenCalledWith("T999");
-    // Critical security invariant from R12 — no decryption on unknown team_id,
-    // even after the deferred path runs.
+    expect(findSlackBotByTeamAndAppMock).not.toHaveBeenCalled();
+    expect(listSlackBotsByTeamIdMock).toHaveBeenCalledWith("T999");
+    // Critical security invariant from R12 — no decryption on unknown
+    // team_id, even after the deferred path runs. (decrypt is invoked
+    // inside listSlackBotsByTeamId's helper only when rows are returned;
+    // we mocked that to [] here so it never reaches decrypt.)
     expect(decryptMock).not.toHaveBeenCalled();
   });
 
   it("returns 200 queued on signature value mismatch (oracle preserved — body is identical to unknown-team path)", async () => {
-    // P2 #18: returning 401 on bad signature for a registered team_id and
-    // 200 on unknown team_id leaks which team_ids are registered. With
-    // the after() refactor, both paths get the same immediate 200 queued
-    // ack; the registered-but-bad-sig case decrypts in the deferred path
-    // and drops silently. The team_id oracle stays closed because the
-    // response shape is identical for both branches.
-    findBotByTeamIdMock.mockResolvedValueOnce({
-      tenantId: "tenant-1",
-      agentId: "agent-1",
-      botToken: "xoxb-fake",
-    });
-    decryptMock.mockResolvedValueOnce({
-      platform: "slack",
-      botToken: "xoxb-fake",
-      signingSecret: SIGNING_SECRET,
-    });
+    // P2 #18: returning 401 on bad signature for a registered team_id
+    // and 200 on unknown team_id leaks which team_ids are registered.
+    // With the after() refactor, both paths get the same immediate
+    // 200 queued ack; the registered-but-bad-sig case enumerates
+    // candidates in the deferred path and drops silently when none
+    // verify. The team_id oracle stays closed because the response
+    // shape is identical for both branches.
+    //
+    // listSlackBotsByTeamId returns SlackBotCandidate[], each carrying
+    // their own signingSecret (its internal helper called
+    // getDecryptedCredentials at the storage layer). The route does
+    // NOT call getDecryptedCredentials directly — it walks the
+    // candidates and HMACs each signing secret against the request
+    // body. The test mocks listSlackBotsByTeamId so the storage-layer
+    // decrypt call is bypassed entirely.
+    listSlackBotsByTeamIdMock.mockResolvedValueOnce([
+      {
+        tenantId: "tenant-1",
+        agentId: "agent-1",
+        credentialsVersion: 1,
+        platformIdentity: { team_id: "T123" },
+        signingSecret: SIGNING_SECRET,
+      },
+    ]);
     const res = await POST(
       makeRequest('{"team_id":"T123"}', {
         "x-slack-request-timestamp": nowSeconds(),
@@ -166,10 +209,16 @@ describe("Slack webhook strict ordering", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("queued");
-    // Decrypt IS called now (deferred verify needs the bot's signing
-    // secret to confirm the bad signature) — this is an implementation
-    // detail; the user-visible outcome is the same drop.
-    expect(decryptMock).toHaveBeenCalledTimes(1);
+    // The route enumerates candidates from listSlackBotsByTeamId (1
+    // call) and runs the constant-time HMAC comparison; no candidate
+    // matches, so the deferred path silently drops. No SDK dispatch
+    // should happen.
+    expect(listSlackBotsByTeamIdMock).toHaveBeenCalledTimes(1);
+    expect(getOrCreateBotMock).not.toHaveBeenCalled();
+    // getDecryptedCredentials is mocked separately and never called by
+    // the route (the candidate's signing secret arrives bundled with
+    // the row).
+    expect(decryptMock).not.toHaveBeenCalled();
   });
 
   it("returns 200 with the challenge on url_verification — uses global SLACK_SIGNING_SECRET fallback (no team_id in Slack's payload)", async () => {
@@ -177,8 +226,8 @@ describe("Slack webhook strict ordering", () => {
     // {type, challenge, token}. The route must short-circuit on
     // type === 'url_verification' BEFORE the team_id requirement so
     // the global SLACK_SIGNING_SECRET fallback can authorize the
-    // handshake. Per-bot signing secret isn't queried; findBotByTeamId
-    // is never reached.
+    // handshake. Per-bot signing secret isn't queried;
+    // listSlackBotsByTeamId is never reached.
     env.SLACK_SIGNING_SECRET = SIGNING_SECRET;
     try {
       const ts = nowSeconds();
@@ -197,17 +246,21 @@ describe("Slack webhook strict ordering", () => {
       expect(res.status).toBe(200);
       const text = await res.text();
       expect(text).toBe("test-challenge-value");
-      expect(findBotByTeamIdMock).not.toHaveBeenCalled();
+      expect(listSlackBotsByTeamIdMock).not.toHaveBeenCalled();
+      expect(findSlackBotByTeamAndAppMock).not.toHaveBeenCalled();
       expect(decryptMock).not.toHaveBeenCalled();
     } finally {
       env.SLACK_SIGNING_SECRET = undefined;
     }
   });
 
-  it("returns 200 unhandled on url_verification when SLACK_SIGNING_SECRET is unset", async () => {
-    // No global fallback configured. The route still short-circuits
-    // on type before the team_id check, but maybeHandleFirstTimeChallenge
-    // returns the unhandled response when the signing secret is absent.
+  it("returns 200 unhandled on url_verification when SLACK_SIGNING_SECRET is unset and no per-bot secret matches", async () => {
+    // No global fallback configured; per-bot fallback list is empty
+    // (no Slack bots registered yet — typical first-time install
+    // scenario before the user pastes credentials in admin). The
+    // route's maybeHandleFirstTimeChallenge returns "unhandled" when
+    // no candidate signing secret matches the inbound signature.
+    listSlackBotSigningSecretsMock.mockResolvedValueOnce([]);
     const ts = nowSeconds();
     const body = JSON.stringify({
       type: "url_verification",

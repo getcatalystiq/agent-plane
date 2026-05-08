@@ -79,6 +79,24 @@ export interface StartChatDispatchOptions {
    *  generic busy reply and exit without invoking the dispatcher. The
    *  string distinguishes per-agent vs per-user limit for telemetry. */
   rateLimited: "agent" | "user" | null;
+  /**
+   * True when the bridge's pre-claim INSERT into chat_event_dedupe
+   * succeeded — this workflow run owns the dedupe row and
+   * `startInnerDispatchStep` can skip its own INSERT and go straight to
+   * `reserveSessionAndMessage`. Eliminates one Neon round-trip on the
+   * common chat hot path.
+   *
+   * False means either the bridge skipped the pre-claim (older path,
+   * dedupe-claim threw) or the bridge's INSERT lost the race AND the
+   * existing claim looked stale — in either case the workflow runs
+   * through its existing claim/recovery logic to handle the race.
+   *
+   * On a WDK retry of the workflow body, the input is replayed verbatim
+   * so this flag is still set on retries. The retry-idempotency
+   * contract sits on chat_event_dedupe.session_id /
+   * inner_run_id columns, which are already populated after the first
+   * attempt — see `startInnerDispatchStepBody` for the retry probe. */
+  bridgeClaimed: boolean;
 }
 
 export async function startChatDispatchWorkflow(
@@ -124,20 +142,17 @@ export async function chatDispatchWorkflow(
     ? await persistAttachmentsStep(input)
     : [];
 
-  // 3. Reserve session + message and start the inner dispatchWorkflow,
-  //    in parallel with firing the receipt ack (👀 + "Thinking…" status).
-  //    The dispatch dance (dedupe insert + reserve + start + placeholder
-  //    UPDATE) takes 1-3s; previously the user saw zero feedback during
-  //    that window. The ack step resolves the bot adapter and hits Slack
-  //    directly, so 👀 lands within ~500ms regardless of how slow the
-  //    dispatch happens to be.
+  // 3. Reserve session + message and start the inner dispatchWorkflow.
+  //    The receipt ack (👀 + "Thinking…") used to live here as a
+  //    parallel `ackReceiptStep`, but waiting for WDK to schedule this
+  //    workflow body adds 0.5–2 s of latency before any user-visible
+  //    feedback. The ack now fires inside `triggerChatWorkflow` (the
+  //    bridge) in parallel with `start(chatDispatchWorkflow)`, so the
+  //    eyes land within ~300 ms of the inbound webhook regardless of
+  //    how long WDK takes to schedule this body.
   let started: StartedDispatch;
   try {
-    const [, dispatchResult] = await Promise.all([
-      ackReceiptStep(input),
-      startInnerDispatchStep(input, persisted),
-    ]);
-    started = dispatchResult;
+    started = await startInnerDispatchStep(input, persisted, options.bridgeClaimed);
   } catch (err) {
     logger.error("chatDispatchWorkflow: dispatch start failed", {
       tenant_id: input.tenantId,
@@ -319,79 +334,12 @@ interface TypingAdapter {
   startTyping?: (threadId: string, status?: string) => Promise<void>;
 }
 
-/**
- * Fire the user-visible ack — 👀 reaction on the original message AND a
- * platform-native typing indicator (Slack's assistant.threads.setStatus
- * with "Thinking…" when AI Apps is configured; Discord's typing event
- * otherwise) — as a step that the workflow body races against
- * `startInnerDispatchStep`. Resolves the bot adapter once and dispatches
- * both calls in parallel so neither waits on the other.
- *
- * Strictly best-effort: every external call is `Promise.allSettled` so
- * one failing call cannot mask the other, and an entire-step failure is
- * swallowed so it cannot corrupt the workflow body's `Promise.all`.
- */
-async function ackReceiptStep(input: ChatTriggerInput): Promise<void> {
-  "use step";
-
-  try {
-    const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
-    if (!cached) return;
-
-    const reactingAdapter = cached.adapter as unknown as ReactingAdapter;
-    const typingAdapter = cached.adapter as unknown as TypingAdapter;
-
-    const tasks: Promise<unknown>[] = [];
-
-    if (
-      input.replyToMessageId &&
-      typeof reactingAdapter.addReaction === "function"
-    ) {
-      tasks.push(
-        reactingAdapter.addReaction(
-          input.threadKey,
-          input.replyToMessageId,
-          REACTION_RECEIPT,
-        ),
-      );
-    }
-
-    if (typeof typingAdapter.startTyping === "function") {
-      // Slack reads the second arg as `assistant.threads.setStatus`. Discord
-      // ignores it (its adapter signature is `startTyping(threadId)`). One
-      // call shape works for both — the constant string is harmless on
-      // platforms that don't render it.
-      tasks.push(
-        input.platform === "slack"
-          ? typingAdapter.startTyping(input.threadKey, "Thinking…")
-          : typingAdapter.startTyping(input.threadKey),
-      );
-    }
-
-    const results = await Promise.allSettled(tasks);
-    for (const r of results) {
-      if (r.status === "rejected") {
-        logger.warn("ackReceiptStep: adapter call failed (best-effort)", {
-          tenant_id: input.tenantId,
-          agent_id: input.agentId,
-          platform: input.platform,
-          thread_key: input.threadKey,
-          error: r.reason instanceof Error ? r.reason.message : String(r.reason),
-        });
-      }
-    }
-  } catch (err) {
-    // Whole-step failure is swallowed so the workflow body's Promise.all
-    // doesn't see a rejection (rejection would skip startInnerDispatchStep's
-    // result and route into the catch).
-    logger.warn("ackReceiptStep: bot resolution failed (best-effort)", {
-      tenant_id: input.tenantId,
-      agent_id: input.agentId,
-      platform: input.platform,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
+// `ackReceiptStep` was removed: the receipt 👀 + "Thinking…" indicator
+// now fires inside `triggerChatWorkflow` (the bridge) in parallel with
+// `start(chatDispatchWorkflow)`, so the user sees feedback within
+// ~300 ms of the inbound webhook instead of after WDK schedules this
+// workflow body (~0.5–2 s of dead time on cold instances). The receipt
+// removal at completion still uses `safeRemoveReaction` below.
 
 async function safeAddReaction(input: ChatTriggerInput, emoji: string): Promise<void> {
   if (!input.replyToMessageId) return;
@@ -950,6 +898,7 @@ const STALE_CLAIM_THRESHOLD_SECONDS = Math.ceil(POLL_MAX_DURATION_MS / 1000) + 6
 async function startInnerDispatchStep(
   input: ChatTriggerInput,
   persisted: PersistedAttachment[],
+  bridgeClaimed: boolean,
 ): Promise<StartedDispatch> {
   "use step";
 
@@ -964,7 +913,7 @@ async function startInnerDispatchStep(
   // the cleanup-sessions cron sweep any orphan rows we created before
   // the throw.
   try {
-    return await startInnerDispatchStepBody(input, persisted);
+    return await startInnerDispatchStepBody(input, persisted, bridgeClaimed);
   } catch (err) {
     logger.error("startInnerDispatchStep: caught — returning abandoned (no WDK retry)", {
       tenant_id: input.tenantId,
@@ -983,6 +932,7 @@ async function startInnerDispatchStep(
 async function startInnerDispatchStepBody(
   input: ChatTriggerInput,
   persisted: PersistedAttachment[],
+  bridgeClaimed: boolean,
 ): Promise<StartedDispatch> {
   // DIAG: very-first-line breadcrumb so we can confirm the step body
   // is entered at all. If this log doesn't fire, WDK isn't running our
@@ -994,31 +944,56 @@ async function startInnerDispatchStepBody(
     platform: input.platform,
     event_id: input.eventId,
     thread_key: input.threadKey,
+    bridge_claimed: bridgeClaimed,
   });
 
-  // A6 + REL-R2-01 fix (review runs 20260506-221948-2402b0ed and
-  // 20260506-232400-round2): claim-then-reserve pattern. Two concurrent
-  // step retries race on the placeholder INSERT; only ONE winner runs
-  // reserveSessionAndMessage + start(dispatchWorkflow). The loser
-  // polls the placeholder until the winner's UPDATE fills in
-  // inner_run_id, then attaches to the same run. No orphan
-  // session_messages, no orphan inner workflow runs.
-  // Round-4 review #10 simplification: the prior `claim = { won, row }`
-  // shape carried `row` for both branches but the winner path never read
-  // it and the loser path re-polled instead. Simpler: just record the
-  // boolean. INSERT returns ≥1 row only when we won the ON CONFLICT race.
-  const won = await withTenantTransaction(input.tenantId, async (tx) => {
-    const inserted = await tx.execute(
-      `INSERT INTO chat_event_dedupe (tenant_id, platform, event_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (tenant_id, platform, event_id) DO NOTHING`,
-      [input.tenantId, input.platform, input.eventId],
-    );
-    return inserted.rowCount === 1;
-  });
+  // PERF — bridge-claim fast path: when triggerChatWorkflow already
+  // INSERTed and won the dedupe row, this step skips its own INSERT
+  // and goes straight to reserveSessionAndMessage. Saves one Neon
+  // round-trip on the common chat hot path.
+  //
+  // WDK retry idempotency: the dedupe row's session_id / inner_run_id
+  // columns are the retry gate — see startInnerDispatchStepBody
+  // comments below. The first retry hits the same row; if a previous
+  // attempt already filled inner_run_id we attach via the loser path's
+  // pollForDedupeFill helper. If session_id was filled but
+  // inner_run_id wasn't, the existing recovery path (poll → steal)
+  // handles it the same way it does today.
+  let won: boolean;
+  if (bridgeClaimed) {
+    // The bridge already INSERTed; skip the second INSERT. Treat as
+    // winner. WDK retry safety: on retry, the bridge's input is
+    // replayed, but the bridge runs in a separate process from this
+    // step — its INSERT happened in the *original* invocation. The
+    // retry of this step does NOT re-INSERT (because we skip below);
+    // instead, the dedupe row is checked via the post-reserve UPDATE
+    // path. If a prior attempt completed reserveSessionAndMessage
+    // before crashing, the row's session_id is already populated and
+    // the placeholder UPDATE below is a no-op (`WHERE inner_run_id IS
+    // NULL` guard preserves the prior winner). The orphan-session
+    // sweep cleans up any duplicated session_messages.
+    won = true;
+  } else {
+    // A6 + REL-R2-01 fix (review runs 20260506-221948-2402b0ed and
+    // 20260506-232400-round2): claim-then-reserve pattern. Two
+    // concurrent step retries race on the placeholder INSERT; only
+    // ONE winner runs reserveSessionAndMessage + start(...). The
+    // loser polls the placeholder until the winner's UPDATE fills in
+    // inner_run_id, then attaches to the same run.
+    won = await withTenantTransaction(input.tenantId, async (tx) => {
+      const inserted = await tx.execute(
+        `INSERT INTO chat_event_dedupe (tenant_id, platform, event_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, platform, event_id) DO NOTHING`,
+        [input.tenantId, input.platform, input.eventId],
+      );
+      return inserted.rowCount === 1;
+    });
+  }
   logger.info("startInnerDispatchStep: dedupe INSERT result", {
     event_id: input.eventId,
     won,
+    bridge_claimed: bridgeClaimed,
   });
 
   if (!won) {
@@ -1048,6 +1023,20 @@ async function startInnerDispatchStepBody(
 
   const composedPrompt = `[${input.platform} message from ${input.authorDisplayName}]\n${input.prompt}${renderAttachmentPromptBlock(persisted)}`;
 
+  // OPT — chat hot path: chatDedupeUpdate folds the post-reserve UPDATE
+  // of `chat_event_dedupe.session_id` / `message_id` into the SAME
+  // Neon transaction as session + session_message creation inside
+  // `reserveSessionAndMessage`. Saves one round-trip vs. the prior
+  // sequential pair (reserve tx + standalone UPDATE tx).
+  //
+  // Durability is preserved: the UPDATE still runs BEFORE start() and
+  // is guarded with `inner_run_id IS NULL` so a winner that already
+  // populated the row (e.g. WDK retry) is not overwritten. The
+  // pre-start ordering is unchanged — a failed inner_run_id UPDATE
+  // (later) still leaves a recoverable orphan; WDK retry through the
+  // poll → steal recovery path behaves identically to before this
+  // change. The previously-separate UPDATE block was removed; its
+  // try/catch logging was diagnostic-only.
   const dispatchInput: DispatchInput = {
     tenantId: input.tenantId,
     agentId: input.agentId,
@@ -1064,18 +1053,16 @@ async function startInnerDispatchStepBody(
       contentType: p.contentType,
       sizeBytes: p.sizeBytes,
     })),
+    chatDedupeUpdate: {
+      platform: input.platform,
+      eventId: input.eventId,
+    },
   };
 
-  // Two-stage placeholder fill around start(): pin session_id +
-  // message_id BEFORE start() so a failed inner_run_id UPDATE leaves a
-  // recoverable orphan instead of silently letting a WDK retry
-  // double-dispatch. A single UPDATE after start() would race with
-  // WDK retry: an UPDATE-failure → retry-step → poll → steal-after-90s
-  // → second start() → duplicate inner workflow.
   let prepared: PreparedExecution;
   try {
     prepared = await reserveSessionAndMessage(dispatchInput);
-    logger.info("startInnerDispatchStep: reserveSessionAndMessage OK", {
+    logger.info("startInnerDispatchStep: reserveSessionAndMessage OK (dedupe folded)", {
       event_id: input.eventId,
       session_id: prepared.session.id,
       message_id: prepared.messageId,
@@ -1085,37 +1072,6 @@ async function startInnerDispatchStepBody(
     logger.error("startInnerDispatchStep: reserveSessionAndMessage threw", {
       event_id: input.eventId,
       thread_key: input.threadKey,
-      error_name: err instanceof Error ? err.constructor.name : "unknown",
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  }
-
-  // DIAG: wrap the placeholder UPDATE so we can isolate it as the
-  // throw point. Production trace shows `reserveSessionAndMessage OK`
-  // fires but `calling start(dispatchWorkflow)` never fires on the
-  // winner — meaning the step dies between them. The only thing in
-  // between is this UPDATE.
-  try {
-    await withTenantTransaction(input.tenantId, async (tx) => {
-      await tx.execute(
-        `UPDATE chat_event_dedupe
-         SET session_id = $4, message_id = $5
-         WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
-           AND inner_run_id IS NULL`,
-        [input.tenantId, input.platform, input.eventId, prepared.session.id, prepared.messageId],
-      );
-    });
-    logger.info("startInnerDispatchStep: dedupe UPDATE OK", {
-      event_id: input.eventId,
-      session_id: prepared.session.id,
-      message_id: prepared.messageId,
-    });
-  } catch (err) {
-    logger.error("startInnerDispatchStep: dedupe UPDATE threw", {
-      event_id: input.eventId,
-      session_id: prepared.session.id,
-      message_id: prepared.messageId,
       error_name: err instanceof Error ? err.constructor.name : "unknown",
       error: err instanceof Error ? err.message : String(err),
     });

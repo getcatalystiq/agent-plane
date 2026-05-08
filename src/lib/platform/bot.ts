@@ -151,9 +151,21 @@ async function buildCachedBot(input: BuildBotInput): Promise<CachedBot> {
 
   if (credentials.platform === "slack" && input.platform === "slack") {
     const slackCreds = credentials as SlackCredentials;
+    // PERF: the Slack webhook route (`/api/webhooks/slack`) verifies the
+    // HMAC signature + timestamp upstream against the per-bot signing
+    // secret BEFORE this adapter sees the request. Configuring the adapter
+    // with `signingSecret` would make the SDK redo HMAC + timestamp work
+    // on every event. Instead, drop `signingSecret` and pass a no-op
+    // `webhookVerifier` so the SDK skips its own verification entirely.
+    //
+    // SECURITY: this is safe ONLY because every code path that reaches
+    // `bot.webhooks.slack(...)` flows through the upstream route; nothing
+    // else hands raw Slack requests to this adapter. If a future caller
+    // bypasses the route, it MUST verify the signature itself.
+    void slackCreds.signingSecret; // retained on the credentials shape for the upstream route's HMAC verifier.
     const adapter = createSlackAdapter({
       botToken: slackCreds.botToken,
-      signingSecret: slackCreds.signingSecret,
+      webhookVerifier: () => true,
     });
     const bot = new Chat({
       userName: input.agentId,

@@ -228,6 +228,17 @@ export interface DispatchInput {
    * the idempotency cache key so a mode flip invalidates cached verdicts.
    */
   injectionEnforceMode?: import("@/lib/safety/policy").InjectionEnforceMode;
+  /**
+   * Set by the chat dispatch workflow to fold the post-reserve UPDATE of
+   * `chat_event_dedupe.session_id` / `message_id` into the same Neon
+   * transaction as session + session_message creation. Saves one
+   * round-trip on the chat hot path. Other triggers (api / schedule /
+   * webhook / a2a) leave this undefined.
+   */
+  chatDedupeUpdate?: {
+    platform: "discord" | "slack";
+    eventId: string;
+  };
 }
 
 export interface DispatchResult {
@@ -645,6 +656,28 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
     if (!messageRow) {
       // Should be impossible — INSERT...RETURNING without WHERE always returns.
       throw new Error("Failed to create session_message row");
+    }
+
+    // OPT — chat hot path: when the chat workflow set `chatDedupeUpdate`,
+    // fold the post-reserve UPDATE of chat_event_dedupe into the same
+    // transaction as session + session_message creation. Eliminates one
+    // Neon round-trip per chat run. Guarded with `inner_run_id IS NULL`
+    // so a winner that's already populated the row (e.g. WDK retry of a
+    // step where the prior attempt got further) is not overwritten.
+    if (input.chatDedupeUpdate) {
+      await tx.execute(
+        `UPDATE chat_event_dedupe
+         SET session_id = $4, message_id = $5
+         WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+           AND inner_run_id IS NULL`,
+        [
+          input.tenantId,
+          input.chatDedupeUpdate.platform,
+          input.chatDedupeUpdate.eventId,
+          session.id,
+          messageRow.id,
+        ],
+      );
     }
 
     return {
