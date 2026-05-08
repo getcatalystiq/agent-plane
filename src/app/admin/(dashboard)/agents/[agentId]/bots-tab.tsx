@@ -173,80 +173,123 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
             <summary className="cursor-pointer font-medium text-foreground">
               Slack app setup checklist
             </summary>
-            <ol className="space-y-2 mt-2 ml-4 list-decimal text-muted-foreground">
+            <ol className="space-y-3 mt-3 ml-4 list-decimal text-muted-foreground">
               <li>
+                <strong className="text-foreground">Event Subscriptions:</strong>{" "}
                 <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
                   api.slack.com/apps
                 </a>
                 {" "}→ your app → <strong className="text-foreground">Event Subscriptions</strong> →
-                paste the URL above into <strong className="text-foreground">Request URL</strong>. Wait for ✓ Verified.
+                paste the webhook URL above into <strong className="text-foreground">Request URL</strong>. Wait for ✓ Verified.
               </li>
+
               <li>
-                Same page → <strong className="text-foreground">Subscribe to bot events</strong> →
-                add these (without them, Slack sends no events to your webhook):
+                <strong className="text-foreground">Subscribe to bot events</strong> (same page).
+                Without these, Slack sends no events to your webhook.
+                <div className="mt-1 ml-1">
+                  <span className="text-foreground/80 font-medium">Required for @mention + DM replies:</span>
+                  <ul className="ml-5 mt-0.5 list-disc space-y-0.5">
+                    <li><code className="text-foreground">app_mention</code> — fires on @mentions of the bot</li>
+                    <li><code className="text-foreground">message.channels</code> — public-channel thread follow-ups</li>
+                    <li><code className="text-foreground">message.groups</code> — private-channel thread follow-ups</li>
+                    <li><code className="text-foreground">message.im</code> — DMs to the bot (optional)</li>
+                  </ul>
+                </div>
+                <div className="mt-2 ml-1">
+                  <span className="text-foreground/80 font-medium">Required if Agents & AI Apps is enabled (see step 4):</span>
+                  <ul className="ml-5 mt-0.5 list-disc space-y-0.5">
+                    <li><code className="text-foreground">assistant_thread_started</code></li>
+                    <li><code className="text-foreground">assistant_thread_context_changed</code></li>
+                  </ul>
+                </div>
+              </li>
+
+              <li>
+                <strong className="text-foreground">OAuth & Permissions → Bot Token Scopes.</strong>
+                <div className="mt-1 ml-1">
+                  <span className="text-foreground/80 font-medium">Required:</span>
+                  <ul className="ml-5 mt-0.5 list-disc space-y-0.5">
+                    <li><code className="text-foreground">app_mentions:read</code> — receive @mentions</li>
+                    <li><code className="text-foreground">chat:write</code> — post and edit messages</li>
+                    <li><code className="text-foreground">channels:history</code> — read public-channel thread context</li>
+                    <li><code className="text-foreground">groups:history</code> — read private-channel thread context</li>
+                    <li><code className="text-foreground">im:history</code> — read DM thread context (if message.im subscribed)</li>
+                  </ul>
+                </div>
+                <div className="mt-2 ml-1">
+                  <span className="text-foreground/80 font-medium">Recommended:</span>
+                  <ul className="ml-5 mt-0.5 list-disc space-y-0.5">
+                    <li>
+                      <code className="text-foreground">reactions:write</code> — bot adds 👀 / ✅ / ❌ status
+                      {" "}reactions on the user's message. Without it, reactions log a warning and don't appear,
+                      {" "}but the agent still replies.
+                    </li>
+                    <li>
+                      <code className="text-foreground">users:write</code> — daily presence cron calls
+                      {" "}<code className="text-foreground">users.setPresence(auto)</code> so the bot shows
+                      {" "}online (green dot) in the workspace member list. Without it, the bot stays grey.
+                    </li>
+                    <li>
+                      <code className="text-foreground">assistant:write</code> — required for Agents & AI Apps
+                      {" "}(see step 4).
+                    </li>
+                  </ul>
+                </div>
+              </li>
+
+              <li>
+                <strong className="text-foreground">Agents & AI Apps</strong> (optional, recommended) — enables
+                {" "}Slack's native AI assistant UI: clickable suggested prompts, custom thread titles, rich
+                {" "}<code className="text-foreground">"Thinking…"</code> loading status during agent runs, and
+                {" "}native streaming-text rendering (StreamingPlan card) for tool-using agents.
                 <ul className="ml-5 mt-1 list-disc space-y-0.5">
-                  <li><code className="text-foreground">app_mention</code> — required, fires on @mentions</li>
-                  <li><code className="text-foreground">message.channels</code> — public-channel thread follow-ups</li>
-                  <li><code className="text-foreground">message.groups</code> — private-channel thread follow-ups</li>
-                  <li><code className="text-foreground">message.im</code> — optional, DMs to the bot</li>
+                  <li>Slack app config → <strong className="text-foreground">Agents & AI Apps</strong> → toggle on</li>
+                  <li>Ensure <code className="text-foreground">assistant:write</code> is in Bot Token Scopes (step 3)</li>
+                  <li>
+                    Ensure <code className="text-foreground">assistant_thread_started</code> +
+                    {" "}<code className="text-foreground">assistant_thread_context_changed</code> are subscribed (step 2)
+                  </li>
                 </ul>
+                Without this, the bot still works via @mentions — it just shows the default typing indicator
+                {" "}instead of rich status, and doesn't get the assistant panel.
               </li>
+
               <li>
-                <strong className="text-foreground">OAuth & Permissions</strong> → Bot Token Scopes must include:
-                <code className="ml-1 text-foreground">app_mentions:read</code>,
-                <code className="ml-1 text-foreground">chat:write</code>,
-                <code className="ml-1 text-foreground">channels:history</code>,
-                <code className="ml-1 text-foreground">groups:history</code>
-                {", "}<code className="text-foreground">im:history</code> (if using DMs).
-              </li>
-              <li>
-                <strong className="text-foreground">Reactions:</strong> add <code className="text-foreground">reactions:write</code> to the
-                {" "}Bot Token Scopes. Used by the bot to add 👀 / ✅ / ❌ status reactions on the user's
-                {" "}message. Without it, the agent still replies but the reactions log a warning and don't appear.
-              </li>
-              <li>
-                <strong className="text-foreground">Presence (green dot):</strong> add <code className="text-foreground">users:write</code> to the
-                {" "}Bot Token Scopes. A daily cron calls <code className="text-foreground">users.setPresence(auto)</code>
-                {" "}so the bot shows online in the workspace member list. Without it, the bot stays grey.
-              </li>
-              <li>
-                <strong className="text-foreground">Agents & AI Apps</strong> (optional, recommended) — enables Slack's
-                {" "}native AI assistant UI (rich loading status, suggested follow-up prompts, thread titles).
+                <strong className="text-foreground">Slash Commands</strong> (optional) — lets users invoke the bot
+                {" "}from any channel without inviting it. Slash invocation is auto-removed by Slack; the bot's
+                {" "}reply remains.
                 <ul className="ml-5 mt-1 list-disc space-y-0.5">
-                  <li>
-                    Slack app config → <strong className="text-foreground">Agents & AI Apps</strong> → toggle on.
-                  </li>
-                  <li>
-                    Add <code className="text-foreground">assistant:write</code> to the Bot Token Scopes.
-                  </li>
-                  <li>
-                    Subscribe to bot events: <code className="text-foreground">assistant_thread_started</code>,
-                    {" "}<code className="text-foreground">assistant_thread_context_changed</code>.
-                  </li>
-                </ul>
-                Without this, the bot still works via @mentions — it just doesn't get the rich AI assistant UI.
-              </li>
-              <li>
-                <strong className="text-foreground">Slash command</strong> (optional) — register
-                {" "}<code className="text-foreground">/agentplane</code> at
-                {" "}<strong className="text-foreground">Slash Commands</strong> in the Slack app config.
-                <ul className="ml-5 mt-1 list-disc space-y-0.5">
+                  <li>Slack app config → <strong className="text-foreground">Slash Commands</strong> → Create New Command</li>
                   <li>Command: <code className="text-foreground">/agentplane</code></li>
-                  <li>Request URL: same webhook URL above (the Chat SDK multiplexes events + slash commands)</li>
-                  <li>Short description: "Ask the AI agent a question"</li>
+                  <li>Request URL: same webhook URL above (one URL handles events, slash commands, and AI Apps)</li>
+                  <li>Short description: <em>Ask the AI agent a question</em></li>
                   <li>Usage hint: <code className="text-foreground">[your question]</code></li>
                 </ul>
-                Lets users invoke the bot from any channel without inviting it. The slash invocation is
-                auto-removed by Slack; the bot's reply remains.
               </li>
+
               <li>
-                <strong className="text-foreground">Reinstall to Workspace</strong> after adding scopes or events.
-                Without reinstall, scopes show in the UI but Slack fires no events.
+                <strong className="text-foreground">Reinstall to Workspace</strong> after adding any scopes
+                {" "}or events. Without reinstall, scopes show in the UI but Slack fires no events.
               </li>
+
               <li>
-                In your Slack channel: <code className="text-foreground">/invite @YourBot</code>, then
-                {" "}<strong className="text-foreground">@mention</strong> the bot — type <code className="text-foreground">@</code> and select the bot from the autocomplete (plain text won't fire <code className="text-foreground">app_mention</code>).
-                Or just type <code className="text-foreground">/agentplane &lt;question&gt;</code> from any channel.
+                <strong className="text-foreground">Test</strong> in your Slack workspace:
+                <ul className="ml-5 mt-1 list-disc space-y-0.5">
+                  <li>
+                    <code className="text-foreground">/invite @YourBot</code>, then{" "}
+                    <strong className="text-foreground">@mention</strong> the bot — type
+                    {" "}<code className="text-foreground">@</code> and pick the bot from autocomplete (plain
+                    {" "}text won't fire <code className="text-foreground">app_mention</code>).
+                  </li>
+                  <li>
+                    Or type <code className="text-foreground">/agentplane &lt;your question&gt;</code> from any
+                    {" "}channel (slash command — no @mention required, bot doesn't have to be a member).
+                  </li>
+                  <li>
+                    Or open the AI assistant panel for the app (if Agents & AI Apps is enabled) — see greeting,
+                    {" "}suggested prompts, custom thread title.
+                  </li>
+                </ul>
               </li>
             </ol>
           </details>
