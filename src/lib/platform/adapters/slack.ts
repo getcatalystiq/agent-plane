@@ -188,6 +188,82 @@ export function registerSlackHandlers(bot: Chat, input: SlackHandlerInput): void
     }
   });
 
+  // ---- Slash command: /agentplane <query> ----
+  // Lets users invoke the bot via Slack's slash-command surface
+  // instead of @mention. Useful when:
+  //   - the bot isn't a member of the channel (slash commands work
+  //     even if the bot isn't invited)
+  //   - the user wants a discoverable, autocompleting entry point
+  //     ("type / to see all available commands")
+  //   - the message itself is sensitive and the user prefers not to
+  //     leave it in channel scrollback (Slack auto-deletes the slash
+  //     command invocation by default; the bot's reply remains)
+  //
+  // Slack app config requirement (operator action, documented in the
+  // Bots tab onboarding checklist): create a slash command at
+  // api.slack.com/apps → your app → Slash Commands. Use the same
+  // webhook URL as the Events API (/api/webhooks/slack). The Chat SDK
+  // routes both event-types and slash-command POSTs to the same
+  // `bot.webhooks.slack(req)` handler, then dispatches to whichever
+  // listener (event or slash command) matches.
+  //
+  // Reuses the same triggerChatWorkflow pipeline as @mention so the
+  // agent runs identically; the only differences are the eventId
+  // (slash commands have no message ts, so we synthesize) and that
+  // there's no `replyToMessageId` for status reactions to live on
+  // (slash invocations are auto-cleared by Slack — there's nothing
+  // to react to).
+  bot.onSlashCommand(async (event) => {
+    try {
+      const text = (event.text ?? "").trim();
+      if (text.length === 0) {
+        // Empty `/agentplane` — post a hint instead of dispatching
+        // an empty prompt to the agent.
+        const adapter = event.adapter as unknown as {
+          postMessage?: (threadId: string, content: string) => Promise<unknown>;
+        };
+        const channelLike = event.channel as unknown as { id?: string };
+        const threadId = channelLike.id ?? "";
+        if (typeof adapter.postMessage === "function" && threadId.length > 0) {
+          await adapter.postMessage(threadId, "Usage: `/agentplane <your question>`").catch(() => {});
+        }
+        return;
+      }
+
+      const channelLike = event.channel as unknown as { id?: string };
+      const threadKey = channelLike.id ?? "";
+      // Channel id is the third segment of `slack:teamId:channelId`.
+      const channelId = threadKey.split(":")[2] ?? threadKey;
+      const userLike = event.user as unknown as { userId?: string; userName?: string };
+
+      await triggerChatWorkflow({
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        platform: "slack",
+        threadKey,
+        channelId,
+        prompt: text,
+        authorId: userLike.userId ?? "",
+        authorDisplayName: userLike.userName ?? "",
+        // Slash commands have no inherent message id. Synthesize an
+        // event id so chat_event_dedupe still works on Slack's
+        // 3-second retry of the slash-command POST. Use a stable
+        // composite of channel + user + text-prefix so duplicate
+        // retries collide on the dedup row.
+        eventId: `slash:${channelId}:${userLike.userId ?? "unknown"}:${Date.now()}`,
+        // No replyToMessageId — Slack auto-removes the `/agentplane`
+        // invocation; there's nothing to react against.
+        replyToMessageId: undefined,
+      });
+    } catch (err) {
+      logger.error("slack onSlashCommand failed", {
+        tenant_id: input.tenantId,
+        agent_id: input.agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   bot.onSubscribedMessage(async (thread, message) => {
     try {
       const m = message as unknown as SlackMessageLike;

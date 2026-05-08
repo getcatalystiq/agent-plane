@@ -227,12 +227,26 @@ function BotCard({ platform, config, loading, agentId, onChange, slackWebhookUrl
                 Without this, the bot still works via @mentions — it just doesn't get the rich AI assistant UI.
               </li>
               <li>
+                <strong className="text-foreground">Slash command</strong> (optional) — register
+                {" "}<code className="text-foreground">/agentplane</code> at
+                {" "}<strong className="text-foreground">Slash Commands</strong> in the Slack app config.
+                <ul className="ml-5 mt-1 list-disc space-y-0.5">
+                  <li>Command: <code className="text-foreground">/agentplane</code></li>
+                  <li>Request URL: same webhook URL above (the Chat SDK multiplexes events + slash commands)</li>
+                  <li>Short description: "Ask the AI agent a question"</li>
+                  <li>Usage hint: <code className="text-foreground">[your question]</code></li>
+                </ul>
+                Lets users invoke the bot from any channel without inviting it. The slash invocation is
+                auto-removed by Slack; the bot's reply remains.
+              </li>
+              <li>
                 <strong className="text-foreground">Reinstall to Workspace</strong> after adding scopes or events.
                 Without reinstall, scopes show in the UI but Slack fires no events.
               </li>
               <li>
                 In your Slack channel: <code className="text-foreground">/invite @YourBot</code>, then
                 {" "}<strong className="text-foreground">@mention</strong> the bot — type <code className="text-foreground">@</code> and select the bot from the autocomplete (plain text won't fire <code className="text-foreground">app_mention</code>).
+                Or just type <code className="text-foreground">/agentplane &lt;question&gt;</code> from any channel.
               </li>
             </ol>
           </details>
