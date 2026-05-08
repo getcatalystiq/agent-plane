@@ -167,8 +167,23 @@ async function maybeHandleFirstTimeChallenge(
   }
 
   if (!matchedSource) {
+    // List per-candidate secret_head/tail so the operator can see at a
+    // glance whether their newly-saved bot's secret made it into the
+    // candidate list AND whether the head/tail matches what's visible
+    // in the Slack app's Basic Info → Signing Secret. Common failure
+    // modes:
+    //   - The new bot row isn't in the candidates → save didn't persist
+    //     (UI/admin bug) or the row is `enabled=false`.
+    //   - The new bot row IS in the candidates but secret_head/tail
+    //     don't match Slack's UI value → wrong value pasted.
     logger.warn("slack-webhook: url_verification signature did not match any registered secret", {
       candidates_tried: candidates.length,
+      candidates: candidates.map((c) => ({
+        source: c.source,
+        secret_len: c.secret.length,
+        secret_head: c.secret.slice(0, 4),
+        secret_tail: c.secret.slice(-4),
+      })),
     });
     return unhandledResponse();
   }
