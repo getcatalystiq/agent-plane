@@ -220,6 +220,228 @@ async function consumeAndPostStep(
     });
   }
 
+  // Platform fork: Slack has a native streaming API on its Chat SDK
+  // adapter (`adapter.stream(threadId, asyncIterable, options)`) that
+  // posts a single message and incrementally extends it as text chunks
+  // arrive — backed by Slack's chat.startStream / chat.appendStream /
+  // chat.stopStream APIs. It also drives Slack's own typing-style
+  // indicator throughout the stream lifecycle. Discord has no
+  // equivalent; we keep its existing post-then-edit loop.
+  if (input.platform === "slack") {
+    return await consumeAndStreamSlack(input, innerRunId);
+  }
+  return await consumeAndEditDiscord(input, innerRunId);
+}
+
+/**
+ * Slack streaming path. Builds an `AsyncIterable<string>` from the
+ * inner workflow's NDJSON readable (yielding text from text_delta
+ * deltas when the runner is streaming, or from `assistant.content[].text`
+ * blocks for non-streaming runners) and feeds it to
+ * `adapter.stream(threadKey, asyncIterable, opts)`.
+ *
+ * On a runner that emits per-token `text_delta` events
+ * (Claude Agent SDK with `includePartialMessages: true`), the user
+ * sees the message materialize word-by-word in Slack's native
+ * streaming UI — same effect as Slack's own AI assistant features.
+ *
+ * On a runner that emits only one final `assistant` event, the
+ * AsyncIterable yields one big chunk and Slack still renders it
+ * via the streaming UI (typing indicator → final message).
+ *
+ * Slack's stream API requires `recipientUserId` and `recipientTeamId`
+ * for the AI assistant context. We pull them from `input.authorId`
+ * (the Slack user who @-mentioned the bot) and the cached bot's
+ * `slackTeamId` (populated when the bot was loaded into the registry).
+ */
+async function consumeAndStreamSlack(
+  input: ChatTriggerInput,
+  innerRunId: string,
+): Promise<void> {
+  const cached = await resolveCachedBot(input.tenantId, input.agentId, "slack");
+  if (!cached) {
+    logger.error("consumeAndStreamSlack: bot config missing", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+    });
+    await markBotErrorStep(input, "bot_config_missing");
+    return;
+  }
+
+  const adapter = cached.adapter as unknown as {
+    stream?: (
+      threadId: string,
+      textStream: AsyncIterable<string>,
+      options?: { recipientUserId?: string; recipientTeamId?: string },
+    ) => Promise<{ id: string }>;
+  };
+
+  if (typeof adapter.stream !== "function") {
+    // Adapter version doesn't expose stream; fall back to the Discord-
+    // style edit loop so the agent's reply still lands.
+    logger.warn("consumeAndStreamSlack: adapter.stream not available, falling back to edit loop", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+    });
+    return await consumeAndEditDiscord(input, innerRunId);
+  }
+
+  const readable = getRun<string>(innerRunId).getReadable<string>();
+
+  // Track stream-driver state across the AsyncIterable so the post-
+  // stream guards (markBotError on agent-emitted error, empty-readable
+  // acknowledgement) have the necessary context.
+  let sawAgentError: string | null = null;
+  let emittedAnyText = false;
+  let resultFallbackText: string | null = null;
+
+  const textStream: AsyncIterable<string> = (async function* () {
+    const reader = readable.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (typeof value !== "string") continue;
+        const evt = parseNdjsonLine(value);
+        if (!evt) continue;
+
+        if (evt.type === "text_delta" && typeof evt.text === "string" && evt.text.length > 0) {
+          emittedAnyText = true;
+          yield evt.text;
+        } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
+          const blocks = evt.message.content ?? [];
+          for (const block of blocks) {
+            if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+              emittedAnyText = true;
+              yield block.text;
+            }
+          }
+        } else if (evt.type === "error") {
+          sawAgentError = typeof evt.message === "string" ? evt.message : "agent_error";
+          // Surface the error as a final yielded line so it appears in
+          // the streamed message tail (Slack's stream API doesn't have
+          // a separate error channel — the user reads it in-thread).
+          if (emittedAnyText) {
+            yield `\n\n_(agent stopped early: ${sawAgentError})_`;
+          }
+          break;
+        } else if (evt.type === "result" || evt.kind === "terminal") {
+          if (!emittedAnyText && typeof evt.result === "string" && evt.result.length > 0) {
+            // Non-streaming runner that only emitted a final result —
+            // captured here so the empty-readable guard below can post
+            // it as a one-shot message instead of a stream.
+            resultFallbackText = evt.result;
+          }
+          break;
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ignore */ }
+    }
+  })();
+
+  try {
+    await adapter.stream(input.threadKey, textStream, {
+      recipientUserId: input.authorId || undefined,
+      recipientTeamId: cached.slackTeamId ?? undefined,
+    });
+  } catch (err) {
+    logger.error("consumeAndStreamSlack: adapter.stream failed", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // On stream failure, try a one-shot post so the agent's reply still
+    // lands somewhere visible. Use whatever text accumulated (sawAgent
+    // error gets appended as suffix). Best-effort.
+    try {
+      const fallbackText = resultFallbackText
+        ?? (sawAgentError ? `_(agent stopped early: ${sawAgentError})_` : "_(agent reply unavailable)_");
+      await postOrEditStep({
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        platform: input.platform,
+        threadId: input.threadKey,
+        text: fallbackText,
+        existingMessageId: null,
+        seal: false,
+        continuation: false,
+      });
+    } catch {
+      // ignore — will be retried by user
+    }
+    if (sawAgentError) await markBotErrorStep(input, sawAgentError);
+    return;
+  }
+
+  if (sawAgentError) {
+    await markBotErrorStep(input, sawAgentError);
+    return;
+  }
+
+  // Empty-readable guard. The stream completed but emitted no text and
+  // no fallback — surface the silent-bot UX.
+  if (!emittedAnyText && resultFallbackText === null) {
+    logger.warn("consumeAndStreamSlack: inner dispatch produced no output", {
+      tenant_id: input.tenantId,
+      agent_id: input.agentId,
+      thread_key: input.threadKey,
+      inner_run_id: innerRunId,
+    });
+    try {
+      await postOrEditStep({
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        platform: input.platform,
+        threadId: input.threadKey,
+        text: "_(agent produced no output — please retry)_",
+        existingMessageId: null,
+        seal: false,
+        continuation: false,
+      });
+    } catch (err) {
+      logger.error("consumeAndStreamSlack: empty-readable acknowledgement failed", {
+        tenant_id: input.tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await markBotErrorStep(
+        input,
+        `inner dispatch produced no output AND acknowledgement post failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return;
+  }
+
+  // Result-fallback path: non-streaming runner that yielded no
+  // assistant text but had a final `result` string. Post it as a
+  // single message (no stream).
+  if (!emittedAnyText && resultFallbackText !== null) {
+    await postOrEditStep({
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      platform: input.platform,
+      threadId: input.threadKey,
+      text: resultFallbackText,
+      existingMessageId: null,
+      seal: false,
+      continuation: false,
+    });
+  }
+}
+
+/**
+ * Discord (and adapter.stream-unavailable) path. Original post-then-
+ * edit loop preserved verbatim — Discord has no streaming API and the
+ * loop has been hardened across multiple review rounds with edge cases
+ * (rollover, 429 backoff, error path, empty-readable guard) we don't
+ * want to re-implement.
+ */
+async function consumeAndEditDiscord(
+  input: ChatTriggerInput,
+  innerRunId: string,
+): Promise<void> {
   const readable = getRun<string>(innerRunId).getReadable<string>();
   const reader = readable.getReader();
   const limits = PLATFORM_LIMITS[input.platform];
@@ -236,23 +458,13 @@ async function consumeAndPostStep(
   let postFailed = false;
   let resultEventCount = 0;
 
-  // Show the platform's native typing indicator so the user sees
-  // immediate feedback ("Typing…") while the agent generates its reply.
-  // Slack uses `assistant.threads.setStatus` when the bot has the AI
-  // Apps feature + assistant:write scope; otherwise falls back to the
-  // default typing indicator. Discord uses its standard typing event.
-  // The indicator auto-clears when the next message posts to the
-  // thread, so no explicit stop call is needed.
+  // Show Discord's native typing indicator so the user sees
+  // immediate feedback while the agent generates its reply. Mirrors
+  // the Slack path on main (PR #38): no placeholder post, no edit-out
+  // residue. The indicator clears when the first real post lands.
   //
-  // Replaces the prior "_Thinking…_" placeholder + edit pattern. The
-  // placeholder worked but produced an extra message in the thread
-  // history (the agent's first turn was always followed by the edited-
-  // out placeholder line). Native typing indicators don't leave a
-  // residue and work the same way human-to-human chat works.
-  //
-  // Best-effort: a typing-indicator failure (rate limit, missing scope,
-  // adapter error) must NOT block the actual reply. Wrap in try/catch
-  // and log a warn.
+  // Best-effort: a typing-indicator failure must NOT block the actual
+  // reply. Wrap in try/catch.
   try {
     const cached = await resolveCachedBot(input.tenantId, input.agentId, input.platform);
     if (cached) {
@@ -262,7 +474,7 @@ async function consumeAndPostStep(
       }
     }
   } catch (err) {
-    logger.warn("consumeAndPostStep: startTyping failed (best-effort, non-blocking)", {
+    logger.warn("consumeAndEditDiscord: startTyping failed (best-effort, non-blocking)", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
