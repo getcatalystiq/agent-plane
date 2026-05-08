@@ -255,8 +255,14 @@ const CONSUME_STEP_DEADLINE_MS = 60_000;
  *
  * Without this, a long agent thinking pause inside one iteration
  * would deplete the deadline budget on a single read() call.
+ *
+ * Tuned to 45s (well above typical Claude Opus thinking pauses of
+ * 30–40s, well below the 60s deadline). Initial 12s value bounced
+ * iterations on every short pause, producing a Slack rollover seam
+ * 5–8× more often than necessary. Code-review #6 (reliability
+ * reviewer rel-04). Pinned: deadline ≥ quiet + 10s headroom.
  */
-const CONSUME_STEP_QUIET_MS = 12_000;
+const CONSUME_STEP_QUIET_MS = 45_000;
 
 // ---------------------------------------------------------------------------
 // Workflow body
@@ -344,7 +350,7 @@ export async function chatDispatchWorkflow(
   let sawTerminal = false;
 
   while (!consumeDone) {
-    const result = await consumeAndPostStep(
+    const result: ChatConsumeStepResult = await consumeAndPostStep(
       input,
       started.innerRunId,
       started.kind === "orphan",
@@ -629,7 +635,18 @@ async function consumeAndStreamSlack(
     // bot config errors are NOT a "didn't see terminal" condition — there's
     // no inner run to cancel because we never started consuming. Force
     // loop exit with sawTerminal so the cancel guard doesn't fire.
-    return { nextIndex: startIndex, state, done: true, sawTerminal: true };
+    //
+    // Set sawAgentError on the state so finalizeChatDeliveryStep computes
+    // success=false and lands the ❌ reaction. Without this, the user's
+    // message would get a ✅ reaction even though no agent reply was
+    // ever posted (the bot literally couldn't connect). Code-review #5
+    // (adversarial reviewer).
+    return {
+      nextIndex: startIndex,
+      state: { ...state, sawAgentError: state.sawAgentError ?? "bot_config_missing" },
+      done: true,
+      sawTerminal: true,
+    };
   }
 
   // We bypass `adapter.stream` and call `client.chatStream` directly via the
@@ -662,10 +679,12 @@ async function consumeAndStreamSlack(
   let nextIndex = startIndex;
   const deadline = Date.now() + CONSUME_STEP_DEADLINE_MS;
   let lastReadAt = Date.now();
-  // Set true when we deliberately stop iterating because we hit the
-  // deadline — distinguishes "ran out of budget, body should re-invoke"
-  // from "saw terminal" / "readable closed naturally".
-  let exitedDueToDeadline = false;
+  // Set true when we deliberately stop iterating because we hit
+  // either bound — wall-clock deadline OR read-quiet timeout.
+  // Distinguishes "ran out of budget, body should re-invoke" from
+  // "saw terminal" / "readable closed naturally". Same name as
+  // Discord's flag for parallel structure.
+  let exitedDueToBudget = false;
 
   const readable = getRun<string>(innerRunId).getReadable<string>({ startIndex });
 
@@ -690,7 +709,7 @@ async function consumeAndStreamSlack(
         // Bounded-iteration guards. The body re-invokes with our
         // returned `nextIndex` so deferred chunks are not dropped.
         if (Date.now() > deadline) {
-          exitedDueToDeadline = true;
+          exitedDueToBudget = true;
           break;
         }
         // Quiet timeout: if the readable hasn't yielded anything in
@@ -699,7 +718,7 @@ async function consumeAndStreamSlack(
         // (likely thinking); the cancel guard fires only when the
         // body decides to stop the loop without sawTerminal.
         if (Date.now() - lastReadAt > CONSUME_STEP_QUIET_MS) {
-          exitedDueToDeadline = true;
+          exitedDueToBudget = true;
           break;
         }
 
@@ -932,11 +951,11 @@ async function consumeAndStreamSlack(
   //   streamFailed=true               → done (don't loop on a broken
   //                                     Slack stream; the fallback post
   //                                     above already wrote what we had).
-  //   exitedDueToDeadline=true        → not done (re-invoke with new deadline).
-  //   exitedDueToDeadline=false &&
+  //   exitedDueToBudget=true        → not done (re-invoke with new deadline).
+  //   exitedDueToBudget=false &&
   //     readable returned done        → done (rare; inner run ended
   //                                     without a terminal event).
-  const done = sawTerminal || streamFailed || !exitedDueToDeadline;
+  const done = sawTerminal || streamFailed || !exitedDueToBudget;
 
   // Post-stream guards run ONCE per chat reply — only on the
   // last iteration (`done: true`) and only when we observed terminal
@@ -1043,12 +1062,29 @@ async function consumeAndEditDiscord(
   // Tracks an early-return path so we don't post-flush twice on
   // already-handled terminal/error branches.
   let earlyReturn = false;
+  // Mirror of Slack's in-loop sentinel — set TRUE at each break-out
+  // site so the post-loop done-flag derivation knows whether we
+  // exited because of a budget cap (re-invoke) or natural end
+  // (loop is done). Pre-fix this was recomputed post-loop as
+  // `Date.now() > deadline`, which was FALSE for the quiet-timeout
+  // break path (deadline hadn't elapsed yet) — Discord's body
+  // would set `done=true` on any agent thinking pause >12s,
+  // killing the inner run mid-thought via the cancel guard.
+  // Code-review #1 (cross-flagged by correctness, reliability, and
+  // kieran-typescript reviewers).
+  let exitedDueToBudget = false;
 
   try {
     while (true) {
       // Bounded-iteration guard — mirror of consumeAndStreamSlack.
-      if (Date.now() > deadline) break;
-      if (Date.now() - lastReadAt > CONSUME_STEP_QUIET_MS) break;
+      if (Date.now() > deadline) {
+        exitedDueToBudget = true;
+        break;
+      }
+      if (Date.now() - lastReadAt > CONSUME_STEP_QUIET_MS) {
+        exitedDueToBudget = true;
+        break;
+      }
 
       const { value: ndjsonLine, done } = await reader.read();
       if (done) break;
@@ -1196,22 +1232,29 @@ async function consumeAndEditDiscord(
   };
 
   // Decide whether the body's loop should exit.
-  //   sawTerminal=true                → done (terminal observed).
-  //   earlyReturn=true                → done (inner-iteration error
-  //                                     already markBotError'd).
-  //   readable returned done w/o
-  //     deadline expiring              → done (rare; inner run ended
-  //                                     without terminal).
-  //   deadline expired                → not done (re-invoke).
-  const exitedDueToDeadline =
-    !sawTerminal && !earlyReturn && Date.now() > deadline;
-  const done = sawTerminal || earlyReturn || !exitedDueToDeadline;
+  //   sawTerminal=true                  → done (terminal observed).
+  //   earlyReturn=true                  → done (inner-iteration error
+  //                                       already markBotError'd).
+  //   exitedDueToBudget=true            → not done (re-invoke).
+  //                                       Set in-loop on BOTH the
+  //                                       wall-clock deadline AND the
+  //                                       quiet-timeout break sites.
+  //   readable returned done w/o budget → done (rare; inner run ended
+  //                                       without a terminal event).
+  const done = sawTerminal || earlyReturn || !exitedDueToBudget;
 
   // On the final iteration only, run the post-stream guards: final
   // flush of remaining open-message text, then empty-readable guard.
   // These must NOT fire on intermediate iterations or we'd post the
   // empty-readable banner mid-reply.
-  if (done && sawTerminal) {
+  //
+  // Skip when `earlyReturn` — the agent_error branch already called
+  // flushAndFinishStep with the error suffix appended, and a second
+  // flush of `responseText.slice(committedLength)` would re-edit the
+  // same Discord message with a suffix-less tail, clobbering the
+  // user-visible error message. Code-review #2 (cross-flagged by
+  // correctness and reliability reviewers).
+  if (done && sawTerminal && !earlyReturn) {
     // Final flush — flush any remaining open-message text.
     if (!postFailed && responseText.length > committedLength) {
       const tail = responseText.slice(committedLength);
@@ -2156,4 +2199,8 @@ export const __testing = {
   POLL_INTERVAL_CAP_MS,
   POLL_MAX_DURATION_MS,
   STALE_CLAIM_THRESHOLD_SECONDS,
+  // Bounded-consume internals (PR #85 + post-review fixes).
+  initialChatConsumeState,
+  CONSUME_STEP_DEADLINE_MS,
+  CONSUME_STEP_QUIET_MS,
 } as const;

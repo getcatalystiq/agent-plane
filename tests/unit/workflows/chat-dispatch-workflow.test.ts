@@ -401,3 +401,111 @@ describe("classifyDispatchFailure", () => {
     expect(classifyDispatchFailure({ message: "duck-typed" })).toBe("other");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bounded-consume state machine — PR #85 + post-review fixes.
+// ---------------------------------------------------------------------------
+
+describe("initialChatConsumeState", () => {
+  it("returns a fully-zeroed/empty seed state with all fields present", () => {
+    const s = __testing.initialChatConsumeState();
+
+    // Common.
+    expect(s.responseText).toBe("");
+    expect(s.committedLength).toBe(0);
+    expect(s.perTurnDeltaText).toBe("");
+    expect(s.toolTitles).toEqual({});
+    expect(s.openToolIds).toEqual([]);
+    expect(s.emittedAnyText).toBe(false);
+    expect(s.resultFallbackText).toBeNull();
+    expect(s.sawAgentError).toBeNull();
+
+    // Discord-only.
+    expect(s.messageId).toBeNull();
+    expect(s.hasPosted).toBe(false);
+    expect(s.postFailed).toBe(false);
+    expect(s.chunksSinceFlush).toBe(0);
+    expect(s.backoffChunks).toBe(0);
+    expect(s.resultEventCount).toBe(0);
+  });
+
+  it("returns a fresh object each call (no shared references)", () => {
+    const a = __testing.initialChatConsumeState();
+    const b = __testing.initialChatConsumeState();
+    expect(a).not.toBe(b);
+    expect(a.toolTitles).not.toBe(b.toolTitles);
+    expect(a.openToolIds).not.toBe(b.openToolIds);
+  });
+});
+
+describe("ChatConsumeState JSON round-trip", () => {
+  it("preserves all fields verbatim through JSON.parse(JSON.stringify(...))", () => {
+    const original = {
+      ...__testing.initialChatConsumeState(),
+      responseText: "Hello world",
+      committedLength: 5,
+      perTurnDeltaText: "world",
+      toolTitles: { tool_a: "search_docs", tool_b: "FIRECRAWL_SEARCH" },
+      openToolIds: ["tool_b"],
+      emittedAnyText: true,
+      resultFallbackText: "final answer",
+      sawAgentError: "rate_limit_exhausted",
+      messageId: "1234567890.123",
+      hasPosted: true,
+      postFailed: false,
+      chunksSinceFlush: 3,
+      backoffChunks: 0,
+      resultEventCount: 1,
+    };
+    const roundTrip = JSON.parse(JSON.stringify(original));
+    expect(roundTrip).toEqual(original);
+  });
+
+  it("toolTitles and openToolIds round-trip through Map/Set hydration semantics", () => {
+    // The bounded-consume functions hydrate state.toolTitles into a Map
+    // and state.openToolIds into a Set, mutate, then serialize back via
+    // Object.fromEntries(map) / [...set]. Verify those round-trips.
+    const titles: Record<string, string> = { id1: "foo", id2: "bar" };
+    const titlesMap = new Map(Object.entries(titles));
+    titlesMap.set("id3", "baz");
+    titlesMap.delete("id1");
+    const titlesBack = Object.fromEntries(titlesMap);
+    expect(titlesBack).toEqual({ id2: "bar", id3: "baz" });
+
+    const ids = ["id1", "id2"];
+    const idsSet = new Set(ids);
+    idsSet.add("id3");
+    idsSet.delete("id1");
+    const idsBack = [...idsSet];
+    expect(idsBack.sort()).toEqual(["id2", "id3"]);
+  });
+});
+
+describe("consume-step budget constants", () => {
+  it("deadline is at least 10s above the quiet timeout (headroom)", () => {
+    // The quiet-timeout fires when reads stall; the body re-invokes
+    // immediately. The wall-clock deadline is the upper bound on a
+    // single iteration. Pinning this invariant catches the round-5
+    // STALE_CLAIM-style boundary defect — three independent constants
+    // (deadline / quiet / 120s function cap) need a documented relation.
+    expect(__testing.CONSUME_STEP_DEADLINE_MS).toBeGreaterThanOrEqual(
+      __testing.CONSUME_STEP_QUIET_MS + 10_000,
+    );
+  });
+
+  it("deadline is comfortably under the empirical 120s function cap", () => {
+    // Pre-fix the function host killed steps at ~120s. With the
+    // workflow-body loop, each iteration only needs to fit under that
+    // cap — but 60s default leaves headroom for fix-iteration overhead
+    // and post-stream guards (final flush, markBotEvent, reactions).
+    expect(__testing.CONSUME_STEP_DEADLINE_MS).toBeLessThanOrEqual(100_000);
+  });
+
+  it("quiet timeout is well above typical Claude Opus thinking pauses", () => {
+    // Code-review #6: 12s was below typical Opus thinking pauses
+    // (30–40s), forcing a Slack rollover seam on every short pause.
+    // 45s tolerates pauses at the high end of typical observed
+    // behavior without bouncing iterations.
+    expect(__testing.CONSUME_STEP_QUIET_MS).toBeGreaterThanOrEqual(40_000);
+  });
+});
