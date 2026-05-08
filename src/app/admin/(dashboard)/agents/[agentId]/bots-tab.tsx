@@ -527,6 +527,15 @@ function ConnectForm({
           type="password"
           autoComplete="off"
           placeholder={platform === "discord" ? "MTI3..." : "xoxb-..."}
+          // Slack-only client-side check; Discord tokens have no fixed
+          // prefix worth pinning. Mirrors the server-side Zod refinement.
+          {...(platform === "slack"
+            ? {
+                pattern: "xoxb-.*",
+                title:
+                  "Slack bot token: starts with `xoxb-`. Copy from your Slack app's OAuth & Permissions page (Bot User OAuth Token, not the User OAuth Token).",
+              }
+            : {})}
           className="w-full px-2 py-1 text-sm bg-background border border-border rounded font-mono"
         />
       </div>
@@ -559,13 +568,19 @@ function ConnectForm({
       {platform === "slack" && (
         <div className="space-y-1">
           <label className="text-xs text-muted-foreground">
-            Signing Secret — Slack app config → Basic Information → App Credentials
+            Signing Secret — Slack app config → Basic Information → App Credentials (32 hex chars)
           </label>
           <input
             name="signingSecret"
             required
             type="password"
             autoComplete="off"
+            // Mirror the server-side Zod refinement so the browser
+            // surfaces the format error inline before the round-trip.
+            // The matching server message names the common wrong-field
+            // pastes; this just blocks submission.
+            pattern="[a-f0-9]{32}"
+            title="Slack signing secret: 32 lowercase hex characters. Copy from Basic Information → Signing Secret (not Client Secret / Verification Token)."
             className="w-full px-2 py-1 text-sm bg-background border border-border rounded font-mono"
           />
         </div>

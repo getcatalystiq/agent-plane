@@ -55,10 +55,33 @@ const DiscordCredentialsBody = z.object({
   applicationId: z.string().min(1),
 });
 
+// Slack signing secrets are 32 lowercase hex chars (per Slack's Basic
+// Information → App Credentials → Signing Secret value, observed
+// across every working bot in the registry). Operators have repeatedly
+// pasted the wrong field — Client Secret, Verification Token, Webhook
+// URL, etc. — into this slot, where any non-empty string used to pass.
+// The downstream HMAC verify then fails on every inbound event with a
+// signature mismatch that's invisible until the operator hits the
+// fingerprint diagnostic. Reject the wrong field at the connect-time
+// boundary instead.
+const SLACK_SIGNING_SECRET_RE = /^[a-f0-9]{32}$/;
+
 const SlackCredentialsBody = z.object({
   platform: z.literal("slack"),
-  botToken: z.string().min(1),
-  signingSecret: z.string().min(1),
+  botToken: z
+    .string()
+    .min(1)
+    .refine((v) => v.startsWith("xoxb-"), {
+      message:
+        "Slack bot token must start with `xoxb-` (Bot User OAuth Token from Slack app's OAuth & Permissions page). Did you paste an OAuth code or User OAuth Token instead?",
+    }),
+  signingSecret: z
+    .string()
+    .min(1)
+    .refine((v) => SLACK_SIGNING_SECRET_RE.test(v), {
+      message:
+        "Slack signing secret must be 32 lowercase hex characters. Copy it from Slack app → Basic Information → App Credentials → Signing Secret (NOT Client Secret, NOT Verification Token, NOT Webhook URL).",
+    }),
   appId: z.string().optional(),
   teamId: z.string().optional(),
 });
