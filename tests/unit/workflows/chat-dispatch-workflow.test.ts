@@ -476,8 +476,7 @@ describe("ChatConsumeState JSON round-trip", () => {
     const idsSet = new Set(ids);
     idsSet.add("id3");
     idsSet.delete("id1");
-    const idsBack = [...idsSet];
-    expect(idsBack.sort()).toEqual(["id2", "id3"]);
+    expect([...idsSet]).toEqual(["id2", "id3"]);
   });
 });
 

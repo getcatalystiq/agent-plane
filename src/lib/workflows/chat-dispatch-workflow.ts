@@ -257,10 +257,9 @@ const CONSUME_STEP_DEADLINE_MS = 60_000;
  * would deplete the deadline budget on a single read() call.
  *
  * Tuned to 45s (well above typical Claude Opus thinking pauses of
- * 30–40s, well below the 60s deadline). Initial 12s value bounced
- * iterations on every short pause, producing a Slack rollover seam
- * 5–8× more often than necessary. Code-review #6 (reliability
- * reviewer rel-04). Pinned: deadline ≥ quiet + 10s headroom.
+ * 30–40s, well below the 60s deadline). 12s bounces iterations on
+ * every short pause, producing a Slack rollover seam 5–8× more
+ * often than necessary. Pinned: deadline ≥ quiet + 10s headroom.
  */
 const CONSUME_STEP_QUIET_MS = 45_000;
 
@@ -636,14 +635,13 @@ async function consumeAndStreamSlack(
     // no inner run to cancel because we never started consuming. Force
     // loop exit with sawTerminal so the cancel guard doesn't fire.
     //
-    // Set sawAgentError on the state so finalizeChatDeliveryStep computes
-    // success=false and lands the ❌ reaction. Without this, the user's
-    // message would get a ✅ reaction even though no agent reply was
-    // ever posted (the bot literally couldn't connect). Code-review #5
-    // (adversarial reviewer).
+    // Set sawAgentError so finalizeChatDeliveryStep computes success=false
+    // and lands the ❌ reaction. Without this the user's message gets a
+    // ✅ reaction even though no agent reply was ever posted (the bot
+    // literally couldn't connect).
     return {
       nextIndex: startIndex,
-      state: { ...state, sawAgentError: state.sawAgentError ?? "bot_config_missing" },
+      state: { ...state, sawAgentError: "bot_config_missing" },
       done: true,
       sawTerminal: true,
     };
@@ -1062,16 +1060,13 @@ async function consumeAndEditDiscord(
   // Tracks an early-return path so we don't post-flush twice on
   // already-handled terminal/error branches.
   let earlyReturn = false;
-  // Mirror of Slack's in-loop sentinel — set TRUE at each break-out
-  // site so the post-loop done-flag derivation knows whether we
-  // exited because of a budget cap (re-invoke) or natural end
-  // (loop is done). Pre-fix this was recomputed post-loop as
-  // `Date.now() > deadline`, which was FALSE for the quiet-timeout
-  // break path (deadline hadn't elapsed yet) — Discord's body
-  // would set `done=true` on any agent thinking pause >12s,
+  // Set TRUE at each break-out site so the post-loop done-flag
+  // derivation knows whether we exited because of a budget cap
+  // (re-invoke) or natural end (loop is done). Recomputing
+  // post-loop as `Date.now() > deadline` is wrong on the quiet-
+  // timeout break path (deadline hasn't elapsed yet) — that
+  // mistake sets `done=true` on any agent thinking pause >quiet,
   // killing the inner run mid-thought via the cancel guard.
-  // Code-review #1 (cross-flagged by correctness, reliability, and
-  // kieran-typescript reviewers).
   let exitedDueToBudget = false;
 
   try {
@@ -1252,8 +1247,7 @@ async function consumeAndEditDiscord(
   // flushAndFinishStep with the error suffix appended, and a second
   // flush of `responseText.slice(committedLength)` would re-edit the
   // same Discord message with a suffix-less tail, clobbering the
-  // user-visible error message. Code-review #2 (cross-flagged by
-  // correctness and reliability reviewers).
+  // user-visible error message.
   if (done && sawTerminal && !earlyReturn) {
     // Final flush — flush any remaining open-message text.
     if (!postFailed && responseText.length > committedLength) {
