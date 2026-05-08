@@ -29,6 +29,13 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   if (!message) throw new NotFoundError("Message not found");
 
   if (message.status !== "running" && message.status !== "queued") {
+    logger.info("Admin stream: message terminal at request time", {
+      session_id: sessionId,
+      message_id: messageId,
+      message_status: message.status,
+      has_blob: !!message.transcript_blob_url,
+      offset,
+    });
     if (message.transcript_blob_url) {
       const res = await fetch(message.transcript_blob_url);
       if (res.ok) {
@@ -39,6 +46,15 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
         return new Response(body, { status: 200, headers: ndjsonHeaders() });
       }
     }
+    // Empty body — page reader sees done=true immediately, isStreaming flips
+    // false, "No transcript available" until lazy-load resolves the blob.
+    // PR #56 falls back to liveEvents in this window; this branch logs the
+    // case so we know when it fires.
+    logger.warn("Admin stream: returning empty body (terminal, no blob yet)", {
+      session_id: sessionId,
+      message_id: messageId,
+      message_status: message.status,
+    });
     return new Response("", { status: 200, headers: ndjsonHeaders() });
   }
 
@@ -65,11 +81,22 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const HEARTBEAT_MS = 15_000;
   const transcriptPath = `/vercel/sandbox/transcript-${messageId}.ndjson`;
 
+  logger.info("Admin stream: opening polling loop", {
+    session_id: sessionId,
+    message_id: messageId,
+    message_status: message.status,
+    initial_sandbox_id: initialSession.sandbox_id,
+    initial_session_status: initialSession.status,
+    offset,
+  });
+
   (async () => {
     let sandbox: Sandbox | null = null;
     let attachedSandboxId: string | null = null;
     let lastLineCount = offset;
     let detached = false;
+    let iterations = 0;
+    let totalLinesWritten = 0;
 
     const detachTimer = setTimeout(async () => {
       detached = true;
@@ -115,6 +142,7 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
 
     try {
       while (!detached) {
+        iterations++;
         // Re-read the session row each iteration. Picks up a sandbox_id
         // that gets populated mid-stream (chat-workflow's runner-launch
         // step lags reserve), and lets us bail cleanly if the session is
@@ -126,12 +154,28 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
         );
 
         if (!session || session.status === "stopped") {
+          logger.info("Admin stream: exiting loop — session gone or stopped", {
+            session_id: sessionId,
+            message_id: messageId,
+            session_present: !!session,
+            session_status: session?.status,
+            iterations,
+            total_lines_written: totalLinesWritten,
+          });
           break;
         }
 
         if (!session.sandbox_id) {
           // Sandbox not provisioned yet (or was cleared by stop/reset).
           // Stay connected and let the heartbeat keep the page alive.
+          if (iterations === 1 || iterations % 10 === 0) {
+            logger.info("Admin stream: waiting for sandbox_id", {
+              session_id: sessionId,
+              message_id: messageId,
+              session_status: session.status,
+              iterations,
+            });
+          }
           await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
           continue;
         }
@@ -142,6 +186,13 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
         // each runner spawn writes to a fresh `transcript-<messageId>.ndjson`
         // — the same messageId the admin route is polling.
         if (sandbox === null || attachedSandboxId !== session.sandbox_id) {
+          logger.info("Admin stream: attaching to sandbox", {
+            session_id: sessionId,
+            message_id: messageId,
+            sandbox_id: session.sandbox_id,
+            previous_sandbox_id: attachedSandboxId,
+            iterations,
+          });
           sandbox = await Sandbox.get({ sandboxId: session.sandbox_id });
           attachedSandboxId = session.sandbox_id;
         }
@@ -161,17 +212,38 @@ export const GET = withErrorHandler(async (request: NextRequest, context) => {
                 /* not JSON */
               }
               await writer.write(encoder.encode(line + "\n"));
+              totalLinesWritten++;
             }
             lastLineCount = lines.length;
 
             const lastLine = lines[lines.length - 1];
             try {
               const parsed = JSON.parse(lastLine);
-              if (parsed.type === "result" || parsed.type === "error") break;
+              if (parsed.type === "result" || parsed.type === "error") {
+                logger.info("Admin stream: terminal event in transcript — closing", {
+                  session_id: sessionId,
+                  message_id: messageId,
+                  terminal_type: parsed.type,
+                  total_lines_written: totalLinesWritten,
+                  iterations,
+                });
+                break;
+              }
             } catch {
               /* not JSON */
             }
           }
+        } else if (iterations === 1 || iterations % 10 === 0) {
+          // File doesn't exist yet (runner hasn't spawned / first write
+          // hasn't landed). Log periodically so we can spot a runner that
+          // never writes.
+          logger.info("Admin stream: transcript file not found yet", {
+            session_id: sessionId,
+            message_id: messageId,
+            sandbox_id: session.sandbox_id,
+            transcript_path: transcriptPath,
+            iterations,
+          });
         }
 
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
