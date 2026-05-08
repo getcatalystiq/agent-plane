@@ -16,6 +16,6 @@
     "app/api/a2a/**": { "supportsCancellation": true },
     "app/api/discord/**": { "maxDuration": 800, "supportsCancellation": true },
     "app/api/webhooks/discord/**": { "supportsCancellation": true },
-    "app/api/webhooks/slack/**": { "supportsCancellation": true }
+    "app/api/webhooks/slack/**": { "maxDuration": 800, "supportsCancellation": true }
   }
 }

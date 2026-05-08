@@ -753,7 +753,38 @@ export async function writeChunkStep(
     try {
       for (const line of processed) {
         if (line === null) continue;
-        await writer.write(line);
+        // T5 — bounded retry for transient `writer.write` failures so a
+        // single hiccup doesn't permanently drop the text_delta lines that
+        // make up the chat reply tail. Stays IN-step so the existing
+        // anti-WDK-retry posture above is preserved (a thrown step =
+        // 5-min retry hang, which is worse than dropping a chunk).
+        let attempt = 0;
+        const MAX_ATTEMPTS = 3;
+        // Tiny budget — total retry wall-clock <50ms even on max attempts.
+        const BACKOFF_BASE_MS = 10;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            await writer.write(line);
+            break;
+          } catch (err) {
+            attempt += 1;
+            if (attempt >= MAX_ATTEMPTS) {
+              logger.error("writeChunkStep: writer.write exhausted retries — dropping line", {
+                tenant_id: tenantId,
+                message_id: messageId,
+                attempts: attempt,
+                error_name: err instanceof Error ? err.constructor.name : "unknown",
+                error: err instanceof Error ? err.message : String(err),
+              });
+              break;
+            }
+            // Exponential-ish with light jitter. 10–14ms, 20–28ms.
+            const jitter = Math.floor(Math.random() * 5);
+            const sleepMs = BACKOFF_BASE_MS * Math.pow(2, attempt - 1) + jitter;
+            await new Promise((resolve) => setTimeout(resolve, sleepMs));
+          }
+        }
       }
     } finally {
       writer.releaseLock();

@@ -67,7 +67,15 @@ import {
   type ChatPlatform,
   type SlackCredentials,
 } from "@/lib/platform/operations";
+import { streamToSlack, type StreamChunk as SlackOutChunk } from "@/lib/platform/slack-streamer";
 import type { ChatTriggerInput } from "@/lib/platform/bridge";
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 import type { TenantId, AgentId } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -415,18 +423,14 @@ async function consumeAndStreamSlack(
     return;
   }
 
-  const adapter = cached.adapter as unknown as {
-    stream?: (
-      threadId: string,
-      textStream: AsyncIterable<string | EmittedStreamChunk>,
-      options?: { recipientUserId?: string; recipientTeamId?: string },
-    ) => Promise<{ id: string }>;
-  };
-
-  if (typeof adapter.stream !== "function") {
-    // Adapter version doesn't expose stream; fall back to the Discord-
-    // style edit loop so the agent's reply still lands.
-    logger.warn("consumeAndStreamSlack: adapter.stream not available, falling back to edit loop", {
+  // We bypass `adapter.stream` and call `client.chatStream` directly via the
+  // local `streamToSlack` shim so we can tune buffer_size, time every API
+  // call, and roll the stream over before Slack's server-side timeout.
+  // Detect the underlying client to surface a useful error if a future SDK
+  // upgrade changes the adapter shape.
+  const slackClient = (cached.adapter as unknown as { client?: { chatStream?: unknown } }).client;
+  if (!slackClient || typeof slackClient.chatStream !== "function") {
+    logger.warn("consumeAndStreamSlack: adapter.client.chatStream missing — falling back to edit loop", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
     });
@@ -473,8 +477,22 @@ async function consumeAndStreamSlack(
   // trailing held-back line naturally — no manual "\n" trigger needed.
   let perTurnDeltaText = "";
 
-  const textStream: AsyncIterable<string | EmittedStreamChunk> = (async function* () {
+  // P5 — coalesce yields: bunching small text_deltas before they cross the
+  // streamToSlack boundary collapses N small `streamer.append` awaits into
+  // ~N/k. Set deliberately small so streaming still feels live for the
+  // user; tuneable via env if we want to push harder.
+  const COALESCE_FLUSH_MS = readPositiveIntEnv("SLACK_STREAM_COALESCE_MS", 80);
+  const COALESCE_FLUSH_BYTES = readPositiveIntEnv("SLACK_STREAM_COALESCE_BYTES", 200);
+
+  const textStream: AsyncIterable<SlackOutChunk> = (async function* () {
     const reader = readable.getReader();
+    let pendingText = "";
+    let pendingSince = 0;
+    function shouldFlush(): boolean {
+      if (pendingText.length === 0) return false;
+      if (pendingText.length >= COALESCE_FLUSH_BYTES) return true;
+      return Date.now() - pendingSince >= COALESCE_FLUSH_MS;
+    }
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -486,7 +504,12 @@ async function consumeAndStreamSlack(
         if (evt.type === "text_delta" && typeof evt.text === "string" && evt.text.length > 0) {
           emittedAnyText = true;
           perTurnDeltaText += evt.text;
-          yield evt.text;
+          if (pendingText.length === 0) pendingSince = Date.now();
+          pendingText += evt.text;
+          if (shouldFlush()) {
+            yield pendingText;
+            pendingText = "";
+          }
         } else if (evt.type === "assistant" && evt.message && typeof evt.message === "object") {
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
@@ -500,9 +523,19 @@ async function consumeAndStreamSlack(
               // assistant text once so the user gets a reply at all.
               if (perTurnDeltaText.length === 0) {
                 emittedAnyText = true;
+                if (pendingText.length > 0) {
+                  yield pendingText;
+                  pendingText = "";
+                }
                 yield block.text;
               }
             } else if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
+              // Flush any pending text before structured chunks so they
+              // land at the correct visual position.
+              if (pendingText.length > 0) {
+                yield pendingText;
+                pendingText = "";
+              }
               const title = block.name;
               const details = summarizeToolInput(block.input);
               toolTitleById.set(block.id, title);
@@ -523,6 +556,10 @@ async function consumeAndStreamSlack(
           const blocks = evt.message.content ?? [];
           for (const block of blocks) {
             if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+              if (pendingText.length > 0) {
+                yield pendingText;
+                pendingText = "";
+              }
               const title = toolTitleById.get(block.tool_use_id) ?? block.tool_use_id;
               const output = typeof block.content === "string"
                 ? block.content
@@ -544,6 +581,10 @@ async function consumeAndStreamSlack(
           // the streamed message tail (Slack's stream API doesn't have
           // a separate error channel — the user reads it in-thread).
           if (emittedAnyText) {
+            if (pendingText.length > 0) {
+              yield pendingText;
+              pendingText = "";
+            }
             yield `\n\n_(agent stopped early: ${sawAgentError})_`;
           }
           break;
@@ -557,22 +598,46 @@ async function consumeAndStreamSlack(
           break;
         }
       }
+      // Drain any pending coalesced text on close.
+      if (pendingText.length > 0) {
+        yield pendingText;
+        pendingText = "";
+      }
     } finally {
       try { reader.releaseLock(); } catch { /* ignore */ }
     }
   })();
 
+  let bytesYieldedAtFailure = 0;
   try {
-    await adapter.stream(input.threadKey, textStream, {
+    const result = await streamToSlack({
+      bot: cached,
+      threadKey: input.threadKey,
+      chunks: textStream,
       recipientUserId: input.authorId || undefined,
       recipientTeamId: cached.slackTeamId ?? undefined,
+      diagContext: {
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        innerRunId,
+      },
     });
+    bytesYieldedAtFailure = result.bytesYielded;
   } catch (err) {
-    logger.error("consumeAndStreamSlack: adapter.stream failed", {
+    // P3 — surface bytes-yielded so we can tell "Slack rejected our append"
+    // (we yielded everything, API kicked us out) from "we never finished
+    // yielding" (function host kill / readable closed early). The render
+    // layer is the only place that knows this.
+    logger.error("consumeAndStreamSlack: streamToSlack failed", {
       tenant_id: input.tenantId,
       agent_id: input.agentId,
       thread_key: input.threadKey,
+      inner_run_id: innerRunId,
+      bytes_yielded_at_failure: bytesYieldedAtFailure,
+      saw_agent_error: sawAgentError,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
       error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
     });
     // On stream failure, try a one-shot post so the agent's reply still
     // lands somewhere visible. Use whatever text accumulated (sawAgent
@@ -1535,15 +1600,6 @@ interface ParsedEvent {
   // somehow empty.
   result?: string;
 }
-
-// Subset of the Chat SDK's StreamChunk shape we actually emit. Defined
-// locally so this file doesn't have a static import dependency on the
-// `chat` package (see top-of-file imports — adapter typing is structural,
-// not nominal). Keep field names aligned with the SDK so the union flows
-// through `adapter.stream` without coercion.
-type EmittedStreamChunk =
-  | { type: "task_update"; id: string; title: string; status: "pending" | "in_progress" | "complete" | "error"; details?: string; output?: string }
-  | { type: "markdown_text"; text: string };
 
 /**
  * Compute the portion of the final assistant text that wasn't already
