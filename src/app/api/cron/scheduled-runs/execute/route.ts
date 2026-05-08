@@ -89,6 +89,20 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     });
   }
 
+  // DIAG: log the schedule's target fields up front so we can see
+  // whether channel delivery should fire for this run. Helps diagnose
+  // \"schedule fired but didn't post\" reports — if these are null,
+  // the schedule wasn't saved with target fields and delivery is
+  // intentionally a no-op.
+  logger.info("Scheduled run: dispatching", {
+    schedule_id,
+    agent_id: agent.id,
+    tenant_id: tenantId,
+    target_platform: schedule.target_platform,
+    target_channel: schedule.target_channel,
+    has_target: !!(schedule.target_platform && schedule.target_channel),
+  });
+
   // All scheduled runs go through the WDK workflow path. The legacy
   // in-process drain loop (used to live below) was deleted when the
   // dispatch toggle infra was retired; cleanup-sessions' workflow-aware
