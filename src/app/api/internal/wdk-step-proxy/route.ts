@@ -34,6 +34,25 @@ interface OriginalRouteModule {
   POST: (req: Request) => Promise<Response>;
 }
 
+function isQueueDedupError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  // Framework error class is `MessageNotAvailableError`. Match by name
+  // and by message-substring so we catch it regardless of how the
+  // bundled error class chain looks at runtime (the queue worker
+  // wraps and rethrows in a few places).
+  return (
+    err.name === "MessageNotAvailableError" ||
+    err.message?.includes("MessageNotAvailableError") ||
+    err.message?.includes("not available for processing")
+  );
+}
+
+const QUEUE_DEDUP_RESPONSE = (): Response =>
+  new Response(JSON.stringify({ status: "queue_dedup" }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
 export const POST = async (req: Request): Promise<Response> => {
   // Dynamic import so Next.js doesn't bundle the WDK-generated route
   // into the proxy's chunk at build time. Node caches the module after
@@ -41,7 +60,30 @@ export const POST = async (req: Request): Promise<Response> => {
   const original = (await import(
     "@/app/.well-known/workflow/v1/step/route" as string
   )) as OriginalRouteModule;
-  const res = await original.POST(req);
+
+  // Two error shapes from the WDK queue worker, both observed in
+  // production logs:
+  //   1. The handler returns Response { status: 500, body: "...
+  //      MessageNotAvailableError ..." } — caught below by the
+  //      status-500 + body-substring check.
+  //   2. The handler THROWS the MessageNotAvailableError directly —
+  //      `e.receiveMessageById` rejects, the consume() chain re-throws,
+  //      and the route handler propagates it. Without the try/catch,
+  //      Next.js converts the throw to a 500 with stack trace and the
+  //      proxy never sees the response — which is what was happening
+  //      until 2026-05-09.
+  let res: Response;
+  try {
+    res = await original.POST(req);
+  } catch (err) {
+    if (isQueueDedupError(err)) {
+      logger.info("wdk-step-proxy: swallowed MessageNotAvailableError throw as 200 (queue dedup)", {
+        error_name: err instanceof Error ? err.name : "unknown",
+      });
+      return QUEUE_DEDUP_RESPONSE();
+    }
+    throw err;
+  }
 
   if (res.status !== 500) return res;
 
@@ -57,12 +99,9 @@ export const POST = async (req: Request): Promise<Response> => {
 
   if (!bodyText.includes("MessageNotAvailableError")) return res;
 
-  logger.info("wdk-step-proxy: swallowed MessageNotAvailableError as 200 (queue dedup)", {
+  logger.info("wdk-step-proxy: swallowed MessageNotAvailableError 500 as 200 (queue dedup)", {
     body_len: bodyText.length,
   });
 
-  return new Response(JSON.stringify({ status: "queue_dedup" }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return QUEUE_DEDUP_RESPONSE();
 };
