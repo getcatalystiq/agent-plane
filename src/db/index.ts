@@ -9,9 +9,17 @@ export function getPool(): Pool {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL not set");
 
+  // Pool size note (round-3 review #4): the Discord gateway listener
+  // holds one client for ~700s per enabled bot to keep pg_advisory_lock
+  // alive across the cron tick. With max=5 we starved at ≥5 enabled
+  // discord bots — every other DB consumer in the same function
+  // instance blocked on connect(). 20 gives headroom for the listener
+  // workload + ingress traffic without blowing past Neon's typical
+  // per-branch connection ceiling. Tune if the listener architecture
+  // changes (e.g., moves to a per-bot lambda).
   _pool = new Pool({
     connectionString,
-    max: 5,
+    max: 20,
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
   });

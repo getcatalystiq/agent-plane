@@ -5,6 +5,7 @@ import { z } from "zod";
 import { withErrorHandler } from "@/lib/api";
 import { generateId } from "@/lib/crypto";
 import { computeNextRunAt, buildScheduleConfig } from "@/lib/schedule";
+import { scanWriteContent } from "@/lib/safety/write-time-gate";
 
 export const dynamic = "force-dynamic";
 
@@ -59,15 +60,27 @@ export const POST = withErrorHandler(async (request: NextRequest, context) => {
     }
   }
 
+  // Write-time scan on the schedule prompt — throws PromptRejectedError on
+  // `high` confidence (caught by withErrorHandler → 400 with opaque body).
+  // The audit verdict on `medium`/`low` is persisted on the schedule row.
+  const verdict = scanWriteContent(input.prompt, {
+    tenantId: agent.tenant_id,
+    surface: "schedule.prompt",
+  });
+
   // Atomic insert with schedule count guard (prevents TOCTOU race)
   const id = generateId();
   const schedule = await queryOne(
     ScheduleRow,
-    `INSERT INTO schedules (id, tenant_id, agent_id, name, frequency, time, day_of_week, prompt, enabled, next_run_at)
-     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    `INSERT INTO schedules (id, tenant_id, agent_id, name, frequency, time, day_of_week, prompt, enabled, next_run_at,
+                            injection_detected, injection_confidence, injection_patterns,
+                            target_platform, target_channel)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $12, $13, $14, $15, $16
      WHERE (SELECT COUNT(*) FROM schedules WHERE agent_id = $3) < $11
      RETURNING *`,
-    [id, agent.tenant_id, agentId, input.name ?? null, input.frequency, input.time, input.day_of_week, input.prompt, input.enabled, nextRunAt?.toISOString() ?? null, MAX_SCHEDULES_PER_AGENT],
+    [id, agent.tenant_id, agentId, input.name ?? null, input.frequency, input.time, input.day_of_week, input.prompt, input.enabled, nextRunAt?.toISOString() ?? null, MAX_SCHEDULES_PER_AGENT,
+     verdict.injection_detected, verdict.injection_confidence, verdict.injection_patterns,
+     input.target_platform ?? null, input.target_channel ?? null],
   );
 
   if (!schedule) {

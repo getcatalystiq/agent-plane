@@ -2,16 +2,23 @@ import { NextRequest } from "next/server";
 import { queryOne } from "@/db";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
 import { verifyCronSecret } from "@/lib/cron-auth";
-import { AgentRowInternal, TenantRow, ScheduleRow } from "@/lib/validation";
-import { dispatchSessionMessage } from "@/lib/dispatcher";
-import { findWarmScheduleSession, casActiveToIdle } from "@/lib/sessions";
+import { AgentRowInternal, TenantRow, ScheduleRow, SessionMessageRow } from "@/lib/validation";
+import {
+  reserveSessionAndMessage,
+  type DispatchInput,
+  type PreparedExecution,
+} from "@/lib/dispatcher";
+import { findWarmScheduleSession, setWorkflowRunId } from "@/lib/sessions";
 import { transitionMessageStatus } from "@/lib/session-messages";
-import { BudgetExceededError, ConcurrencyLimitError } from "@/lib/errors";
+import { BudgetExceededError, ConcurrencyLimitError, PromptRejectedError } from "@/lib/errors";
 import { getCallbackBaseUrl } from "@/lib/mcp-connections";
 import { logger } from "@/lib/logger";
-import { shouldUseWorkflow } from "@/lib/workflows/toggle";
 import { start } from "workflow/api";
 import { dispatchWorkflow } from "@/lib/workflows/dispatch-workflow";
+import {
+  deliverScheduleReplyToChannel,
+  extractAgentReplyText,
+} from "@/lib/platform/scheduled-delivery";
 import { z } from "zod";
 import type { AgentId, TenantId } from "@/lib/types";
 
@@ -82,168 +89,34 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
     });
   }
 
-  // U7: workflow path replaces the drain loop with a maxDuration-bounded
-  // race against run.returnValue. The drain pain doesn't disappear — it
-  // relocates: long-running runs detach when the cron's await hits the
-  // function timeout (same shape as legacy stream_detached), and the
-  // cleanup cron's stuck-active watchdog (now workflow-aware) is the
-  // backstop if the runner never emits terminal.
-  if (await shouldUseWorkflow("schedule", tenantId)) {
-    return await runViaWorkflow({
-      tenantId,
-      agentId,
-      sessionId: warmSessionId,
-      prompt: schedule.prompt,
-      schedule_id,
-    });
-  }
+  // DIAG: log the schedule's target fields up front so we can see
+  // whether channel delivery should fire for this run. Helps diagnose
+  // \"schedule fired but didn't post\" reports — if these are null,
+  // the schedule wasn't saved with target fields and delivery is
+  // intentionally a no-op.
+  logger.info("Scheduled run: dispatching", {
+    schedule_id,
+    agent_id: agent.id,
+    tenant_id: tenantId,
+    target_platform: schedule.target_platform,
+    target_channel: schedule.target_channel,
+    has_target: !!(schedule.target_platform && schedule.target_channel),
+  });
 
-  let messageId: string;
-  let sessionId: string;
-  let streamDetached = false;
-  try {
-    const dispatchResult = await dispatchSessionMessage({
-      tenantId,
-      agentId,
-      sessionId: warmSessionId,
-      prompt: schedule.prompt,
-      triggeredBy: "schedule",
-      ephemeral: false,
-      callerKeyId: null,
-      platformApiUrl: getCallbackBaseUrl(),
-    });
-    messageId = dispatchResult.messageId;
-    sessionId = dispatchResult.sessionId;
-
-    // Drain the dispatcher stream so finalize hooks fire. The schedule cron
-    // function instance bounds this with its 5-min maxDuration; long-running
-    // schedule prompts detach naturally via the dispatcher's stream-detach
-    // path.
-    //
-    // FIX #20 (reliability MED): wedged streams (sandbox SDK never produces
-    // bytes after spawn) used to pin the function until maxDuration. Each
-    // read is now wrapped in a 30s race; on timeout we mark the message
-    // failed with `error_type: 'drain_timeout'` and break out of the loop.
-    const reader = dispatchResult.stream.getReader();
-    const decoder = new TextDecoder();
-    let lineBuffer = "";
-    let timedOut = false;
-    try {
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const READ_TIMEOUT_MS = 30_000;
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const readPromise = reader.read();
-        const timeoutPromise = new Promise<{ timeout: true }>((resolve) => {
-          timeoutHandle = setTimeout(() => resolve({ timeout: true }), READ_TIMEOUT_MS);
-        });
-        const result = await Promise.race([readPromise, timeoutPromise]);
-        if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-        if ("timeout" in result) {
-          timedOut = true;
-          logger.warn("Scheduled run drain loop timed out per-read", {
-            schedule_id,
-            agent_id: agent.id,
-            message_id: messageId,
-            read_timeout_ms: READ_TIMEOUT_MS,
-          });
-          break;
-        }
-        if (result.done) break;
-        // Scan the chunk for the dispatcher's `stream_detached` event. After
-        // detach the runner is still running and will finalize via the
-        // internal-upload route — racing it with the post-drain fallback
-        // prematurely flips a long-running schedule run to `failed`. Decode
-        // line-by-line (4.5min runs may emit dozens of events) and look for
-        // the marker; we don't need full JSON parsing, just substring match.
-        lineBuffer += decoder.decode(result.value, { stream: true });
-        const lines = lineBuffer.split("\n");
-        lineBuffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (line.includes('"type":"stream_detached"')) {
-            streamDetached = true;
-          }
-        }
-      }
-    } finally {
-      try { reader.releaseLock(); } catch { /* ignore */ }
-    }
-    if (timedOut) {
-      await transitionMessageStatus(messageId, tenantId, "running", "failed", {
-        completed_at: new Date().toISOString(),
-        error_type: "drain_timeout",
-        error_messages: ["Scheduled run drain loop hit per-read timeout (30s without bytes)."],
-      }).catch(() => {});
-      // Schedule sessions are persistent (ephemeral=false). The dispatcher's
-      // finalize is bypassed when we abandon the stream, so flip the session
-      // active→idle here. Idle-TTL (300s) then stops the sandbox via the
-      // cleanup cron. Without this the row leaks in `active` forever — the
-      // active-watchdog requires a `running` message that this transition
-      // just destroyed.
-      await casActiveToIdle(sessionId, tenantId, messageId).catch(() => {});
-    }
-  } catch (err) {
-    if (err instanceof ConcurrencyLimitError || err instanceof BudgetExceededError) {
-      const reason = err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
-      logger.warn("Scheduled run dispatch skipped", {
-        schedule_id,
-        agent_id: agent.id,
-        reason,
-        error: err.message,
-      });
-      return jsonResponse({ status: "skipped", reason });
-    }
-    logger.error("Scheduled run dispatch failed", {
-      schedule_id,
-      agent_id: agent.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return jsonResponse({ status: "failed", reason: "dispatch_error" });
-  }
-
-  // If the dispatcher's stream-detach fired during drain (long-running job),
-  // the runner is still executing and owns finalization via the internal
-  // upload route. Skip the post-drain fallback — racing it with the runner
-  // prematurely stamps `schedule_no_terminal_event` on jobs that succeed
-  // moments later. The cleanup cron's 30-min active-watchdog is the real
-  // backstop if the runner never uploads.
-  if (streamDetached) {
-    logger.info("Scheduled run detached — runner will finalize via internal upload", {
-      schedule_id,
-      agent_id: agent.id,
-      message_id: messageId,
-    });
-    return jsonResponse({ status: "detached", message_id: messageId });
-  }
-
-  // If the dispatcher stream finished but the message status is still
-  // "running" (for example, the runner crashed silently), best-effort
-  // transition to failed so the schedule tick doesn't leave a stuck row.
-  // Track whether we actually flipped the message (vs. happy-path no-op) so
-  // we only escalate to a session-level CAS in the failure case.
-  const flippedMessage = await transitionMessageStatus(
-    messageId,
+  // All scheduled runs go through the WDK workflow path. The legacy
+  // in-process drain loop (used to live below) was deleted when the
+  // dispatch toggle infra was retired; cleanup-sessions' workflow-aware
+  // stuck-active watchdog is the backstop if the runner never emits
+  // a terminal event.
+  return await runViaWorkflow({
     tenantId,
-    "running",
-    "failed",
-    {
-      completed_at: new Date().toISOString(),
-      error_type: "schedule_no_terminal_event",
-      error_messages: ["Scheduled run ended without terminal event"],
-    },
-  ).catch(() => false);
-
-  // If we just transitioned a "stuck running" message to failed, the parent
-  // session is still in `active` (the dispatcher's finalize never ran). The
-  // active-watchdog requires a running message and will skip this row, so
-  // the session would leak forever. Flip active→idle and let idle-TTL stop
-  // the sandbox on the next cleanup tick.
-  if (flippedMessage) {
-    await casActiveToIdle(sessionId, tenantId, messageId).catch(() => {});
-  }
-
-  logger.info("Scheduled run completed", { schedule_id, agent_id: agent.id, message_id: messageId });
-  return jsonResponse({ status: "triggered", message_id: messageId });
+    agentId,
+    sessionId: warmSessionId,
+    prompt: schedule.prompt,
+    schedule_id,
+    targetPlatform: schedule.target_platform,
+    targetChannel: schedule.target_channel,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -262,38 +135,111 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
  *     running. The cleanup cron's workflow-aware stuck-active watchdog
  *     is the backstop if the runner never emits terminal.
  */
-async function runViaWorkflow(input: {
+async function runViaWorkflow(args: {
   tenantId: TenantId;
   agentId: AgentId;
   sessionId: string | undefined;
   prompt: string;
   schedule_id: string;
+  targetPlatform: "slack" | "discord" | null;
+  targetChannel: string | null;
 }): Promise<Response> {
+  // Build the same DispatchInput shape the shim uses, so reserve and the
+  // workflow body see identical inputs.
+  const input: DispatchInput = {
+    tenantId: args.tenantId,
+    agentId: args.agentId,
+    sessionId: args.sessionId,
+    prompt: args.prompt,
+    triggeredBy: "schedule",
+    ephemeral: false,
+    callerKeyId: null,
+    platformApiUrl: getCallbackBaseUrl(),
+  };
+
+  // Reserve session + message BEFORE start() — same pattern as
+  // src/lib/workflows/dispatch-shim.ts:168. dispatchWorkflow's body reads
+  // `prepared.messageId` on its very first line; passing prepared=undefined
+  // (the prior bug) made every workflow-backed schedule tick crash with
+  // `TypeError: Cannot read properties of undefined (reading 'messageId')`
+  // before any session/message row was written, so the schedule looked like
+  // it "didn't run". Reserve runs in-process so it surfaces budget /
+  // concurrency errors via the same catch as the legacy path.
+  let prepared: PreparedExecution;
+  try {
+    prepared = await reserveSessionAndMessage(input);
+  } catch (err) {
+    if (err instanceof ConcurrencyLimitError || err instanceof BudgetExceededError) {
+      const reason =
+        err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: args.schedule_id,
+        reason,
+        error: err.message,
+      });
+      return jsonResponse({ status: "skipped", reason });
+    }
+    if (err instanceof PromptRejectedError) {
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: args.schedule_id,
+        reason: "prompt_rejected",
+      });
+      return jsonResponse({ status: "skipped", reason: "prompt_rejected" });
+    }
+    logger.error("Scheduled run (workflow) reserve failed", {
+      schedule_id: args.schedule_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jsonResponse({ status: "failed", reason: "reserve_error" });
+  }
+
   try {
     const run = await start(
-      dispatchWorkflow as unknown as (input: {
-        tenantId: TenantId;
-        agentId: AgentId;
-        sessionId?: string;
-        prompt: string;
-        triggeredBy: "schedule";
-        ephemeral: false;
-        callerKeyId: null;
-        platformApiUrl: string;
-      }) => Promise<{ sessionId: string; messageId: string }>,
-      [
+      dispatchWorkflow as unknown as (
+        input: DispatchInput,
+        prepared: PreparedExecution,
+      ) => Promise<{ sessionId: string; messageId: string }>,
+      [input, prepared],
+    ).catch(async (err: unknown) => {
+      // start() failed — message is reserved as 'running'. Mark it failed so
+      // it doesn't sit forever waiting for a runner that won't spawn. Same
+      // shape as dispatch-shim.ts:182.
+      await transitionMessageStatus(
+        prepared.messageId,
+        input.tenantId,
+        "running",
+        "failed",
         {
-          tenantId: input.tenantId,
-          agentId: input.agentId,
-          sessionId: input.sessionId,
-          prompt: input.prompt,
-          triggeredBy: "schedule",
-          ephemeral: false,
-          callerKeyId: null,
-          platformApiUrl: getCallbackBaseUrl(),
+          completed_at: new Date().toISOString(),
+          error_type: "workflow_start_failed",
+          error_messages: [err instanceof Error ? err.message : String(err)],
         },
-      ],
-    );
+      ).catch(() => {});
+      throw err;
+    });
+
+    // Persist the workflow_run_id on the session row IMMEDIATELY after
+    // start() so the cleanup-sessions cron can call WDK's cancel API on
+    // the active-watchdog path. Previously this was only written from
+    // inside `prepareSandboxAndLaunchStep` — meaning if that step
+    // retried for 12+ minutes (the symptom that caused this fix), the
+    // watchdog tried to cancel a session whose workflow_run_id was null,
+    // fell through to the legacy stop-sandbox path, and left the
+    // workflow run zombied for hours iterating its hook waiting for
+    // chunks that would never come (cancelled at the WDK 4h expiry).
+    // Mirrors the equivalent write in `src/lib/workflows/dispatch-shim.ts`.
+    await setWorkflowRunId(
+      prepared.session.id,
+      input.tenantId,
+      `wdk_v1_${run.runId}`,
+    ).catch((err) => {
+      logger.warn("Scheduled run (workflow): setWorkflowRunId failed (best-effort)", {
+        schedule_id: args.schedule_id,
+        session_id: prepared.session.id,
+        run_id: run.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 
     // Race the workflow's return value against a maxDuration-30s timeout.
     // Cron functions inherit the platform default (300s on Fluid Compute);
@@ -313,10 +259,54 @@ async function runViaWorkflow(input: {
     if (result.kind === "terminal") {
       const out = result.value as { sessionId: string; messageId: string };
       logger.info("Scheduled run (workflow) completed", {
-        schedule_id: input.schedule_id,
+        schedule_id: args.schedule_id,
         run_id: run.runId,
         message_id: out.messageId,
       });
+
+      // Channel delivery — if the schedule has a target_platform +
+      // target_channel set, post the agent's reply text there. The
+      // CHECK constraint `chk_sched_target_paired` (migration 041)
+      // guarantees both fields are set or both null, so seeing one
+      // implies the other. PR #51's removal of the legacy drain loop
+      // dropped this hookup; this re-wires it onto the workflow path.
+      if (args.targetPlatform && args.targetChannel) {
+        try {
+          const message = await queryOne(
+            SessionMessageRow,
+            "SELECT * FROM session_messages WHERE id = $1",
+            [out.messageId],
+          );
+          const blobUrl = message?.transcript_blob_url ?? null;
+          const text = blobUrl ? await extractAgentReplyText(blobUrl) : null;
+          if (text) {
+            await deliverScheduleReplyToChannel({
+              tenantId: args.tenantId,
+              agentId: args.agentId,
+              scheduleId: args.schedule_id,
+              targetPlatform: args.targetPlatform,
+              targetChannel: args.targetChannel,
+              text,
+            });
+          } else {
+            logger.warn("Scheduled run (workflow): no reply text to post", {
+              schedule_id: args.schedule_id,
+              message_id: out.messageId,
+              has_blob: !!blobUrl,
+            });
+          }
+        } catch (err) {
+          // Best-effort delivery — don't fail the cron if posting fails.
+          logger.warn("Scheduled run (workflow): channel delivery threw", {
+            schedule_id: args.schedule_id,
+            message_id: out.messageId,
+            target_platform: args.targetPlatform,
+            target_channel: args.targetChannel,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       return jsonResponse({
         status: "completed",
         message_id: out.messageId,
@@ -326,7 +316,7 @@ async function runViaWorkflow(input: {
 
     // Detached — workflow continues; cleanup cron is the backstop.
     logger.info("Scheduled run (workflow) detached at maxDuration", {
-      schedule_id: input.schedule_id,
+      schedule_id: args.schedule_id,
       run_id: run.runId,
     });
     return jsonResponse({
@@ -338,14 +328,21 @@ async function runViaWorkflow(input: {
       const reason =
         err instanceof ConcurrencyLimitError ? "concurrency_limit" : "budget_exceeded";
       logger.warn("Scheduled run (workflow) skipped", {
-        schedule_id: input.schedule_id,
+        schedule_id: args.schedule_id,
         reason,
         error: err.message,
       });
       return jsonResponse({ status: "skipped", reason });
     }
+    if (err instanceof PromptRejectedError) {
+      logger.warn("Scheduled run (workflow) skipped", {
+        schedule_id: args.schedule_id,
+        reason: "prompt_rejected",
+      });
+      return jsonResponse({ status: "skipped", reason: "prompt_rejected" });
+    }
     logger.error("Scheduled run (workflow) failed", {
-      schedule_id: input.schedule_id,
+      schedule_id: args.schedule_id,
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse({ status: "failed", reason: "dispatch_error" });

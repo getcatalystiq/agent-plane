@@ -20,6 +20,8 @@ A multi-tenant platform for running AI agents in isolated Vercel Sandboxes, expo
 
 The legacy `runs` table and `/api/runs*` surface were dropped at cutover (migration `033_runs_sessions_unify.sql`). Historical run rows were not migrated — every prior run is gone, and any external `/api/runs/:id` URLs return 404. Sessions own all execution from this point forward.
 
+The legacy in-process dispatch path (`dispatchSessionMessage()` direct calls + the `WORKFLOW_DISPATCH_*` env toggles + `LEGACY_DISPATCH_GLASS_BREAK` + `tenants.workflow_dispatch_overrides`) was retired alongside the chat-platform-bots work. All six triggers (api/admin/schedule/webhook/a2a/cleanup) now run through the WDK workflow path unconditionally via `dispatchOrWorkflowDispatch()` in `src/lib/workflows/dispatch-shim.ts`. The `dispatchSessionMessage` function still exists as an internal helper used by the workflow steps, but no public route calls it directly. The toggle file (`src/lib/workflows/toggle.ts`) was deleted; the per-tenant override JSONB column on `tenants` is no longer read (column kept on disk; cleanup is a separate DROP COLUMN migration).
+
 ### Execution flow (unified)
 
 Every execution — public REST, schedule cron, webhook delivery, A2A — funnels through the single dispatch chokepoint `dispatchSessionMessage()` in `src/lib/dispatcher.ts`:
@@ -104,7 +106,7 @@ src/
         tenants/          # tenant CRUD + API key management
       cron/               # scheduled jobs
         budget-reset/     # daily budget reset
-        cleanup-sessions/ # every 5 min: idle TTL stop + stuck watchdog (creating>5min, active>agent.max_runtime_seconds+120s grace) + pre-kill transcript salvage + orphan-sandbox sweep + expires_at cap
+        cleanup-sessions/ # every 5 min: idle TTL stop + stuck watchdog (creating>5min, active>agent.max_runtime_seconds+120s grace) + pre-kill transcript salvage + orphan-sandbox sweep + expires_at cap + chat_event_dedupe sweep (stale placeholders >15min + filled rows >7d)
         cleanup-transcripts/  # daily transcript cleanup
         refresh-snapshot/  # daily SDK snapshot refresh (Vercel Sandbox snapshot)
         scheduled-runs/   # per-minute scheduled agent dispatcher (calls dispatchSessionMessage with triggeredBy='schedule', ephemeral=false, idle_ttl=300s — see trigger table)
@@ -127,7 +129,7 @@ src/
   db/
     index.ts              # DB client (Pool, query helpers, RLS context, transactions)
     migrate.ts            # migration runner
-    migrations/           # sequential SQL migration files (001–033), run via `npm run migrate`
+    migrations/           # sequential SQL migration files (001–039), run via `npm run migrate`
   lib/
     a2a.ts                # A2A protocol: status mapping, Agent Card builder/cache, MessageBackedTaskStore, SandboxAgentExecutor, input validation
     types.ts              # branded types (TenantId, AgentId, McpServerId, McpConnectionId, PluginMarketplaceId), domain interfaces, StreamEvent union
@@ -202,16 +204,21 @@ scripts/
   create-api-key.ts       # CLI to generate additional API keys for a tenant
 tests/
   unit/                   # Vitest unit tests
+docs/
+  solutions/              # documented solutions to past problems (bugs, architecture/design patterns, conventions), organized by category with YAML frontmatter (module, problem_type, tags) — relevant when implementing or debugging in documented areas
+  runbooks/               # operator guides for production features (chat-platform-bots, workflow-dispatch incidents)
+  plans/                  # ce-plan decision artifacts (one per feature/refactor)
+  brainstorms/            # ce-brainstorm requirements docs (upstream of plans)
 ```
 
 ## Database
 
-Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `sessions`, `session_messages`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`, `webhook_sources`, `webhook_deliveries`.
+Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `agents`, `sessions`, `session_messages`, `mcp_servers`, `mcp_connections`, `plugin_marketplaces`, `webhook_sources`, `webhook_deliveries`, `platform_bot_configs`, `chat_event_dedupe`.
 
 - Agent names are unique per tenant
 - RLS enforced via `app.current_tenant_id` session config (fail-closed via `NULLIF`)
 - Tenant-scoped transactions via `withTenantTransaction()`
-- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–033), run via `npm run migrate`. Migration `033_runs_sessions_unify.sql` drops the legacy `runs` table and the prior two-purpose `sessions` table; rebuilds `sessions` and creates `session_messages`.
+- Migrations: numbered SQL files in `src/db/migrations/` (currently 001–039), run via `npm run migrate`. Migration `033_runs_sessions_unify.sql` drops the legacy `runs` table and the prior two-purpose `sessions` table; rebuilds `sessions` and creates `session_messages`. Migrations `036_chat_event_dedupe.sql` + `037_chat_event_dedupe_claim_pattern.sql` together establish the chat-ingress claim-then-reserve dedupe table (037 requires `MIGRATIONS_RECONCILE_CHECKSUMS=true` for the cutover deploy on environments that ran round-2's in-place 036 — see `docs/runbooks/chat-platform-bots.md`). Migration `038_tenant_bot_caps.sql` adds `tenants.bot_platform_caps` JSONB for per-tenant per-platform enabled-bot limits (defaults to 10 when unset) AND `chat_event_dedupe.steal_attempts INTEGER NOT NULL DEFAULT 0` for the stale-claim recovery circuit breaker. Migration `039_bot_platform_caps_check.sql` adds a CHECK constraint enforcing that bot_platform_caps is NULL or a JSONB object whose values are all positive integers.
 - `tenants` table includes: `timezone` column for schedule evaluation, `logo_url` (base64 data URL or external URL), `clawsouls_api_token` (encrypted, for ClawSouls registry publish)
 - `agents` table includes: Composio MCP cache columns, `composio_allowed_tools` (per-toolkit tool filtering), `composio_connection_metadata` JSONB (per-toolkit `auth_method` + `bot_user_id` + `display_name` for the auth-method picker), `skills` JSONB, `plugins` JSONB, schedule columns (`schedule_frequency`, `schedule_time`, `schedule_day_of_week`, `schedule_prompt`, `schedule_enabled`, `last_run_at`, `next_run_at`), `max_runtime_seconds` (60–3600, default 600), `a2a_enabled` (boolean, default false; partial index on `tenant_id WHERE a2a_enabled = true`), SoulSpec v0.5 identity columns (`soul_md`, `identity_md`, `style_md`, `agents_md`, `heartbeat_md`, `user_template_md`, `examples_good_md`, `examples_bad_md`, `soul_spec_version` TEXT default '0.5', `identity` JSONB auto-derived)
 - `sessions` table — primary execution lifecycle row. Columns: `sandbox_id` (NULL when stopped), `sdk_session_id` (Claude Agent SDK session), `session_blob_url` (Vercel Blob backup), `status` (`creating`/`active`/`idle`/`stopped`), `ephemeral` (bool, default false), `idle_ttl_seconds` (set by dispatcher per the trigger table; CHECK ≤ 3600; not user-supplied), `expires_at` (`created_at + interval '4 hours'`), `context_id` (A2A multi-turn key), `message_count`, `idle_since`, `last_backup_at`. Partial unique index on `(tenant_id, agent_id, context_id) WHERE status NOT IN ('stopped') AND context_id IS NOT NULL` for A2A reuse lookup.
@@ -240,6 +247,14 @@ Neon Postgres with Row-Level Security (RLS). Tables: `tenants`, `api_keys`, `age
 | `COMPOSIO_API_KEY` | No | Composio MCP tool integration (optional if not using Composio toolkits) |
 | `CRON_SECRET` | No | Vercel Cron authentication (must be manually set; random string ≥16 chars) |
 | `BRAINTRUST_API_KEY` | No | Braintrust observability; when set, sandbox runners auto-trace LLM calls to Braintrust |
+| `UPSTASH_REDIS_URL` | When chat enabled | Native Redis URL (`rediss://...`) for Chat SDK shared state + cross-instance rate limit / debounce / channel bucket. Provisioned via Vercel Marketplace (Upstash). |
+| `GATEWAY_FORWARDER_SECRET` | When Discord enabled | HMAC secret signing forwarded gateway events. Distinct from any bot token so a leaked bot token cannot forge events at the public webhook. |
+| `GATEWAY_FORWARDER_SECRET_PREVIOUS` | No | Previous secret accepted during a rotation window. Mirrors `ENCRYPTION_KEY_PREVIOUS`. |
+| `DISCORD_PUBLIC_KEY` / `DISCORD_APPLICATION_ID` | No | Single-bot deploy fallbacks. Per-bot values in `platform_bot_configs.credentials_enc` are authoritative when set. |
+| `SLACK_SIGNING_SECRET` | No | Single-bot fallback. Used during first-time portal handshake (before per-bot credentials saved) and as a dual-accept rotation fallback. |
+| `SLACK_SIGNING_SECRET_PREVIOUS` | No | Previous Slack signing secret accepted during a rotation window. |
+| `NEXT_PUBLIC_APP_URL` | When chat enabled | Public origin used to build the gateway-forwarder webhook URL. |
+| `PLATFORM_ATTACHMENT_MAX_BYTES` | No | Per-attachment cap. Default 25 MB. |
 
 ## API Authentication
 
@@ -255,6 +270,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - `DATABASE_URL_UNPOOLED` is auto-set when Neon is linked via the Vercel integration
 - Security headers set via `next.config.ts`: HSTS, X-Content-Type-Options, X-Frame-Options DENY, Referrer-Policy
 - Vercel functions config: `app/api/sessions/**`, `app/api/admin/sessions/**`, and `app/api/a2a/**` have `supportsCancellation: true` for streaming cancellation. `app/api/runs/**` no longer exists.
+- **Fluid Compute is REQUIRED** for the chat workflow. The WDK builder (`@workflow/builders`) writes `maxDuration: 'max'` into the auto-generated `.well-known/workflow/v1/step.func` and `flow.func`. On Pro Lambda mode `'max'` resolves to ~120s, which silently truncates `consumeAndPostStep` mid-Slack-stream when the agent reply runs longer than that (3 confirmed cases of `consumeAndPostStep` cutting off at exactly 120.52s). On Pro Fluid mode `'max'` resolves to 800s. Toggle path: Vercel project → Settings → Functions → Fluid Compute. Until enabled, every long chat reply leaves a 12+ minute zombie inner workflow churning compute and storage on a reply the user never sees. The chat workflow now defensively cancels the inner run on early-exit (no terminal observed) so the zombie is short-lived even if Fluid is off, but Fluid is the proper fix.
 
 ## Sandbox & Runner
 
@@ -317,7 +333,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - Session file backup (to Vercel Blob) is synchronous and skipped for ephemeral sessions — completes BEFORE response stream closes for persistent sessions to prevent TOCTOU race with cleanup cron
 - Session file uploads use `multipart: true` for Blob put() to handle >4.5MB server upload limit
 - MCP token refresh in `buildMcpConfig()` is parallelized with `Promise.allSettled()` for faster cold starts
-- Cleanup cron `/api/cron/cleanup-sessions` (every 5 min) consolidates all sweeps: per-session idle TTL stops; watchdog catches stuck `creating` (>5 min) and `active` (per-agent `max_runtime_seconds + 120s` grace, defaults to 720s when an agent is missing); orphan-sandbox sweep (any `sessions` row with non-null `sandbox_id` past terminal state); `expires_at` hard cap (4h wall-clock) regardless of state. Watchdog and expiry sweeps salvage the runner's `/vercel/sandbox/transcript[-<messageId>].ndjson` from the still-alive sandbox before stopping it and attach the resulting blob URL to the timed-out message so users can see what executed. The legacy `cleanup-sandboxes` cron was removed.
+- Cleanup cron `/api/cron/cleanup-sessions` (every 5 min) consolidates all sweeps: per-session idle TTL stops; watchdog catches stuck `creating` (>5 min) and `active` (per-agent `max_runtime_seconds + 120s` grace, defaults to 720s when an agent is missing); orphan-sandbox sweep (any `sessions` row with non-null `sandbox_id` past terminal state); `expires_at` hard cap (4h wall-clock) regardless of state; chat_event_dedupe sweep (DELETE stale placeholders >15min + filled rows >7d). Watchdog and expiry sweeps salvage the runner's `/vercel/sandbox/transcript[-<messageId>].ndjson` from the still-alive sandbox before stopping it and attach the resulting blob URL to the timed-out message so users can see what executed. The legacy `cleanup-sandboxes` cron was removed.
 - Cleanup-vs-dispatch race on `idle→stopped`: public `/api/sessions/:id/messages` returns 410 Gone with `{error: 'session_stopped'}` when the named session is gone — clients must `POST /api/sessions` to start a new one. Internal callers (schedule cron, webhook handler, A2A executor) pass `sessionId?` optionally and the dispatcher transparently creates a fresh session for the same agent.
 - Vercel Blob uploads use `allowOverwrite: true` to handle race between runner transcript upload and `finalizeMessage` (both write to the same blob path)
 - Session file backup also uses `allowOverwrite: true` since the same session file path is rewritten after each message
@@ -332,7 +348,7 @@ All routes (except `/api/health`) require `Authorization: Bearer <api_key>`. Adm
 - `a2aHeaders()` helper shared between JSON-RPC and Agent Card routes for consistent `A2A-Version` + `A2A-Request-Id` headers
 - Admin UI terminology: "tenant" is renamed to "company" throughout the UI (API still uses "tenant")
 - Admin UI navigation: top bar with breadcrumb (serves as page title, no redundant h1), company switcher dropdown, all pages scoped to active company
-- Admin UI agent detail: tabbed interface (General, Identity, Connectors, Skills, Plugins, Schedules, Runs) with line-style tabs; metrics cards under General tab
+- Admin UI agent detail: tabbed interface (General, Identity, Connectors, Skills, Plugins, Schedules, Webhooks, Bots, Runs) with line-style tabs; metrics cards under General tab. The tab row uses `overflow-x-auto` so the 9 tabs scroll horizontally on narrow viewports.
 - Admin UI Identity tab: FileTreeEditor with all 8 SoulSpec files (SOUL.md, IDENTITY.md, STYLE.md, AGENTS.md, HEARTBEAT.md, USER_TEMPLATE.md, examples/); action buttons: Generate Soul, Import, Export, Publish; validation warnings inline
 - Admin UI settings page (`/admin/settings`): company form (name, slug, timezone, budget, logo upload), API keys section, ClawSouls Registry section (API token), danger zone
 - SoulSpec v0.5 identity: strict compliance — required SOUL.md sections (Personality, Tone, Principles), IDENTITY.md fields (Name, Role, Creature, Emoji, Vibe, Avatar); progressive disclosure (Level 1 = summary, Level 2 = 4 files, Level 3 = all); `identity` JSONB auto-derived on save; `.soul/` directory injected into sandbox

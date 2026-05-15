@@ -302,11 +302,16 @@ describe("internal transcript endpoint — streaming mode (U3)", () => {
       const json = await res.json();
       expect(json.status).toBe("ok");
       expect(json.delivered).toBe(3);
-      expect(resumeHook).toHaveBeenCalledTimes(3);
-      // Last line was the terminal-kind 'result' event
+      // PERF: whole batch delivered as ONE resumeHook call (was 3 pre-fix).
+      expect(resumeHook).toHaveBeenCalledTimes(1);
       expect(resumeHook).toHaveBeenLastCalledWith(
         `transcript:${messageId}`,
-        expect.objectContaining({ kind: "terminal", eventType: "result" }),
+        expect.objectContaining({
+          kind: "terminal",
+          lines: expect.arrayContaining([
+            expect.objectContaining({ eventType: "result" }),
+          ]),
+        }),
       );
     });
 

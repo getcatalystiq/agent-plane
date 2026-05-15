@@ -17,7 +17,7 @@ import {
   reserveLines,
   resumeHookBatch,
   parseRunnerLine,
-  type RunnerChunkPayload,
+  type RunnerChunkLine,
 } from "@/lib/workflows/stream-bridge-server";
 import type { TenantId } from "@/lib/types";
 
@@ -367,19 +367,20 @@ async function handleStreamingBatch(
     );
   }
 
-  // Parse NDJSON lines into RunnerChunkPayloads. Empty lines are filtered
+  // Parse NDJSON lines into RunnerChunkLine entries. Empty lines are filtered
   // by parseRunnerLine (returns null); malformed JSON falls back to
   // eventType='unknown' rather than throwing.
-  const payloads: RunnerChunkPayload[] = [];
+  const parsedLines: RunnerChunkLine[] = [];
   for (const line of rawLines) {
     const parsed = parseRunnerLine(line);
-    if (parsed) payloads.push(parsed);
+    if (parsed) parsedLines.push(parsed);
   }
 
-  // Forward to the workflow's hook. The dedup mark is set ONLY on
-  // successful delivery so a HookNotFoundError lets the runner retry
-  // the same batch.
-  const result = await resumeHookBatch(messageId, payloads);
+  // Forward to the workflow's hook as ONE batched payload (whole POST = one
+  // resumeHook call = one writeChunkStep invocation in the workflow body).
+  // The dedup mark is set ONLY on successful delivery so a HookNotFoundError
+  // lets the runner retry the same batch.
+  const result = await resumeHookBatch(messageId, parsedLines);
 
   if (result.hookNotFound) {
     logger.info("transcript-streaming: hook not found — retryable", {

@@ -137,6 +137,16 @@ export interface SandboxConfig {
     max_turns: number;
     max_budget_usd: number;
     skills: Array<{ folder: string; files: Array<{ path: string; content: string }> }>;
+    /**
+     * Agent plugin definitions (`agents.plugins` JSONB). The actual plugin
+     * file contents are passed separately via `SessionSandboxConfig.pluginFiles`
+     * (cold-start) or are already on the sandbox's disk (reconnect). This
+     * field exists so `reconnectSessionSandbox` can decide whether to enable
+     * `settingSources: ["project"]` on the runner SDK init — without it, the
+     * SDK ignores on-disk `.claude/skills/<plugin>-*` files for plugin-only
+     * agents (no skills configured).
+     */
+    plugins?: Array<{ name?: string } & Record<string, unknown>>;
   };
   tenantId: string;
   /**
@@ -665,7 +675,16 @@ const mcpServers = process.env.MCP_SERVERS_JSON
   ? JSON.parse(process.env.MCP_SERVERS_JSON)
   : {};
 
-const transcriptPath = '/vercel/sandbox/transcript.ndjson';
+// Per-message transcript file. Matches the path read by the admin live-
+// session stream route (api/admin/sessions/.../messages/.../stream) and
+// salvageRunnerTranscript's primary candidate. Without a per-message
+// suffix, those readers see no events for an in-flight run because
+// they look for transcript-<messageId>.ndjson but the runner historically
+// wrote a single shared transcript.ndjson — a leftover from before the
+// runner became per-message.
+const transcriptPath = process.env.AGENT_PLANE_MESSAGE_ID
+  ? '/vercel/sandbox/transcript-' + process.env.AGENT_PLANE_MESSAGE_ID + '.ndjson'
+  : '/vercel/sandbox/transcript.ndjson';
 writeFileSync(transcriptPath, '');
 
 // --- U3-e: Per-line streaming POST (when AGENT_PLANE_STREAM_PER_LINE=on) ---
@@ -787,7 +806,10 @@ function claudeSdkStreamLoop(): string {
       if (message.type === 'stream_event') {
         const ev = message.event;
         if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-          console.log(JSON.stringify({ type: 'text_delta', text: ev.delta.text }));
+          // emit() (not console.log) so deltas enter __streamBuffer and reach
+          // resumeHook in real time. captureTranscript drops text_delta from
+          // the final blob, so this does not bloat storage.
+          emit({ type: 'text_delta', text: ev.delta.text });
         }
       } else if (message.type === 'result' && process.env.AGENT_PLANE_BILLING_SOURCE === 'subscription') {
         emit({ ...message, cost_usd: 0, total_cost_usd: 0 });
@@ -1512,7 +1534,18 @@ export async function reconnectSessionSandbox(
   try {
     const hasMcp = config.mcpServers ? Object.keys(config.mcpServers).length > 0 : false;
     const hasSkills = config.agent.skills.length > 0;
-    const hasPluginContent = (config.pluginFiles ?? []).length > 0;
+    // OPTIMIZATION B inverse: hasPluginContent on reconnect MUST come from
+    // the agent definition, not config.pluginFiles. Reconnect callers
+    // (dispatcher.ts:692 legacy path, dispatch-workflow.ts ensureSandboxImpl
+    // workflow path) intentionally pass pluginFiles: [] because plugin files
+    // were already injected at cold-start and persist on the sandbox's disk.
+    // Deriving the flag from the empty array here would falsely report no
+    // plugins and skip `settingSources: ["project"]` in the runner SDK init,
+    // causing the SDK to ignore the on-disk .claude/skills/<plugin>-* files
+    // for plugin-only agents (no skills configured). The Claude Agent SDK
+    // only loads project settings when this flag is set; without it,
+    // follow-up messages on plugin-only agents lose their plugin tools.
+    const hasPluginContent = (config.agent.plugins ?? []).length > 0;
 
     const baseEnv: Record<string, string> = {
       AGENT_PLANE_AGENT_ID: config.agent.id,

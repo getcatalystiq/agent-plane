@@ -2,6 +2,13 @@ import type { NextConfig } from "next";
 import { withWorkflow } from "workflow/next";
 
 const nextConfig: NextConfig = {
+  // discord.js (and its dep @discordjs/ws) lazy-imports `zlib-sync`, an
+  // optional native dep that's NOT in our package.json. Runtime gracefully
+  // falls back when it can't resolve (`.catch(() => null)`), but Turbopack's
+  // static analysis fails the build trying to resolve the dynamic import.
+  // Marking it as a server-external package leaves it as a runtime require
+  // and skips the bundle-time resolution.
+  serverExternalPackages: ["discord.js", "@discordjs/ws", "@chat-adapter/discord"],
   async redirects() {
     return [
       {
@@ -10,6 +17,37 @@ const nextConfig: NextConfig = {
         permanent: false,
       },
     ];
+  },
+  async rewrites() {
+    // CRITICAL: must be in `beforeFiles`, not the default `afterFiles`.
+    // The WDK-generated route at
+    // `src/app/.well-known/workflow/v1/{step,flow}/route.js` exists in
+    // the file system, so an `afterFiles` rewrite (the default when an
+    // array is returned directly) never fires — Next.js routes to the
+    // matched file first. `beforeFiles` runs the rewrite BEFORE the
+    // filesystem check, so the proxy is consulted first and the
+    // generated route is reached only via dynamic-import inside the
+    // proxy itself.
+    return {
+      beforeFiles: [
+        // WDK queue-callback proxy: route the framework's POST traffic
+        // through wrappers that translate the framework's own
+        // MessageNotAvailableError 500 (queue dedup, expected) to a 200.
+        // See `src/app/api/internal/wdk-step-proxy/route.ts` for full
+        // rationale. Sits under `/api/internal/` so middleware's public-
+        // path bypass leaves it open to the external WDK queue.
+        {
+          source: "/.well-known/workflow/v1/step",
+          destination: "/api/internal/wdk-step-proxy",
+        },
+        {
+          source: "/.well-known/workflow/v1/flow",
+          destination: "/api/internal/wdk-flow-proxy",
+        },
+      ],
+      afterFiles: [],
+      fallback: [],
+    };
   },
   async headers() {
     return [

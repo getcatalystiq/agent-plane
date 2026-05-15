@@ -155,11 +155,40 @@ export async function createSession(
       `INSERT INTO sessions (tenant_id, agent_id, status, context_id, ephemeral, idle_ttl_seconds, expires_at)
        SELECT $1, $2, 'creating', $4, $5, $6, NOW() + INTERVAL '${SESSION_EXPIRES_AFTER_INTERVAL}'
        WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active')) < $3
+       ON CONFLICT (tenant_id, agent_id, context_id)
+         WHERE status NOT IN ('stopped') AND context_id IS NOT NULL
+         DO NOTHING
        RETURNING *`,
       [tenantId, agentId, MAX_CONCURRENT_SESSIONS, contextId, ephemeral, idleTtlSeconds],
     );
 
     if (!result) {
+      // Two distinct paths produce no row: (a) cap exceeded by SELECT...WHERE
+      // gate; (b) ON CONFLICT swallowed a partial-unique-index hit on
+      // (tenant_id, agent_id, context_id) for a concurrent insert that won
+      // the race. The chat ingress race (cleanup commits 'stopped' while two
+      // events arrive simultaneously) lands here. Re-fetch the non-stopped
+      // session for this contextId — if it exists, the race winner is the
+      // intended outcome and we attach to it.
+      if (contextId) {
+        const existing = await tx.queryOne(
+          SessionRow,
+          `SELECT * FROM sessions
+           WHERE tenant_id = $1 AND agent_id = $2 AND context_id = $3
+             AND status NOT IN ('stopped')
+           LIMIT 1`,
+          [tenantId, agentId, contextId],
+        );
+        if (existing) {
+          logger.info("Session create lost contextId race; attaching to winner", {
+            session_id: existing.id,
+            agent_id: agentId,
+            tenant_id: tenantId,
+            context_id: contextId,
+          });
+          return { session: existing, agent, remainingBudget };
+        }
+      }
       throw new ConcurrencyLimitError(
         `Maximum of ${MAX_CONCURRENT_SESSIONS} concurrent active sessions per tenant`,
       );

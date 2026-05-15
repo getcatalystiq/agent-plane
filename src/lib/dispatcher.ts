@@ -59,6 +59,7 @@ import {
 import { uploadTranscript } from "@/lib/transcripts";
 import { createNdjsonStream, ndjsonHeaders } from "@/lib/streaming";
 import { getIdempotentResponse, setIdempotentResponse } from "@/lib/idempotency";
+import { INJECTION_SCANNER_VERSION } from "@/lib/safety/injection-scanner";
 import { logger } from "@/lib/logger";
 import { getEnv } from "@/lib/env";
 import {
@@ -187,6 +188,22 @@ export interface DispatchInput {
   callbackData?: CallbackData;
   /** Extra hostnames for the sandbox network policy. */
   extraAllowedHostnames?: string[];
+  /**
+   * Files to pre-inject into the sandbox before the runner spawns. Used by
+   * the chat workflow (U7) to stage attachments. Bytes are NEVER included
+   * — only signed-URL handoff metadata. `ensureSandboxStep` (or the warm-
+   * reconnect branch) fetches each `signedReadUrl` server-side and writes
+   * to `path` via `sandbox.writeFiles`. This shape is JSON-serializable so
+   * it survives WDK step boundaries.
+   */
+  preInjectFiles?: Array<{
+    /** Sandbox path, e.g. `/vercel/sandbox/attachments/<id>.<ext>`. */
+    path: string;
+    /** 10-minute signed URL the dispatcher fetches inside ensureSandboxStep. */
+    signedReadUrl: string;
+    contentType: string;
+    sizeBytes: number;
+  }>;
   platformApiUrl: string;
   /**
    * Per-message overrides for the agent's defaults. `maxTurns` is capped to
@@ -196,6 +213,31 @@ export interface DispatchInput {
   overrides?: {
     maxTurns?: number;
     maxBudgetUsd?: number;
+  };
+  /**
+   * Prompt-injection scan verdict, set by the dispatch shim *before* this
+   * function runs. The verdict is persisted on the session_messages row's
+   * audit columns. The shim is the only writer of this field — direct
+   * callers of `dispatchSessionMessage` (test harnesses, future code) can
+   * safely omit it; reserveSessionAndMessage will write the default
+   * (false, NULL, NULL) tuple.
+   */
+  injectionScan?: import("@/lib/safety/injection-scanner").ScanResult;
+  /**
+   * The tenant's `injection_enforce_mode` resolved at scan time. Mixed into
+   * the idempotency cache key so a mode flip invalidates cached verdicts.
+   */
+  injectionEnforceMode?: import("@/lib/safety/policy").InjectionEnforceMode;
+  /**
+   * Set by the chat dispatch workflow to fold the post-reserve UPDATE of
+   * `chat_event_dedupe.session_id` / `message_id` into the same Neon
+   * transaction as session + session_message creation. Saves one
+   * round-trip on the chat hot path. Other triggers (api / schedule /
+   * webhook / a2a) leave this undefined.
+   */
+  chatDedupeUpdate?: {
+    platform: "discord" | "slack";
+    eventId: string;
   };
 }
 
@@ -283,8 +325,13 @@ export async function dispatchSessionMessage(input: DispatchInput): Promise<Disp
   // 1. Idempotency short-circuit (process-memory store). SEC: cache key MUST
   // be tenant-namespaced or Tenant A's key collides with Tenant B's, leaking
   // message_ids across tenants. Mirrors the A2A pattern in the JSON-RPC route.
+  //
+  // The key also mixes in INJECTION_SCANNER_VERSION + the resolved tenant
+  // enforce_mode so that:
+  //  (a) a deliberate scanner pattern-set bump invalidates cached verdicts,
+  //  (b) a tenant flipping log_only ↔ enforce takes effect immediately.
   const idempCacheKey = input.idempotencyKey
-    ? `dispatch:${input.tenantId}:${input.idempotencyKey}`
+    ? `dispatch:${input.tenantId}:${INJECTION_SCANNER_VERSION}:${input.injectionEnforceMode ?? "log_only"}:${input.idempotencyKey}`
     : null;
   const cachedHit = idempCacheKey ? await readIdempotentHit(idempCacheKey, input) : null;
   if (cachedHit) return cachedHit;
@@ -525,20 +572,54 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
       // Concurrency cap (TOCTOU-safe). Same atomic INSERT-WHERE-COUNT
       // pattern as the legacy MAX_CONCURRENT_RUNS guard. `idle` does NOT
       // count toward the cap.
+      //
+      // ON CONFLICT (tenant_id, agent_id, context_id) WHERE status NOT IN
+      // ('stopped') AND context_id IS NOT NULL DO NOTHING — matches the
+      // partial unique index `idx_sessions_context_id_active`. The chat
+      // ingress race (cleanup-cron commits 'stopped' while two events for
+      // the same thread arrive simultaneously) lands here. P1 #14 in
+      // review run 20260506-221948-2402b0ed: createSession got this fix
+      // but reserveSessionAndMessage didn't — chat dispatch goes through
+      // this path, so the race fix had to live here too.
       const created = await tx.queryOne(
         SessionRowSchema,
         `INSERT INTO sessions (tenant_id, agent_id, status, context_id, ephemeral, idle_ttl_seconds, expires_at)
          SELECT $1, $2, 'creating', $4, $5, $6, NOW() + INTERVAL '${SESSION_EXPIRES_AFTER_INTERVAL}'
          WHERE (SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND status IN ('creating', 'active')) < $3
+         ON CONFLICT (tenant_id, agent_id, context_id)
+           WHERE status NOT IN ('stopped') AND context_id IS NOT NULL
+           DO NOTHING
          RETURNING *`,
         [input.tenantId, input.agentId, MAX_CONCURRENT_ACTIVE_SESSIONS, input.contextId ?? null, ephemeral, idleTtlSeconds],
       );
       if (!created) {
-        throw new ConcurrencyLimitError(
-          `Maximum of ${MAX_CONCURRENT_ACTIVE_SESSIONS} concurrent active sessions per tenant`,
-        );
+        // Either cap exceeded OR ON CONFLICT swallowed a partial-unique-index
+        // hit. When contextId is set, prefer the race-winner re-fetch so the
+        // chat workflow attaches to the existing session instead of throwing.
+        if (input.contextId) {
+          const existing = await tx.queryOne(
+            SessionRowSchema,
+            `SELECT * FROM sessions
+             WHERE tenant_id = $1 AND agent_id = $2 AND context_id = $3
+               AND status NOT IN ('stopped')
+             LIMIT 1`,
+            [input.tenantId, input.agentId, input.contextId],
+          );
+          if (existing) {
+            session = existing;
+          } else {
+            throw new ConcurrencyLimitError(
+              `Maximum of ${MAX_CONCURRENT_ACTIVE_SESSIONS} concurrent active sessions per tenant`,
+            );
+          }
+        } else {
+          throw new ConcurrencyLimitError(
+            `Maximum of ${MAX_CONCURRENT_ACTIVE_SESSIONS} concurrent active sessions per tenant`,
+          );
+        }
+      } else {
+        session = created;
       }
-      session = created;
     }
 
     // d) Append the session_messages row in `running` state. The runner
@@ -547,11 +628,17 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
     const effectiveMaxTurns = input.overrides?.maxTurns ?? agent.max_turns;
     const effectiveBudget = input.overrides?.maxBudgetUsd ?? agent.max_budget_usd;
 
+    const scan = input.injectionScan;
+    const injectionDetected = scan?.detected === true;
+    const injectionConfidence = injectionDetected ? scan!.confidence : null;
+    const injectionPatterns =
+      injectionDetected && scan!.patterns.length > 0 ? scan!.patterns : null;
     const messageRow = await tx.queryOne(
       SessionMessageRow,
       `INSERT INTO session_messages
-         (session_id, tenant_id, prompt, status, triggered_by, runner, webhook_source_id, created_by_key_id, started_at)
-       VALUES ($1, $2, $3, 'running', $4, $5, $6, $7, NOW())
+         (session_id, tenant_id, prompt, status, triggered_by, runner, webhook_source_id, created_by_key_id, started_at,
+          injection_detected, injection_confidence, injection_patterns)
+       VALUES ($1, $2, $3, 'running', $4, $5, $6, $7, NOW(), $8, $9, $10)
        RETURNING *`,
       [
         session.id,
@@ -561,11 +648,36 @@ export async function reserveSessionAndMessage(input: DispatchInput): Promise<Pr
         effectiveRunner,
         input.webhookSourceId ?? null,
         input.callerKeyId ?? null,
+        injectionDetected,
+        injectionConfidence,
+        injectionPatterns,
       ],
     );
     if (!messageRow) {
       // Should be impossible — INSERT...RETURNING without WHERE always returns.
       throw new Error("Failed to create session_message row");
+    }
+
+    // OPT — chat hot path: when the chat workflow set `chatDedupeUpdate`,
+    // fold the post-reserve UPDATE of chat_event_dedupe into the same
+    // transaction as session + session_message creation. Eliminates one
+    // Neon round-trip per chat run. Guarded with `inner_run_id IS NULL`
+    // so a winner that's already populated the row (e.g. WDK retry of a
+    // step where the prior attempt got further) is not overwritten.
+    if (input.chatDedupeUpdate) {
+      await tx.execute(
+        `UPDATE chat_event_dedupe
+         SET session_id = $4, message_id = $5
+         WHERE tenant_id = $1 AND platform = $2 AND event_id = $3
+           AND inner_run_id IS NULL`,
+        [
+          input.tenantId,
+          input.chatDedupeUpdate.platform,
+          input.chatDedupeUpdate.eventId,
+          session.id,
+          messageRow.id,
+        ],
+      );
     }
 
     return {
@@ -1211,12 +1323,15 @@ async function cancelWorkflowRun(
   }
 }
 
-function isMcpFresh(session: Session): boolean {
+export const SESSION_TIMEOUT_MS = DEFAULT_SESSION_TIMEOUT_MS;
+export const SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS = 5 * 60 * 1000;
+
+export function isMcpFresh(session: Session): boolean {
   if (!session.mcp_refreshed_at) return false;
   return Date.now() - new Date(session.mcp_refreshed_at).getTime() < MCP_REFRESH_TTL_MS;
 }
 
-function recordMcpRefresh(sessionId: string, tenantId: TenantId): void {
+export function recordMcpRefresh(sessionId: string, tenantId: TenantId): void {
   updateSessionMcpRefreshedAt(sessionId, tenantId).catch((err) => {
     logger.warn("Failed to update mcp_refreshed_at", {
       session_id: sessionId,

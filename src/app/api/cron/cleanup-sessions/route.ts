@@ -228,11 +228,27 @@ async function tryWorkflowCancel(
     });
     return false;
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // WDK throws "Cannot cancelled workflow run X because it has already
+    // finished with status 'completed'" when the run reached terminal
+    // before our cancel arrived. That's the cleanup cron's *desired*
+    // end state — no fallback, no warn. Same for already-cancelled /
+    // already-failed: the run is in a terminal state, the watchdog's
+    // job is done.
+    const ALREADY_TERMINAL_RE = /already finished with status '(completed|failed|cancelled|stopped)'/i;
+    if (ALREADY_TERMINAL_RE.test(msg)) {
+      logger.info("cleanup: workflow already terminal — no cancel needed", {
+        session_id: session.id,
+        run_id: rawRunId,
+        reason,
+      });
+      return true;
+    }
     logger.warn("cleanup: workflow cancel threw — falling back to legacy", {
       session_id: session.id,
       run_id: rawRunId,
       reason,
-      error: err instanceof Error ? err.message : String(err),
+      error: msg,
     });
     return false;
   }
@@ -513,6 +529,72 @@ async function sweepOrphans(): Promise<number> {
   return countSweepResults(results, "Failed orphan-sandbox cleanup");
 }
 
+// chat_event_dedupe sweep. Two cohorts:
+//   (a) STALE PLACEHOLDERS — winner crashed between INSERT and UPDATE.
+//       claimed_at is older than the workflow step's max wall clock.
+//       Round-4 review #3: 15min so a cold sandbox boot
+//       (snapshot miss + npm install + heavy MCP refresh + plugin sync)
+//       cannot be reaped mid-start. Above 15min the active-watchdog
+//       (per-agent max_runtime + 120s grace, default 720s) has already
+//       fired, so the placeholder is genuinely orphaned.
+//   (b) FILLED ROWS PAST 7-DAY TTL — long-tail cleanup. The 7-day
+//       window is the workflow body's max useful idempotency horizon
+//       (inner workflow runs are gone well before then).
+//
+// Both DELETEs are CTID-batched (round-4 residual #4): an unbatched
+// DELETE on a multi-million-row catch-up scenario (e.g., after a
+// prolonged cleanup-cron outage) takes a single ACCESS EXCLUSIVE lock
+// for the whole transaction and blocks INSERT traffic on the dedupe
+// table. Batched DELETE caps each iteration at SWEEP_BATCH_SIZE rows
+// and runs ≤ SWEEP_MAX_BATCHES iterations per tick. Steady-state
+// (< batch size) finishes in one iteration; backlog drains across
+// successive 5-minute cron ticks.
+const SWEEP_BATCH_SIZE = 5_000;
+const SWEEP_MAX_BATCHES = 20;
+
+// Round-5 review #8 fix: replace the `predicate: string` parameter with
+// a discriminated union so sweepDedupeBatched cannot accept user-derived
+// SQL fragments. Each cohort maps to a frozen WHERE clause.
+type DedupeSweepCohort = "stale-placeholder" | "expired-filled";
+
+const DEDUPE_SWEEP_PREDICATES: Record<DedupeSweepCohort, string> = {
+  "stale-placeholder": "inner_run_id IS NULL AND claimed_at < now() - INTERVAL '15 minutes'",
+  "expired-filled": "created_at < now() - INTERVAL '7 days'",
+};
+
+async function sweepDedupeBatched(cohort: DedupeSweepCohort): Promise<number> {
+  const predicate = DEDUPE_SWEEP_PREDICATES[cohort];
+  let total = 0;
+  for (let i = 0; i < SWEEP_MAX_BATCHES; i++) {
+    const result = await execute(
+      `DELETE FROM chat_event_dedupe
+        WHERE ctid IN (
+          SELECT ctid FROM chat_event_dedupe
+          WHERE ${predicate}
+          LIMIT $1
+        )`,
+      [SWEEP_BATCH_SIZE],
+    );
+    total += result.rowCount;
+    if (result.rowCount < SWEEP_BATCH_SIZE) break;
+  }
+  return total;
+}
+
+async function sweepChatEventDedupe(): Promise<number> {
+  const [stale, expired] = await Promise.all([
+    sweepDedupeBatched("stale-placeholder"),
+    sweepDedupeBatched("expired-filled"),
+  ]);
+  if (stale > 0 || expired > 0) {
+    logger.info("chat_event_dedupe sweep", {
+      stale_placeholders_deleted: stale,
+      expired_filled_deleted: expired,
+    });
+  }
+  return stale + expired;
+}
+
 export const GET = withErrorHandler(async (request: NextRequest) => {
   verifyCronSecret(request);
 
@@ -526,6 +608,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     activeWatchdog,
     activeNoRunning,
     orphansCleaned,
+    chatDedupeCleaned,
   ] = await Promise.all([
     sweepExpired(),
     sweepIdle(),
@@ -533,6 +616,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     sweepActiveWatchdog(),
     sweepActiveWithoutRunning(),
     sweepOrphans(),
+    sweepChatEventDedupe(),
   ]);
 
   const total =
@@ -541,7 +625,8 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     creatingWatchdog +
     activeWatchdog +
     activeNoRunning +
-    orphansCleaned;
+    orphansCleaned +
+    chatDedupeCleaned;
   logger.info("Session cleanup completed", {
     expired_cleaned: expiredCleaned,
     idle_cleaned: idleCleaned,
@@ -549,6 +634,7 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     active_watchdog: activeWatchdog,
     active_no_running_message: activeNoRunning,
     orphans_cleaned: orphansCleaned,
+    chat_dedupe_cleaned: chatDedupeCleaned,
     total,
   });
 
@@ -560,5 +646,6 @@ export const GET = withErrorHandler(async (request: NextRequest) => {
     active_watchdog: activeWatchdog,
     active_no_running_message: activeNoRunning,
     orphans: orphansCleaned,
+    chat_dedupe: chatDedupeCleaned,
   });
 });

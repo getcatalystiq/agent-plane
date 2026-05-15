@@ -3,6 +3,7 @@ import { queryOne, execute } from "@/db";
 import { ScheduleRow, ScheduleInputSchema, TenantRow } from "@/lib/validation";
 import { withErrorHandler } from "@/lib/api";
 import { computeNextRunAt, buildScheduleConfig } from "@/lib/schedule";
+import { scanWriteContent } from "@/lib/safety/write-time-gate";
 
 export const dynamic = "force-dynamic";
 
@@ -57,16 +58,27 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
     }
   }
 
+  // Write-time scan on the schedule prompt — throws PromptRejectedError on
+  // `high` confidence (caught by withErrorHandler → 400 with opaque body).
+  const verdict = scanWriteContent(input.prompt, {
+    tenantId: existing.tenant_id,
+    surface: "schedule.prompt",
+  });
+
   const updatedSchedule = await queryOne(
     ScheduleRow,
     `UPDATE schedules
      SET name = $1, frequency = $2, time = $3, day_of_week = $4,
-         prompt = $5, enabled = $6, next_run_at = $7
-     WHERE id = $8 AND agent_id = $9
+         prompt = $5, enabled = $6, next_run_at = $7,
+         injection_detected = $8, injection_confidence = $9, injection_patterns = $10,
+         target_platform = $13, target_channel = $14
+     WHERE id = $11 AND agent_id = $12
      RETURNING *`,
     [input.name ?? null, input.frequency, input.time, input.day_of_week,
      input.prompt, input.enabled, nextRunAt?.toISOString() ?? null,
-     scheduleId, agentId],
+     verdict.injection_detected, verdict.injection_confidence, verdict.injection_patterns,
+     scheduleId, agentId,
+     input.target_platform ?? null, input.target_channel ?? null],
   );
 
   if (!updatedSchedule) {

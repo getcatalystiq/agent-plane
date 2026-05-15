@@ -7,10 +7,18 @@
  * Uses mcp-oauth.ts for HTTP calls and db for persistence.
  */
 
+import { z } from "zod";
 import { query, queryOne, withTenantTransaction } from "@/db";
 import { encrypt, decrypt } from "./crypto";
 import { getEnv } from "./env";
 import { logger } from "./logger";
+
+// Zod row schemas used by markConnectionFailed and getTenantSlackAlertConfig.
+const WasActiveRow = z.object({ was_active: z.boolean() });
+const TenantSlackAlertRow = z.object({
+  name: z.string(),
+  slack_alert_webhook_url_enc: z.string().nullable(),
+});
 import {
   McpConnectionRowInternal,
   McpServerRowInternal,
@@ -517,16 +525,69 @@ export async function deleteConnection(
   return result.rowCount > 0;
 }
 
+/**
+ * Atomically transition a connection to `failed` and report whether the
+ * row was previously `active`. Used by buildMcpConfig() to gate Slack
+ * alerts on the active->failed transition (R3, R4).
+ *
+ * Implementation: a CTE locks the row (`FOR UPDATE`) and reads the prior
+ * status before the UPDATE runs, then a final SELECT projects the
+ * boolean. Returns `{was_active: false}` on row-not-found (caller treats
+ * idempotently — no notification, no error).
+ */
 export async function markConnectionFailed(
   connectionId: McpConnectionId,
   tenantId: TenantId,
-): Promise<void> {
-  await withTenantTransaction(tenantId, async (tx) => {
-    await tx.execute(
-      "UPDATE mcp_connections SET status = 'failed' WHERE id = $1",
+): Promise<{ was_active: boolean }> {
+  return withTenantTransaction(tenantId, async (tx) => {
+    const row = await tx.queryOne(
+      WasActiveRow,
+      `WITH prev AS (
+         SELECT status AS old_status FROM mcp_connections
+         WHERE id = $1
+         FOR UPDATE
+       ), upd AS (
+         UPDATE mcp_connections SET status = 'failed' WHERE id = $1
+         RETURNING id
+       )
+       SELECT (old_status = 'active') AS was_active FROM prev`,
       [connectionId],
     );
+    return { was_active: row?.was_active ?? false };
   });
+}
+
+/**
+ * Look up the per-tenant Slack alert configuration for the MCP-failure
+ * notification path. Returns null when the tenant has no webhook URL
+ * configured (most tenants), so the caller can short-circuit without
+ * touching the notifier helper.
+ */
+export async function getTenantSlackAlertConfig(
+  tenantId: TenantId,
+): Promise<{ tenantName: string; webhookUrl: string } | null> {
+  const row = await withTenantTransaction(tenantId, async (tx) => {
+    return tx.queryOne(
+      TenantSlackAlertRow,
+      "SELECT name, slack_alert_webhook_url_enc FROM tenants WHERE id = $1",
+      [tenantId],
+    );
+  });
+  if (!row || !row.slack_alert_webhook_url_enc) return null;
+  try {
+    const env = getEnv();
+    const webhookUrl = await decrypt(
+      JSON.parse(row.slack_alert_webhook_url_enc),
+      env.ENCRYPTION_KEY,
+    );
+    return { tenantName: row.name, webhookUrl };
+  } catch (err) {
+    logger.warn("Failed to decrypt Slack alert webhook URL", {
+      tenant_id: tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 export async function updateAllowedTools(

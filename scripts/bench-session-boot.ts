@@ -348,8 +348,17 @@ function summarize(scenario: string, rows: Timings[]): string {
     const cells: string[] = [];
     for (const c of cols) {
       const vals = rows.map((r) => r[c]).filter((v): v is number => typeof v === "number");
+      // Math.max(...vals, NaN) was poisoning the result with NaN every time.
+      // Empty arrays would otherwise produce -Infinity from Math.max(); guard
+      // explicitly so fmtMs's Number.isFinite check catches it.
       const v =
-        stat === "p50" ? pct(vals, 50) : stat === "p95" ? pct(vals, 95) : Math.max(...vals, NaN);
+        stat === "p50"
+          ? pct(vals, 50)
+          : stat === "p95"
+          ? pct(vals, 95)
+          : vals.length > 0
+          ? Math.max(...vals)
+          : NaN;
       cells.push(fmtMs(v).padStart(12));
     }
     lines.push(`${scenario.padEnd(12)} ${stat.padEnd(4)} | ${cells.join(" | ")}`);

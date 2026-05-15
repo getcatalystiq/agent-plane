@@ -69,6 +69,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     setPolling(true);
 
     const sid = sessionIdRef.current;
+    const myAbort = abortRef.current;
     try {
       let res: Response;
       try {
@@ -124,9 +125,12 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       return;
     } finally {
       setPolling(false);
-      setRunning(false);
-      abortRef.current = null;
-      runIdRef.current = null;
+      // Only clear refs if the in-flight session is still ours.
+      if (abortRef.current === myAbort) {
+        setRunning(false);
+        abortRef.current = null;
+        runIdRef.current = null;
+      }
     }
   }
 
@@ -134,13 +138,17 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     let delay = 3000;
     const maxDelay = 10_000;
     const sid = sessionIdRef.current;
+    // Capture the abort controller for this poll session so we can release
+    // refs at the end without stomping on a newer message that may have
+    // started by the time polling completes.
+    const myAbort = abortRef.current;
 
     try {
       while (true) {
-        if (abortRef.current?.signal.aborted) break;
+        if (myAbort?.signal.aborted) break;
 
         await new Promise((r) => setTimeout(r, delay));
-        if (abortRef.current?.signal.aborted) break;
+        if (myAbort?.signal.aborted) break;
 
         let data: Record<string, unknown>;
         try {
@@ -197,9 +205,14 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
       }
     } finally {
       setPolling(false);
-      setRunning(false);
-      abortRef.current = null;
-      runIdRef.current = null;
+      // Only clear refs if the current in-flight session is still ours —
+      // a newer handleSend() may have started while we were polling and
+      // its abort controller would have replaced abortRef.current.
+      if (abortRef.current === myAbort) {
+        setRunning(false);
+        abortRef.current = null;
+        runIdRef.current = null;
+      }
     }
   }
 
@@ -210,6 +223,7 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
     let handedOffToReconnect = false;
     let transcriptEventCount = 0;
     let runId: string | null = null;
+    let sawTerminalEvent = false;
 
     try {
       while (true) {
@@ -237,6 +251,10 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
               runIdRef.current = runId;
             }
 
+            if (event.type === "result" || event.type === "error") {
+              sawTerminalEvent = true;
+            }
+
             if (event.type === "text_delta") {
               setStreamingText((prev) => prev + (event.text as string ?? ""));
             } else if (event.type === "stream_detached") {
@@ -259,9 +277,37 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           }
         }
       }
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
+      // Stream error — release the input UI immediately so the user can
+      // compose the follow-up; kick off polling for the terminal result
+      // in the background.
+      setRunning(false);
+      const messageId = runIdRef.current;
+      if (messageId && !sawTerminalEvent) {
+        // Don't await: polling is best-effort for result-event recovery.
+        // The send button is already free.
+        void pollForFinalResult(messageId);
+      } else {
+        abortRef.current = null;
+        runIdRef.current = null;
+      }
+      return;
     } finally {
       if (!handedOffToReconnect) {
+        // Always release the Send button when the stream closes — the user
+        // shouldn't have to wait for polling to finish before composing the
+        // next prompt. If we never saw a terminal event, fire polling in
+        // the background (it'll surface the synthetic result event into
+        // the transcript when the run finalizes).
         setRunning(false);
+        if (!sawTerminalEvent) {
+          const messageId = runIdRef.current;
+          if (messageId) {
+            void pollForFinalResult(messageId);
+            return;
+          }
+        }
         abortRef.current = null;
         runIdRef.current = null;
       }
@@ -436,7 +482,6 @@ export default function PlaygroundPage({ params }: { params: Promise<{ agentId: 
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={hasContent ? 3 : 12}
-          disabled={running}
           className="font-mono text-sm resize-none"
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSend();

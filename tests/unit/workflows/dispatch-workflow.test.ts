@@ -44,6 +44,10 @@ vi.mock("@/lib/dispatcher", () => ({
   coldStartSandbox: vi.fn(),
   finalizeMessage: vi.fn(),
   sessionTail: vi.fn(),
+  isMcpFresh: vi.fn().mockReturnValue(false),
+  recordMcpRefresh: vi.fn(),
+  SESSION_TIMEOUT_MS: 30 * 60 * 1000,
+  SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS: 5 * 60 * 1000,
 }));
 
 vi.mock("@/lib/sessions", () => ({
@@ -335,8 +339,12 @@ describe("dispatchWorkflow steps", () => {
 
       const chunk: RunnerChunk = {
         kind: "chunk",
-        line: '{"type":"assistant","content":"hi SECRET=foo"}',
-        eventType: "assistant",
+        lines: [
+          {
+            line: '{"type":"assistant","content":"hi SECRET=foo"}',
+            eventType: "assistant",
+          },
+        ],
       };
       await writeChunkStep(tenantId, messageId, chunk);
 
@@ -359,13 +367,18 @@ describe("dispatchWorkflow steps", () => {
         getWriter: () => writer,
       } as never);
 
+      // The step swallows write errors instead of re-throwing — a thrown
+      // step triggers a WDK retry with backoff, which was observed in
+      // production as a 5-minute hang on the chat path. We'd rather drop
+      // a chunk's worth of bytes than freeze the user's reply for
+      // minutes. Errors are logged loudly via logger.error so they
+      // surface in Vercel logs without poisoning the workflow.
       await expect(
         writeChunkStep(tenantId, messageId, {
           kind: "chunk",
-          line: "x",
-          eventType: "assistant",
+          lines: [{ line: "x", eventType: "assistant" }],
         }),
-      ).rejects.toThrow("stream closed");
+      ).resolves.toBeUndefined();
 
       // Critical: lock release happens in `finally` so a write error
       // doesn't leave the writable in a stuck-locked state.
@@ -524,6 +537,48 @@ describe("dispatchWorkflow steps", () => {
           effectiveMaxTurns: 10,
         }),
       );
+    });
+
+    it("warm path: reconnects to existing sandbox without coldStartSandbox", async () => {
+      // Session that already has a sandbox_id — workflow should reconnect
+      // instead of provisioning a fresh sandbox.
+      const prepared = makePrepared();
+      (prepared.session as unknown as { sandbox_id: string }).sandbox_id = "sandbox-existing";
+      const sandbox = makeSandbox();
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(sandbox as never);
+
+      const ref = await ensureSandboxStep(makeDispatchInput(), prepared);
+
+      // Warm path is the win: the ~3s coldStartSandbox provision is skipped
+      // entirely. SandboxRef carries the existing sandbox_id forward so
+      // launchRunner/finalize steps reconnect via the same handle.
+      expect(coldStartSandbox).not.toHaveBeenCalled();
+      expect(reconnectSessionSandbox).toHaveBeenCalledWith(
+        "sandbox-existing",
+        expect.objectContaining({ sessionId: prepared.session.id }),
+      );
+      expect(ref).toEqual({
+        sandboxId: "sandbox-existing",
+        sandboxConfig: expect.objectContaining({ sessionId: prepared.session.id }),
+      });
+    });
+
+    it("warm path falls through to cold start when reconnect returns null", async () => {
+      // Sandbox went missing (cleanup-cron killed it, Vercel idled it out).
+      // Workflow has to cold-start since the ref'd sandbox is gone.
+      const prepared = makePrepared();
+      (prepared.session as unknown as { sandbox_id: string }).sandbox_id = "sandbox-vanished";
+      vi.mocked(reconnectSessionSandbox).mockResolvedValueOnce(null);
+      vi.mocked(coldStartSandbox).mockResolvedValueOnce({
+        sandbox: { ...makeSandbox(), id: "sandbox-fresh" } as never,
+        sandboxConfig: {} as never,
+      });
+
+      const ref = await ensureSandboxStep(makeDispatchInput(), prepared);
+
+      expect(reconnectSessionSandbox).toHaveBeenCalled();
+      expect(coldStartSandbox).toHaveBeenCalled();
+      expect(ref.sandboxId).toBe("sandbox-fresh");
     });
   });
 });

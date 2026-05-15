@@ -25,7 +25,7 @@ import {
   parseRunnerLine,
   __resetDedupForTests,
   __resetLineCountersForTests,
-  type RunnerChunkPayload,
+  type RunnerChunkLine,
 } from "@/lib/workflows/stream-bridge-server";
 import { resumeHook } from "workflow/api";
 
@@ -108,58 +108,69 @@ describe("resumeHookBatch", () => {
     vi.clearAllMocks();
   });
 
-  it("delivers all chunks to resumeHook with the deterministic transcript token", async () => {
+  it("delivers the whole batch as ONE resumeHook call (saves WDK boundaries)", async () => {
     vi.mocked(resumeHook).mockResolvedValue({} as never);
-    const payloads: RunnerChunkPayload[] = [
-      { kind: "chunk", line: '{"type":"assistant"}', eventType: "assistant" },
-      { kind: "chunk", line: '{"type":"tool_use"}', eventType: "tool_use" },
-      { kind: "terminal", line: '{"type":"result"}', eventType: "result" },
+    const lines: RunnerChunkLine[] = [
+      { line: '{"type":"assistant"}', eventType: "assistant" },
+      { line: '{"type":"tool_use"}', eventType: "tool_use" },
+      { line: '{"type":"result"}', eventType: "result" },
     ];
 
-    const result = await resumeHookBatch("msg-1", payloads);
+    const result = await resumeHookBatch("msg-1", lines);
 
+    // PERF gate: a 3-line batch must produce ONE resumeHook call, not 3.
+    // Pre-batching this was N calls per N lines.
     expect(result).toEqual({ delivered: 3, hookNotFound: false, otherError: null });
-    expect(resumeHook).toHaveBeenCalledTimes(3);
-    expect(resumeHook).toHaveBeenNthCalledWith(1, "transcript:msg-1", payloads[0]);
-    expect(resumeHook).toHaveBeenNthCalledWith(2, "transcript:msg-1", payloads[1]);
-    expect(resumeHook).toHaveBeenNthCalledWith(3, "transcript:msg-1", payloads[2]);
+    expect(resumeHook).toHaveBeenCalledTimes(1);
+    expect(resumeHook).toHaveBeenCalledWith(
+      "transcript:msg-1",
+      expect.objectContaining({ kind: "terminal", lines }),
+    );
   });
 
-  it("HookNotFoundError → returns hookNotFound=true with delivered count of prior successes", async () => {
-    vi.mocked(resumeHook)
-      .mockResolvedValueOnce({} as never)
-      .mockRejectedValueOnce(new Error("HookNotFoundError: Hook not found"));
-    const payloads: RunnerChunkPayload[] = [
-      { kind: "chunk", line: "a", eventType: "assistant" },
-      { kind: "chunk", line: "b", eventType: "assistant" },
-      { kind: "chunk", line: "c", eventType: "assistant" },
+  it("non-terminal batch → kind='chunk'", async () => {
+    vi.mocked(resumeHook).mockResolvedValue({} as never);
+    const lines: RunnerChunkLine[] = [
+      { line: '{"type":"assistant"}', eventType: "assistant" },
+      { line: '{"type":"text_delta"}', eventType: "text_delta" },
     ];
 
-    const result = await resumeHookBatch("msg-1", payloads);
+    await resumeHookBatch("msg-1", lines);
+
+    expect(resumeHook).toHaveBeenCalledWith(
+      "transcript:msg-1",
+      expect.objectContaining({ kind: "chunk", lines }),
+    );
+  });
+
+  it("HookNotFoundError → returns hookNotFound=true with delivered=0", async () => {
+    vi.mocked(resumeHook).mockRejectedValueOnce(
+      new Error("HookNotFoundError: Hook not found"),
+    );
+    const lines: RunnerChunkLine[] = [
+      { line: "a", eventType: "assistant" },
+      { line: "b", eventType: "assistant" },
+    ];
+
+    const result = await resumeHookBatch("msg-1", lines);
 
     expect(result.hookNotFound).toBe(true);
-    expect(result.delivered).toBe(1);
+    expect(result.delivered).toBe(0);
     expect(result.otherError).toBeNull();
-    // After the failure we stop iterating so the remaining payloads are
-    // not delivered (the route returns 5xx; the runner retries the entire
-    // batch).
-    expect(resumeHook).toHaveBeenCalledTimes(2);
+    expect(resumeHook).toHaveBeenCalledTimes(1);
   });
 
   it("non-hook-not-found error → returns otherError with the message", async () => {
-    vi.mocked(resumeHook)
-      .mockResolvedValueOnce({} as never)
-      .mockRejectedValueOnce(new Error("transient WDK error"));
-    const payloads: RunnerChunkPayload[] = [
-      { kind: "chunk", line: "a", eventType: "assistant" },
-      { kind: "chunk", line: "b", eventType: "assistant" },
+    vi.mocked(resumeHook).mockRejectedValueOnce(new Error("transient WDK error"));
+    const lines: RunnerChunkLine[] = [
+      { line: "a", eventType: "assistant" },
     ];
 
-    const result = await resumeHookBatch("msg-1", payloads);
+    const result = await resumeHookBatch("msg-1", lines);
 
     expect(result.hookNotFound).toBe(false);
     expect(result.otherError).toContain("transient WDK error");
-    expect(result.delivered).toBe(1);
+    expect(result.delivered).toBe(0);
   });
 
   it("empty batch → delivered=0 with no resumeHook calls", async () => {
@@ -170,36 +181,32 @@ describe("resumeHookBatch", () => {
 });
 
 describe("parseRunnerLine", () => {
-  it("parses an assistant event as kind='chunk'", () => {
+  it("parses an assistant event with eventType='assistant'", () => {
     const result = parseRunnerLine('{"type":"assistant","content":"hi"}');
     expect(result).toEqual({
-      kind: "chunk",
       line: '{"type":"assistant","content":"hi"}',
       eventType: "assistant",
     });
   });
 
-  it("parses a result event as kind='terminal'", () => {
+  it("parses a result event with eventType='result'", () => {
     const result = parseRunnerLine('{"type":"result","status":"completed"}');
     expect(result).toEqual({
-      kind: "terminal",
       line: '{"type":"result","status":"completed"}',
       eventType: "result",
     });
   });
 
-  it("parses an error event as kind='terminal'", () => {
+  it("parses an error event with eventType='error'", () => {
     const result = parseRunnerLine('{"type":"error","message":"boom"}');
     expect(result).toEqual({
-      kind: "terminal",
       line: '{"type":"error","message":"boom"}',
       eventType: "error",
     });
   });
 
-  it("text_delta is a chunk (not terminal)", () => {
+  it("text_delta produces eventType='text_delta'", () => {
     const result = parseRunnerLine('{"type":"text_delta","content":"x"}');
-    expect(result?.kind).toBe("chunk");
     expect(result?.eventType).toBe("text_delta");
   });
 
@@ -209,22 +216,20 @@ describe("parseRunnerLine", () => {
     expect(parseRunnerLine("\n")).toBeNull();
   });
 
-  it("malformed JSON falls back to {kind:'chunk', eventType:'unknown'} (no throw)", () => {
+  it("malformed JSON falls back to eventType='unknown' (no throw)", () => {
     const result = parseRunnerLine("not valid json");
     expect(result).toEqual({
-      kind: "chunk",
       line: "not valid json",
       eventType: "unknown",
     });
   });
 
-  it("JSON without type field is classified eventType='unknown', kind='chunk'", () => {
+  it("JSON without type field is classified eventType='unknown'", () => {
     const result = parseRunnerLine('{"content":"hi"}');
-    expect(result?.kind).toBe("chunk");
     expect(result?.eventType).toBe("unknown");
   });
 
-  it("non-object JSON (string, number) → kind='chunk', eventType='unknown'", () => {
+  it("non-object JSON (string, number) → eventType='unknown'", () => {
     expect(parseRunnerLine('"just a string"')?.eventType).toBe("unknown");
     expect(parseRunnerLine("42")?.eventType).toBe("unknown");
   });

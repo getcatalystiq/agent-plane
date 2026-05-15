@@ -2,19 +2,26 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { queryOne } from "@/db";
 import { withErrorHandler, jsonResponse } from "@/lib/api";
-import { SessionRow } from "@/lib/validation";
 import { NotFoundError } from "@/lib/errors";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+// Minimal existence-check schema. The full SessionRow Zod schema requires
+// many fields (status, ephemeral, expires_at, etc.) — using it here against
+// `SELECT id` always threw ZodError → withErrorHandler → 400, which made
+// the admin Run page's stream fetch see !res.ok and bail at the very start
+// (Streaming pill flashed for ~50ms then "No transcript available" stuck).
+// All we need from this row is "the session exists" — keep the projection
+// and the validator aligned.
+const SessionIdRow = z.object({ id: z.string() });
 const InFlightRow = z.object({ id: z.string() });
 
 export const GET = withErrorHandler(async (request: NextRequest, context) => {
   const { sessionId } = await context!.params;
 
   const session = await queryOne(
-    SessionRow,
+    SessionIdRow,
     "SELECT id FROM sessions WHERE id = $1",
     [sessionId],
   );

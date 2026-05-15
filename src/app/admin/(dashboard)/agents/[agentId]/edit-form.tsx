@@ -145,7 +145,7 @@ export function AgentEditForm({ agent }: { agent: Agent }) {
             <div className="col-span-2">
               <FormField label="Max Runtime">
                 <div className="relative">
-                  <Input type="number" min="1" max="60" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)} className="pr-10" disabled={saving} />
+                  <Input type="number" min="1" max="240" value={maxRuntime} onChange={(e) => setMaxRuntime(e.target.value)} className="pr-10" disabled={saving} />
                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">min</span>
                 </div>
               </FormField>

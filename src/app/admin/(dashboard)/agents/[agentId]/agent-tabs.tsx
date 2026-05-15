@@ -12,6 +12,7 @@ export function AgentTabs({
   plugins,
   schedules,
   webhooks,
+  bots,
 }: {
   general: ReactNode;
   identity: ReactNode;
@@ -21,6 +22,7 @@ export function AgentTabs({
   plugins: ReactNode;
   schedules: ReactNode;
   webhooks: ReactNode;
+  bots: ReactNode;
 }) {
   return (
     <Tabs
@@ -32,6 +34,7 @@ export function AgentTabs({
         { label: "Plugins", content: plugins },
         { label: "Schedules", content: schedules },
         { label: "Webhooks", content: webhooks },
+        { label: "Bots", content: bots },
         { label: "Runs", content: runs },
       ]}
     />

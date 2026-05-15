@@ -6,6 +6,11 @@ import { supportsClaudeRunner, resolveEffectiveRunner, isPermissionModeAllowed }
 
 export const identityJsonbSchema = z.unknown().transform((v) => (v && typeof v === "object" ? v : null) as Record<string, unknown> | null);
 
+// Must stay strictly below sessions.expires_at (4h hard cap) minus the
+// active-watchdog grace (120s default) so a watchdog reap can fire
+// before expires_at. CLAUDE.md documents this bound.
+export const MAX_RUNTIME_SECONDS_CEILING = 3600;
+
 // --- Runner Validation ---
 
 export const RunnerTypeSchema = z.enum(["claude-agent-sdk", "vercel-ai-sdk"]);
@@ -252,7 +257,7 @@ export const CreateAgentSchema = z.object({
     .default("bypassPermissions"),
   max_turns: z.number().int().min(1).max(1000).default(10),
   max_budget_usd: z.number().min(0.01).max(100.0).default(1.0),
-  max_runtime_seconds: z.number().int().min(60).max(3600).default(600),
+  max_runtime_seconds: z.number().int().min(60).max(MAX_RUNTIME_SECONDS_CEILING).default(600),
   a2a_enabled: z.boolean().default(false),
   soul_md: z.string().max(50_000).nullable().optional(),
   identity_md: z.string().max(50_000).nullable().optional(),
@@ -293,7 +298,7 @@ export const UpdateAgentSchema = z.object({
   permission_mode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan"]),
   max_turns: z.number().int().min(1).max(1000),
   max_budget_usd: z.number().min(0.01).max(100.0),
-  max_runtime_seconds: z.number().int().min(60).max(3600),
+  max_runtime_seconds: z.number().int().min(60).max(MAX_RUNTIME_SECONDS_CEILING),
   a2a_enabled: z.boolean(),
   a2a_tags: z.array(z.string().min(1).max(100)),
   slug: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9-]*$/, "Slug must be lowercase alphanumeric with hyphens"),
@@ -361,12 +366,10 @@ export const TenantRow = z.object({
   subscription_base_url: z.string().nullable().default(null),
   subscription_token_expires_at: z.coerce.string().nullable().default(null),
   spend_period_start: z.coerce.string(),
-  // Per-tenant workflow dispatch override deny-list. Keys match trigger names
-  // (api/schedule/webhook/a2a/cleanup/admin); values are booleans.
-  // Empty object = follow global env-var toggle. Tenant override wins when set.
-  workflow_dispatch_overrides: z
-    .record(z.string(), z.boolean())
-    .default({}),
+  // (Legacy `workflow_dispatch_overrides` JSONB removed from the schema —
+  // the column may still exist on the DB but no code reads it. The
+  // workflow-vs-legacy toggle no longer exists; all triggers run
+  // through the WDK workflow path unconditionally.)
   created_at: z.coerce.string(),
 });
 
@@ -416,6 +419,13 @@ export const AgentRow = z.object({
   examples_bad_md: z.string().nullable().default(null),
   soul_spec_version: z.string().nullable().default('0.5'),
   identity: identityJsonbSchema.default(null),
+  // Write-time prompt-injection scanner audit columns. Set by the admin
+  // edit endpoints when scannable fields (SoulSpec markdown, skills) are
+  // changed. See migration 035 and U5 of
+  // docs/plans/2026-05-06-002-feat-prompt-injection-scanner-plan.md.
+  injection_detected: z.boolean().default(false),
+  injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
+  injection_patterns: z.array(z.string()).nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -580,6 +590,14 @@ export const SessionMessageRow = z.object({
   // step so workflow replay finds non-null and skips re-spawn. NULL on legacy
   // path messages.
   runner_started_at: z.coerce.string().nullable().default(null),
+  // Prompt-injection scanner verdict, written at INSERT time by the dispatch
+  // shim. injection_detected is non-null (defaults to false in DB);
+  // injection_confidence and injection_patterns are non-null only when the
+  // scanner detected something. See migration 035 and U4 of
+  // docs/plans/2026-05-06-002-feat-prompt-injection-scanner-plan.md.
+  injection_detected: z.boolean().default(false),
+  injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
+  injection_patterns: z.array(z.string()).nullable().default(null),
   started_at: z.coerce.string().nullable(),
   completed_at: z.coerce.string().nullable(),
   created_at: z.coerce.string(),
@@ -617,6 +635,18 @@ export const ScheduleRow = z.object({
   // bound by the partial UNIQUE index in migration 034. Replaces the
   // (non-existent) WDK start() idempotency. NULL on legacy-path schedules.
   last_fired_dispatch_key: z.string().nullable().default(null),
+  // Write-time prompt-injection scanner audit columns. See migration 035 +
+  // U5 of docs/plans/2026-05-06-002-feat-prompt-injection-scanner-plan.md.
+  injection_detected: z.boolean().default(false),
+  injection_confidence: z.enum(["high", "medium", "low"]).nullable().default(null),
+  injection_patterns: z.array(z.string()).nullable().default(null),
+  // Migration 041: schedule-to-channel delivery via Chat SDK adapter.
+  // Both NULL = no platform delivery (default; agent output lives only in
+  // session_messages transcript). Both set = scheduled-runs cron posts the
+  // agent's final reply to the named channel via the cached bot's adapter.
+  // CHECK chk_sched_target_paired enforces the both-or-neither invariant.
+  target_platform: z.enum(["slack", "discord"]).nullable().default(null),
+  target_channel: z.string().nullable().default(null),
   created_at: z.coerce.string(),
   updated_at: z.coerce.string(),
 });
@@ -630,6 +660,9 @@ const scheduleBaseFields = {
   day_of_week: z.number().int().min(0).max(6).nullable(),
   prompt: z.string().min(1).max(100_000).nullable(),
   enabled: z.boolean(),
+  // Optional channel delivery — both fields together or both omitted.
+  target_platform: z.enum(["slack", "discord"]).nullable().optional(),
+  target_channel: z.string().min(1).max(64).nullable().optional(),
 };
 
 function addScheduleCrossFieldValidation<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
@@ -649,6 +682,19 @@ function addScheduleCrossFieldValidation<T extends z.ZodObject<z.ZodRawShape>>(s
     }
     if (data.enabled && freq === "manual") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "cannot enable a manual schedule", path: ["enabled"] });
+    }
+    // Channel delivery: both target fields must be set together or
+    // neither. Mirrors the chk_sched_target_paired CHECK constraint.
+    const tgtP = data.target_platform as string | null | undefined;
+    const tgtC = data.target_channel as string | null | undefined;
+    const tgtPSet = tgtP !== null && tgtP !== undefined;
+    const tgtCSet = tgtC !== null && tgtC !== undefined && tgtC !== "";
+    if (tgtPSet !== tgtCSet) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "target_platform and target_channel must both be set or both omitted",
+        path: [tgtPSet ? "target_channel" : "target_platform"],
+      });
     }
   });
 }

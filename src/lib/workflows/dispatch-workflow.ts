@@ -44,6 +44,7 @@
  */
 import {
   createHook,
+  FatalError,
   getWorkflowMetadata,
   getWritable,
 } from "workflow";
@@ -53,6 +54,10 @@ import {
   coldStartSandbox,
   finalizeMessage,
   sessionTail,
+  isMcpFresh,
+  recordMcpRefresh,
+  SESSION_TIMEOUT_MS,
+  SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS,
   type DispatchInput,
   type DispatchResult,
   type PreparedExecution,
@@ -62,7 +67,7 @@ import {
   setWorkflowRunId,
   type Session,
 } from "@/lib/sessions";
-import { markRunnerStarted } from "@/lib/session-messages";
+import { markRunnerStarted, transitionMessageStatus } from "@/lib/session-messages";
 import { resolveSandboxAuth } from "@/lib/tenant-auth";
 import { resolveEffectiveRunner } from "@/lib/models";
 import { buildMcpConfig, type McpBuildResult } from "@/lib/mcp";
@@ -83,17 +88,29 @@ import type { TenantId } from "@/lib/types";
 // --- Public types ---
 
 /**
- * The shape the runner POSTs (one per NDJSON line) and the hook delivers
- * to the workflow body's `for await`. The internal endpoint (U3) parses
- * raw runner NDJSON, classifies it as `chunk` vs `terminal` based on the
- * event's `type` field, and `resumeHook`s the structured chunk.
+ * The shape the runner POSTs (one POST = one batch of up to ~10 NDJSON
+ * lines, coalesced by the runner template) and the hook delivers to the
+ * workflow body's `for await`. The internal endpoint (U3) parses raw
+ * runner NDJSON into a batch and `resumeHook`s once with the whole batch.
  *
- * `terminal` is set for `result` and `error` event types — they're the
- * runner's natural break-out signals. Everything else is a `chunk`.
+ * `terminal` is set when at least one of `lines` is a terminal event
+ * (`result` or `error`). The workflow body breaks its for-await after
+ * processing the batch.
+ *
+ * PERF: pre-batching this was one chunk per parsed line, meaning every
+ * NDJSON line emitted by the runner became a separate WDK step boundary
+ * (writeChunkStep). With the runner already coalescing 10 lines / 100ms
+ * per HTTP POST, batching here cuts step count by up to 10×.
  */
-export type RunnerChunk =
-  | { kind: "chunk"; line: string; eventType: string }
-  | { kind: "terminal"; line: string; eventType: "result" | "error" };
+export interface RunnerChunkLine {
+  line: string;
+  eventType: string;
+}
+
+export type RunnerChunk = {
+  kind: "chunk" | "terminal";
+  lines: RunnerChunkLine[];
+};
 
 export interface DispatchWorkflowOutput {
   sessionId: string;
@@ -126,14 +143,23 @@ export interface SandboxRef {
  */
 export async function dispatchWorkflow(
   input: DispatchInput,
+  prepared: PreparedExecution,
 ): Promise<DispatchWorkflowOutput> {
   "use workflow";
 
   const runId = getWorkflowMetadata().workflowRunId;
 
-  // Step 1 — reserve message + persist runId in same tx
-  const prepared = await reserveStep(input, runId);
-
+  // PERF: reserveSessionAndMessage now runs in the shim (dispatch-shim.ts)
+  // BEFORE start(), so:
+  //   - The shim has session.id + messageId immediately and skips
+  //     pollForReserveCommit entirely (was up to 5s of polling pre-fix,
+  //     ~300-700ms even on the happy path).
+  //   - The first step of the workflow is no longer a 100-300ms WDK
+  //     round-trip just to do a DB write the shim could've done in-process.
+  // The legacy in-process dispatchSessionMessage works the same way; this
+  // brings the workflow path to parity on the cheapest part of the boot
+  // path.
+  //
   // Hook MUST exist before launchRunner so the runner's first POST never
   // 404s — the U0 spike measured a 500ms–1.2s registration window absorbed
   // by U3's runner-side backoff (100ms→1.6s, 30s budget).
@@ -143,11 +169,20 @@ export async function dispatchWorkflow(
     token: `transcript:${prepared.messageId}`,
   });
 
-  // Step 2 — provision sandbox; returns POJO ref (NOT live wrapper — see SandboxRef)
-  const sandboxRef = await ensureSandboxStep(input, prepared);
-
-  // Step 3 — spawn runner inside sandbox; sets runner_started_at idempotently
-  await launchRunnerStep(input, prepared, sandboxRef);
+  // PERF: persist runId + ensureSandbox + launchRunner all in ONE step.
+  // Pre-fix these were three separate steps, each paying ~100-500ms of WDK
+  // step-boundary overhead. Combined here because:
+  //   - setWorkflowRunId is an idempotent UPDATE on a row that already
+  //     exists (the shim reserved it before start()).
+  //   - coldStartSandbox / reconnectSessionSandbox are idempotent on retry
+  //     (sandbox_id CAS, mcp_refreshed_at TTL).
+  //   - markRunnerStarted is the spawn-idempotency CAS — replay still skips
+  //     the actual spawn after the first attempt.
+  const sandboxRef = await prepareSandboxAndLaunchStep(
+    input,
+    prepared,
+    runId,
+  );
 
   // Workflow body — iterate hook, dispatch each chunk to writeChunkStep.
   // Cancellation propagates here as a thrown exception; the catch routes
@@ -187,6 +222,120 @@ export async function dispatchWorkflow(
 // --- Steps (exported for testability; not re-exported from workflows/index.ts
 //     so callers don't accidentally invoke them outside the workflow body) ---
 
+/**
+ * Single step that does runId persistence + sandbox provisioning + runner
+ * launch. Combined to save WDK step boundaries — pre-fix this was three
+ * separate steps each paying ~100-500ms of cross-function overhead.
+ *
+ * All three operations are idempotent on retry:
+ *   - setWorkflowRunId is an UPDATE on an existing row (same value on replay).
+ *   - ensureSandboxImpl uses sandbox_id CAS / mcp_refreshed_at TTL.
+ *   - launchRunnerImpl uses markRunnerStarted CAS — replay skips spawn.
+ */
+export async function prepareSandboxAndLaunchStep(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+  runId: string,
+): Promise<SandboxRef> {
+  "use step";
+  // Wrapped in try/catch so a thrown error does NOT trigger WDK's
+  // automatic step retry. Production trace via `workflow inspect events`
+  // on a 4-hour zombie schedule run showed a 22-minute gap between
+  // run_started and the first chunk — most likely caused by this step
+  // throwing once and WDK retrying on multi-minute backoff. While the
+  // step retried, the watchdog correctly killed the session at
+  // max_runtime+120s, but the workflow run kept running its hook
+  // iterator until the WDK 4h expiry. Same posture as PR #62/#63: log
+  // the error loudly and rethrow as a `FatalError` so the run fails
+  // fast (cleanup-sessions sees workflow_run_id and cancels), instead
+  // of hanging on retries.
+  try {
+    return await prepareSandboxAndLaunchImpl(input, prepared, runId);
+  } catch (err) {
+    logger.error("prepareSandboxAndLaunchStep: caught — failing fast (no WDK retry)", {
+      run_id: runId,
+      triggered_by: input.triggeredBy,
+      session_id: prepared.session.id,
+      message_id: prepared.messageId,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    // Best-effort: mark the session message failed so the user-facing
+    // row reflects what actually happened, instead of waiting for the
+    // active-watchdog to fire (12+ minutes by default).
+    await transitionMessageStatus(
+      prepared.messageId,
+      input.tenantId,
+      "running",
+      "failed",
+      {
+        completed_at: new Date().toISOString(),
+        error_type: "sandbox_launch_failed",
+        error_messages: [err instanceof Error ? err.message : String(err)],
+      },
+    ).catch(() => {});
+    // FatalError tells WDK not to retry. The run finalizes promptly
+    // and the cleanup cron can do its work without the 4h zombie tail.
+    throw new FatalError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+async function prepareSandboxAndLaunchImpl(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+  runId: string,
+): Promise<SandboxRef> {
+  // DIAG: first thing the inner workflow's first step does is log so
+  // we can correlate by run_id. If chat path's start() schedules the
+  // inner run but this log never fires, the inner is hanging before
+  // step entry (bug is in WDK scheduling, not in our step body). If
+  // it does fire, the bug is inside the step's actual work.
+  logger.info("prepareSandboxAndLaunchStep: entered", {
+    run_id: runId,
+    triggered_by: input.triggeredBy,
+    session_id: prepared.session.id,
+    message_id: prepared.messageId,
+  });
+  // setWorkflowRunId is an idempotent UPDATE on the session row; it does
+  // not depend on the sandbox. Race it against ensureSandboxImpl so the
+  // ~50-200ms DB latency overlaps with the (much heavier) sandbox work
+  // instead of stacking before it. launchRunnerImpl still waits for the
+  // sandbox.
+  const [, sandboxRef] = await Promise.all([
+    setWorkflowRunId(prepared.session.id, input.tenantId, `wdk_v1_${runId}`),
+    ensureSandboxImpl(input, prepared),
+  ]);
+  await launchRunnerImpl(input, prepared, sandboxRef);
+  logger.info("prepareSandboxAndLaunchStep: complete", {
+    run_id: runId,
+    triggered_by: input.triggeredBy,
+    session_id: prepared.session.id,
+    sandbox_id: sandboxRef.sandboxId,
+  });
+  return sandboxRef;
+}
+
+/**
+ * @deprecated Kept for unit tests that pin its behavior. The workflow body
+ * now calls `prepareSandboxAndLaunchStep` which inlines this work.
+ */
+export async function persistWorkflowRunIdStep(
+  prepared: PreparedExecution,
+  runId: string,
+  tenantId: TenantId,
+): Promise<void> {
+  "use step";
+  await setWorkflowRunId(prepared.session.id, tenantId, `wdk_v1_${runId}`);
+}
+
+/**
+ * @deprecated Kept exported for unit tests that pin its behavior. The
+ * workflow body no longer calls this — reserve runs in the shim before
+ * start() and `persistWorkflowRunIdStep` records the runId after.
+ */
 export async function reserveStep(
   input: DispatchInput,
   runId: string,
@@ -207,22 +356,169 @@ export async function ensureSandboxStep(
   prepared: PreparedExecution,
 ): Promise<SandboxRef> {
   "use step";
-  // U2 v1: cold-start path only. The legacy runMessageStream has extensive
-  // warm-handle cache + parallel MCP/plugin/auth optimization that we'll
-  // port in a follow-up. For now, every workflow run does a fresh
-  // sandbox provision per-message.
-  //
-  // TODO(U2-followup): port the warm-cache + parallel-builds optimization
-  // from legacy runMessageStream so workflow-backed sessions get the same
-  // hot-path latency as legacy. Tracked separately to keep U2 reviewable.
+  return ensureSandboxImpl(input, prepared);
+}
+
+/**
+ * Body of ensureSandboxStep without the `"use step"` directive so it can be
+ * called from inside another step (e.g. `prepareSandboxAndLaunchStep`)
+ * without scheduling a nested WDK step boundary.
+ */
+async function ensureSandboxImpl(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+): Promise<SandboxRef> {
+  // Mirrors the legacy runMessageStream optimization layout (dispatcher.ts:
+  // 590–765) so workflow-backed follow-up messages don't pay the full cold-
+  // start cost on every turn. The hot-path process-local cache (activeSessions)
+  // is intentionally not ported — workflow steps may run on different function
+  // instances and a per-instance cache wouldn't reliably hit. The warm
+  // reconnect path is the big win: skips ~3s of sandbox provisioning when
+  // the session already has a live sandbox.
   const env = getEnv();
   const { agent, session, effectiveBudget, effectiveMaxTurns } = prepared;
   const effectiveRunner = resolveEffectiveRunner(agent.model, agent.runner);
 
+  // skipPluginRefresh: the existing sandbox already has plugin files on disk
+  // (reconnectSessionSandbox doesn't re-inject — see "OPTIMIZATION B" comment
+  // in sandbox.ts). MCP freshness is the proxy for "the sandbox state is still
+  // valid"; if MCP refreshed within the TTL, skip the plugin GitHub fetch too.
+  const mcpFresh = isMcpFresh(session);
+  const skipPluginRefresh = !!session.sandbox_id && mcpFresh;
+
+  // Kick off all three builds in parallel — they overlap with reconnect or
+  // cold-start work below. fetchPluginContent on an empty plugin list is a
+  // no-op fast path; resolveSandboxAuth is one cached DB read.
+  const mcpPromise = withTenantTransaction(
+    input.tenantId,
+    () => buildMcpConfig(agent, input.tenantId),
+  ) as Promise<McpBuildResult>;
+  const pluginPromise = (skipPluginRefresh
+    ? Promise.resolve<PluginFileSet>({ skillFiles: [], agentFiles: [], warnings: [] })
+    : fetchPluginContent(agent.plugins ?? [])) as Promise<PluginFileSet>;
+  const authPromise = resolveSandboxAuth(input.tenantId, effectiveRunner);
+
+  // Warm path: the session already has a sandbox_id. Try reconnecting to
+  // the live sandbox (saves ~3s of fresh provision). Race the reconnect
+  // against the parallel builds so MCP/plugin work overlaps with the
+  // Sandbox.get() RPC.
+  if (session.sandbox_id) {
+    const auth = await authPromise;
+    // Build the FULL sandbox config now so the SandboxRef returned to
+    // subsequent steps carries everything they need — they reconnect via
+    // reconnectSessionSandbox(sandboxId, sandboxConfig) on every step.
+    // Legacy passes mcpServers=undefined to reconnect, then calls
+    // updateMcpConfig on the same wrapper instance — that pattern doesn't
+    // translate to workflow steps because each step rebuilds the wrapper.
+    // Here we wait for mcpPromise so the config is complete.
+    const [mcpResult, pluginResult] = await Promise.all([mcpPromise, pluginPromise]);
+    void pluginResult; // unused on reconnect path; existing sandbox has files
+
+    const sandboxConfig: SessionSandboxConfig = {
+      agent: { ...agent, max_budget_usd: effectiveBudget, max_turns: effectiveMaxTurns },
+      tenantId: input.tenantId,
+      sessionId: session.id,
+      platformApiUrl: input.platformApiUrl,
+      aiGatewayApiKey: env.AI_GATEWAY_API_KEY,
+      auth,
+      mcpServers: mcpResult.servers,
+      mcpErrors: mcpResult.errors,
+      pluginFiles: [],
+      maxIdleTimeoutMs: SESSION_TIMEOUT_MS,
+      callbackData: input.callbackData,
+    };
+
+    const reconnectResult = await reconnectSessionSandbox(
+      session.sandbox_id,
+      sandboxConfig,
+    );
+
+    if (reconnectResult) {
+      // Bump the sandbox idle timeout if it's been sitting for a while —
+      // mirror legacy's threshold (5 min idle → bump). Without this, a
+      // follow-up message on a session that idled past the sandbox's own
+      // timeout would race the sandbox going away mid-message.
+      const idleSinceMs = session.idle_since
+        ? Date.now() - new Date(session.idle_since).getTime()
+        : Infinity;
+      if (idleSinceMs > SESSION_RECONNECT_TIMEOUT_EXTEND_THRESHOLD_MS) {
+        try {
+          await reconnectResult.extendTimeout(SESSION_TIMEOUT_MS);
+        } catch (err) {
+          logger.warn("ensureSandboxStep: extendTimeout failed (best-effort)", {
+            session_id: session.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      recordMcpRefresh(session.id, input.tenantId);
+
+      // U7 chat-attachments warm path: re-stage attachments on follow-up
+      // turns. writeFiles overwrites by path so re-running on a session
+      // that already has the file is idempotent. C-R2-3 (review run
+      // 20260506-232400-round2): mirror the cold path's 30s timeout +
+      // size cap so warm and cold guards are symmetric.
+      if (input.preInjectFiles && input.preInjectFiles.length > 0) {
+        await Promise.allSettled(
+          input.preInjectFiles.map(async (f) => {
+            try {
+              // Round-3 review #5: keep the AbortController active until
+              // arrayBuffer() resolves. The previous clearTimeout-in-fetch-
+              // finally pattern released the timer before the body
+              // downloaded, so a slow-streaming server hung until Vercel
+              // maxDuration. The signal is shared between fetch() and the
+              // stream consumed by arrayBuffer(); aborting cancels both.
+              const ctl = new AbortController();
+              const tm = setTimeout(() => ctl.abort(), 30_000);
+              try {
+                const res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+                if (!res.ok) throw new Error(`http_${res.status}`);
+                const ab = await res.arrayBuffer();
+                if (ab.byteLength > f.sizeBytes + 1024) {
+                  throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
+                }
+                const buf = Buffer.from(ab);
+                await reconnectResult.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
+              } finally {
+                clearTimeout(tm);
+              }
+            } catch (err) {
+              logger.warn("preInjectFiles (warm): stage failed (fail-open)", {
+                path: f.path,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }),
+        );
+      }
+
+      logger.info("ensureSandboxStep: warm reconnect", {
+        session_id: session.id,
+        sandbox_id: session.sandbox_id,
+        skip_plugin_refresh: skipPluginRefresh,
+      });
+      return { sandboxId: session.sandbox_id, sandboxConfig };
+    }
+    // Reconnect returned null → sandbox vanished (cleanup-cron stopped it,
+    // Vercel idle-killed it, etc.). Fall through to cold-start. The plugin
+    // promise we resolved with the fast path may have been wrong (we needed
+    // the full plugin content for cold-start); kick a fresh fetch since we
+    // skipped it on the assumption that the sandbox still had the files.
+    logger.info("ensureSandboxStep: reconnect failed → cold start", {
+      session_id: session.id,
+      stale_sandbox_id: session.sandbox_id,
+    });
+  }
+
+  // Cold path: either no prior sandbox, or reconnect failed. Provision fresh.
+  // Re-fetch plugin content if we skipped it earlier on the warm-path
+  // assumption.
   const [mcpResult, pluginResult, auth] = await Promise.all([
-    withTenantTransaction(input.tenantId, () => buildMcpConfig(agent, input.tenantId)) as Promise<McpBuildResult>,
-    fetchPluginContent(agent.plugins ?? []) as Promise<PluginFileSet>,
-    resolveSandboxAuth(input.tenantId, effectiveRunner),
+    mcpPromise,
+    skipPluginRefresh
+      ? (fetchPluginContent(agent.plugins ?? []) as Promise<PluginFileSet>)
+      : pluginPromise,
+    authPromise,
   ]);
 
   const { sandbox, sandboxConfig } = await coldStartSandbox({
@@ -256,6 +552,49 @@ export async function ensureSandboxStep(
   // 'active' coming out of reserveStep.
   await casCreatingToActive(session.id, input.tenantId, { sandbox_id: sandbox.id });
 
+  // U7 chat-attachments: pre-inject staged files BEFORE the runner spawns.
+  // The chat workflow passes signed-URL handoff metadata in
+  // input.preInjectFiles; we fetch each URL server-side and write to the
+  // sandbox FS. Bytes never cross a WDK step boundary because the fetch +
+  // write happens inside this single step. Per-attachment fail-open (a
+  // failed download / 404 logs and skips; the text message still
+  // dispatches with the agent prompt's `## Attachments` block intact).
+  if (input.preInjectFiles && input.preInjectFiles.length > 0) {
+    await Promise.allSettled(
+      input.preInjectFiles.map(async (f) => {
+        try {
+          // 30s timeout + size cap — review run 20260506-221948-2402b0ed
+          // P2 #23 (no timeout) and correctness #11 (no size cap). Cap at
+          // sizeBytes from the persisted record (already capped at 25 MB
+          // upstream); reject larger to prevent OOM via attacker-controlled
+          // blob.
+          // Round-3 review #5: keep the AbortController active until
+          // arrayBuffer() resolves so the body download is bounded by
+          // the 30s timeout, not Vercel maxDuration.
+          const ctl = new AbortController();
+          const tm = setTimeout(() => ctl.abort(), 30_000);
+          try {
+            const res = await fetch(f.signedReadUrl, { redirect: "error", signal: ctl.signal });
+            if (!res.ok) throw new Error(`http_${res.status}`);
+            const ab = await res.arrayBuffer();
+            if (ab.byteLength > f.sizeBytes + 1024) {
+              throw new Error(`response_size_exceeds_metadata: ${ab.byteLength} > ${f.sizeBytes}`);
+            }
+            const buf = Buffer.from(ab);
+            await sandbox.sandboxRef.writeFiles([{ path: f.path, content: buf }]);
+          } finally {
+            clearTimeout(tm);
+          }
+        } catch (err) {
+          logger.warn("preInjectFiles: stage failed (fail-open)", {
+            path: f.path,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }),
+    );
+  }
+
   // Return a serializable ref (sandboxId + the POJO config used to provision
   // it). Subsequent steps reconnect via reconnectSessionSandbox(sandboxId, cfg)
   // — the sandbox process keeps running on its own host between steps.
@@ -284,7 +623,18 @@ export async function launchRunnerStep(
   sandboxRef: SandboxRef,
 ): Promise<void> {
   "use step";
+  await launchRunnerImpl(input, prepared, sandboxRef);
+}
 
+/**
+ * Body of launchRunnerStep without the `"use step"` directive. Called from
+ * `prepareSandboxAndLaunchStep` to avoid scheduling a nested WDK boundary.
+ */
+async function launchRunnerImpl(
+  input: DispatchInput,
+  prepared: PreparedExecution,
+  sandboxRef: SandboxRef,
+): Promise<void> {
   // DB-backed spawn idempotency primitive (replaces sandbox-process inspection).
   // Replay finds runner_started_at non-null and skips the actual spawn.
   const fresh = await markRunnerStarted(prepared.messageId, input.tenantId);
@@ -345,13 +695,115 @@ export async function writeChunkStep(
   // secrets are redacted before reaching downstream consumers (REST/A2A
   // render shims, transcript blob), and ephemeral asset URLs are
   // persisted to Vercel Blob before leaving the platform's trust boundary.
-  const processed = scrubSecrets(await processLineAssets(chunk.line, tenantId, messageId));
-
-  const writer = getWritable<string>().getWriter();
+  //
+  // PERF: process lines in parallel — scrubSecrets + processLineAssets
+  // are independent across lines; serial dispatch was leaving latency
+  // on the table for batches of 5-10 lines.
+  //
+  // Wrapped in try/catch so a per-chunk programming bug (TypeError on
+  // malformed lines, etc.) does NOT throw out of this step. WDK retries
+  // a thrown step with backoff — observed in production as a 5-minute
+  // hang on the chat path (writeChunkStep threw → WDK retried 5min
+  // later → chat workflow's consumeAndPostStep blocked the whole time
+  // → user-visible "agent done but Slack hangs" symptom). Logging +
+  // continuing is the right behavior: the same chunk will hit the same
+  // bug on retry, so retrying buys us nothing; we'd rather drop a few
+  // chars of streamed text than freeze the whole reply.
   try {
-    await writer.write(processed);
-  } finally {
-    writer.releaseLock();
+    if (!chunk || !Array.isArray(chunk.lines)) {
+      logger.error("writeChunkStep: malformed chunk (lines not array)", {
+        tenant_id: tenantId,
+        message_id: messageId,
+        chunk_kind: chunk?.kind,
+        lines_type: typeof chunk?.lines,
+      });
+      return;
+    }
+
+    const processed = await Promise.all(
+      chunk.lines.map(async (l, idx) => {
+        if (!l || typeof l.line !== "string") {
+          logger.warn("writeChunkStep: malformed line entry, skipping", {
+            tenant_id: tenantId,
+            message_id: messageId,
+            line_index: idx,
+            line_type: typeof l?.line,
+            event_type: l?.eventType,
+          });
+          return null;
+        }
+        try {
+          return scrubSecrets(await processLineAssets(l.line, tenantId, messageId));
+        } catch (err) {
+          logger.error("writeChunkStep: per-line processing threw", {
+            tenant_id: tenantId,
+            message_id: messageId,
+            line_index: idx,
+            event_type: l.eventType,
+            error_name: err instanceof Error ? err.constructor.name : "unknown",
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack : undefined,
+          });
+          return null;
+        }
+      }),
+    );
+
+    const writer = getWritable<string>().getWriter();
+    try {
+      for (const line of processed) {
+        if (line === null) continue;
+        // T5 — bounded retry for transient `writer.write` failures so a
+        // single hiccup doesn't permanently drop the text_delta lines that
+        // make up the chat reply tail. Stays IN-step so the existing
+        // anti-WDK-retry posture above is preserved (a thrown step =
+        // 5-min retry hang, which is worse than dropping a chunk).
+        let attempt = 0;
+        const MAX_ATTEMPTS = 3;
+        // Tiny budget — total retry wall-clock <50ms even on max attempts.
+        const BACKOFF_BASE_MS = 10;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            await writer.write(line);
+            break;
+          } catch (err) {
+            attempt += 1;
+            if (attempt >= MAX_ATTEMPTS) {
+              logger.error("writeChunkStep: writer.write exhausted retries — dropping line", {
+                tenant_id: tenantId,
+                message_id: messageId,
+                attempts: attempt,
+                error_name: err instanceof Error ? err.constructor.name : "unknown",
+                error: err instanceof Error ? err.message : String(err),
+              });
+              break;
+            }
+            // Exponential-ish with light jitter. 10–14ms, 20–28ms.
+            const jitter = Math.floor(Math.random() * 5);
+            const sleepMs = BACKOFF_BASE_MS * Math.pow(2, attempt - 1) + jitter;
+            await new Promise((resolve) => setTimeout(resolve, sleepMs));
+          }
+        }
+      }
+    } finally {
+      writer.releaseLock();
+    }
+  } catch (err) {
+    // Last-resort catch — anything we missed above. Log loudly so we
+    // can see the actual error surface in Vercel logs (not the
+    // truncated "Queue callback error: [Type..." that WDK wraps it in).
+    logger.error("writeChunkStep: top-level catch", {
+      tenant_id: tenantId,
+      message_id: messageId,
+      chunk_kind: chunk?.kind,
+      chunk_line_count: Array.isArray(chunk?.lines) ? chunk.lines.length : -1,
+      error_name: err instanceof Error ? err.constructor.name : "unknown",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    // Swallow — see comment above. Throwing causes a 5-min WDK retry
+    // hang that's worse than dropping this chunk's worth of bytes.
   }
 }
 
@@ -381,16 +833,56 @@ export async function finalizeStep(
     // here uses whatever chunks landed before cancel.
   }
 
+  // Capture sdk_session_id from the runner's `session_info` event so the
+  // session row can persist it via sessionTail (called inside finalizeMessage).
+  // Without this, follow-up messages on the same persistent session launch
+  // the runner without `resume`, which makes the SDK start a fresh
+  // conversation — visible in the playground as "you haven't shared any
+  // code in this conversation yet" responses to follow-ups. Mirrors the
+  // legacy capture at dispatcher.ts:827-842.
+  const capturedSdkSessionId = extractSdkSessionId(transcriptChunks)
+    ?? prepared.session.sdk_session_id;
+
   const sandbox = await reconnectInStep(sandboxRef);
   await finalizeMessage({
     messageId: prepared.messageId,
     tenantId: prepared.session.tenant_id as TenantId,
     session: prepared.session as Session,
     sandbox,
-    sdkSessionId: prepared.session.sdk_session_id,
+    sdkSessionId: capturedSdkSessionId,
     transcriptChunks,
     effectiveBudget: prepared.effectiveBudget,
   });
+}
+
+/**
+ * Walk the captured NDJSON chunks for a `session_info` event whose
+ * `sdk_session_id` is the SDK's session id. The runner emits this once on
+ * iterator init (sandbox.ts:788). Returns the LAST one in case the runner
+ * spans multiple SDK sessions in a single message (rare; present for
+ * future-proofing).
+ */
+function extractSdkSessionId(chunks: string[]): string | null {
+  let captured: string | null = null;
+  for (const line of chunks) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (
+        event &&
+        typeof event === "object" &&
+        event.type === "session_info" &&
+        typeof event.sdk_session_id === "string" &&
+        event.sdk_session_id.length > 0
+      ) {
+        captured = event.sdk_session_id;
+      }
+    } catch {
+      // Non-JSON line — skip. Same defensive parse as parseRunnerLine.
+    }
+  }
+  return captured;
 }
 
 export async function tailStep(

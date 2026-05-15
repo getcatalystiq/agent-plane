@@ -7,16 +7,21 @@ import { getEnv } from "@/lib/env";
 import { invalidateAuthCache } from "@/lib/tenant-auth";
 import { z } from "zod";
 import { removeToolkitConnections } from "@/lib/composio";
+import { validateSlackWebhookUrl } from "@/lib/notifications/slack";
 
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ tenantId: string }> };
 
-const TenantWithTokenFlag = TenantRow.extend({ has_subscription_token: z.boolean() });
+const TenantWithTokenFlag = TenantRow.extend({
+  has_subscription_token: z.boolean(),
+  has_slack_alert_webhook: z.boolean(),
+});
 const TENANT_SELECT = `SELECT id, name, slug, settings, monthly_budget_usd, status, current_month_spend,
        timezone, logo_url, subscription_base_url, subscription_token_expires_at,
        spend_period_start, created_at,
-       subscription_token_enc IS NOT NULL AS has_subscription_token
+       subscription_token_enc IS NOT NULL AS has_subscription_token,
+       slack_alert_webhook_url_enc IS NOT NULL AS has_slack_alert_webhook
 FROM tenants WHERE id = $1`;
 
 export const GET = withErrorHandler(async (_request: NextRequest, context) => {
@@ -57,6 +62,7 @@ const UpdateTenantSchema = z.object({
   subscription_token: z.string().trim().optional(),
   subscription_base_url: z.string().url().refine((url) => url.startsWith("https://"), "Must be HTTPS").nullable().optional(),
   subscription_token_expires_at: z.string().datetime().nullable().optional(),
+  slack_alert_webhook_url: z.string().trim().optional(),
 });
 
 export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
@@ -111,6 +117,32 @@ export const PATCH = withErrorHandler(async (request: NextRequest, context) => {
   if (input.subscription_token_expires_at !== undefined) {
     sets.push(`subscription_token_expires_at = $${idx++}`);
     params.push(input.subscription_token_expires_at);
+  }
+  if (input.slack_alert_webhook_url !== undefined) {
+    if (input.slack_alert_webhook_url === "") {
+      sets.push(`slack_alert_webhook_url_enc = $${idx++}`);
+      params.push(null);
+    } else {
+      const validation = validateSlackWebhookUrl(input.slack_alert_webhook_url);
+      if (!validation.ok) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "validation_error",
+              message: validation.reason,
+            },
+          },
+          { status: 400 },
+        );
+      }
+      const env = getEnv();
+      const encrypted = await encrypt(
+        input.slack_alert_webhook_url,
+        env.ENCRYPTION_KEY,
+      );
+      sets.push(`slack_alert_webhook_url_enc = $${idx++}`);
+      params.push(JSON.stringify(encrypted));
+    }
   }
 
   if (sets.length === 0) {

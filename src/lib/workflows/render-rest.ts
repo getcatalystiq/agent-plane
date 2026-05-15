@@ -23,7 +23,13 @@ import { logger } from "@/lib/logger";
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STREAM_DETACH_MS = 4.5 * 60 * 1000;
 const TAIL_POLL_INTERVAL_MS = 200;
-const STATUS_POLL_INTERVAL_MS = 1_000;
+// PERF: terminal-status check fires every 500ms (was 1000ms). On short
+// messages where the runner finishes between status checks, this halves
+// the trailing-edge latency before the stream cleanly closes — the user
+// sees the result faster instead of waiting on a poll cycle that hasn't
+// fired yet. The check itself is one in-process WDK runtime read; doubling
+// frequency has negligible cost.
+const STATUS_POLL_INTERVAL_MS = 500;
 
 const TERMINAL_STATUSES = new Set([
   "completed",

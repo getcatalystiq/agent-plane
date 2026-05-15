@@ -78,21 +78,11 @@ describe("034_workflow_dispatch_columns migration", () => {
     });
   });
 
-  describe("tenants.workflow_dispatch_overrides", () => {
-    it("adds JSONB column with empty-object default", () => {
-      expect(sql).toMatch(
-        /ALTER\s+TABLE\s+tenants[\s\S]*?ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+workflow_dispatch_overrides\s+JSONB[\s\S]*?DEFAULT\s+'\{\}'::jsonb/i,
-      );
-    });
-
-    it("constrains the JSONB to be an object (not array/scalar)", () => {
-      // Without this guard, malformed updates could store an array or scalar
-      // and break the per-tenant deny-list reader logic in U4.
-      expect(sql).toMatch(
-        /CHECK\s*\(\s*jsonb_typeof\s*\(\s*workflow_dispatch_overrides\s*\)\s*=\s*'object'\s*\)/i,
-      );
-    });
-  });
+  // (Removed: `tenants.workflow_dispatch_overrides` schema tests. The
+  //  column exists on the migration text but no application code reads
+  //  it any more — the workflow-vs-legacy toggle was retired. The
+  //  column itself is harmless to keep; cleaning it up would require
+  //  a separate DROP COLUMN migration.)
 
   describe("idempotency", () => {
     it("uses ADD COLUMN IF NOT EXISTS for every column", () => {
@@ -259,30 +249,6 @@ describe("validation schema round-trips", () => {
     created_at: "2026-05-05T08:00:00.000Z",
   };
 
-  describe("TenantRow.workflow_dispatch_overrides", () => {
-    it("defaults to {} when absent", () => {
-      const parsed = TenantRow.parse(baseTenant);
-      expect(parsed.workflow_dispatch_overrides).toEqual({});
-    });
-
-    it("accepts a per-trigger boolean map", () => {
-      const parsed = TenantRow.parse({
-        ...baseTenant,
-        workflow_dispatch_overrides: { api: false, schedule: true },
-      });
-      expect(parsed.workflow_dispatch_overrides).toEqual({
-        api: false,
-        schedule: true,
-      });
-    });
-
-    it("rejects non-boolean values for trigger keys", () => {
-      expect(() =>
-        TenantRow.parse({
-          ...baseTenant,
-          workflow_dispatch_overrides: { api: "yes" },
-        }),
-      ).toThrow();
-    });
-  });
+  // (Removed: `TenantRow.workflow_dispatch_overrides` round-trip tests.
+  //  The validation field was retired alongside the toggle infra.)
 });

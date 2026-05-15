@@ -11,6 +11,7 @@ import { PluginsManager } from "./plugins-manager";
 import { ScheduleEditor } from "./schedule-editor";
 import { AgentHeaderActions } from "./header-actions";
 import { AgentTabs } from "./agent-tabs";
+import { BotsTab } from "./bots-tab";
 import { AgentRuns } from "./agent-runs";
 import { IdentityTab } from "./identity-tab";
 import { WebhooksManager } from "./webhooks-manager";
@@ -99,6 +100,12 @@ export default async function AgentDetailPage({
             agentId={agent.id}
             tenantId={agent.tenant_id}
             baseUrl={getCallbackBaseUrl()}
+          />
+        }
+        bots={
+          <BotsTab
+            agentId={agent.id}
+            webhookBaseUrl={getCallbackBaseUrl()}
           />
         }
       />

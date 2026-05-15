@@ -54,6 +54,58 @@ interface SessionMessage {
 const TERMINAL_MESSAGE_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out"]);
 const PAGE_SIZE = 50;
 
+/**
+ * Apply an optimistic terminal status to the latest message in local
+ * state. Used when the admin stream delivers a `result`/`error` event
+ * before the DB transition has been written by the workflow's
+ * finalizeStep. Without this the badge stays on "running" while the
+ * transcript already renders the "Completed N turns" banner.
+ */
+function applyOptimisticTerminalStatus(
+  setMessages: React.Dispatch<React.SetStateAction<SessionMessage[]>>,
+  status: "completed" | "failed",
+): void {
+  setMessages((prev) => {
+    if (prev.length === 0) return prev;
+    const lastIdx = prev.length - 1;
+    const last = prev[lastIdx];
+    if (TERMINAL_MESSAGE_STATUSES.has(last.status)) return prev;
+    const next = [...prev];
+    next[lastIdx] = {
+      ...last,
+      status,
+      completed_at: last.completed_at ?? new Date().toISOString(),
+    };
+    return next;
+  });
+}
+
+/**
+ * Merge a server snapshot of messages into local state, preferring local
+ * terminal statuses over a server "running" for the same row. The admin
+ * stream sees the runner's terminal event before finalizeStep commits
+ * the DB transition; without this guard a router.refresh that lands
+ * mid-finalize regresses our optimistic "completed" badge back to
+ * "running".
+ */
+function mergeServerSnapshot(
+  prev: SessionMessage[],
+  next: SessionMessage[],
+): SessionMessage[] {
+  if (prev.length === 0) return next;
+  const prevById = new Map(prev.map((m) => [m.id, m]));
+  return next.map((server) => {
+    const local = prevById.get(server.id);
+    if (!local) return server;
+    const localTerminal = TERMINAL_MESSAGE_STATUSES.has(local.status);
+    const serverTerminal = TERMINAL_MESSAGE_STATUSES.has(server.status);
+    // Keep local terminal until the server catches up with its own
+    // terminal status; once it does, server wins (canonical row).
+    if (localTerminal && !serverTerminal) return local;
+    return server;
+  });
+}
+
 interface Props {
   session: SessionData;
   messages: SessionMessage[];
@@ -85,7 +137,14 @@ function MessageRow({
 
   const events = useMemo(() => {
     if (isLatestActive) return liveEvents;
-    return transcriptEvents ?? [];
+    // After the stream closes (terminal `result`/`error` event), router.refresh
+    // re-fetches the message; isLatestActive flips to false and the page
+    // switches from liveEvents to the lazy-loaded transcript blob. But the
+    // blob fetch is async — and on the chat-workflow path the blob may not
+    // even be uploaded yet (finalizeStep race). Without this fallback, the
+    // viewer briefly (or persistently, on a slow/failed fetch) shows
+    // "No transcript available" right after a successful run.
+    return transcriptEvents ?? (liveEvents.length > 0 ? liveEvents : []);
   }, [isLatestActive, liveEvents, transcriptEvents]);
 
   // Lazy-load transcript blob when expanded for non-active messages
@@ -293,6 +352,15 @@ export function LiveSessionDetail({ session: initialSession, messages: initialMe
             if (event.type === "result") {
               setIsStreaming(false);
               const success = event.subtype === "success";
+              // Optimistic local-state update. The admin stream reads the
+              // runner's local transcript file directly and sees `result`
+              // before the workflow's finalizeStep commits the
+              // running→completed transition to the DB. Without this,
+              // the badge says "running" while the transcript renders
+              // "Completed N turns" — confusing the user. Mark the row
+              // terminal locally; the delayed router.refresh below
+              // reconciles with the server snapshot once finalize lands.
+              applyOptimisticTerminalStatus(setMessages, success ? "completed" : "failed");
               toast({
                 title: success ? "Message completed" : "Message finished",
                 description: success
@@ -301,17 +369,23 @@ export function LiveSessionDetail({ session: initialSession, messages: initialMe
                 variant: success ? "success" : "default",
               });
               router.refresh();
+              // Finalize is a fast DB UPDATE but it races the stream we
+              // just processed. Schedule a follow-up refresh so the badge
+              // ends up reflecting whatever the DB committed.
+              setTimeout(() => router.refresh(), 2000);
               return;
             }
 
             if (event.type === "error") {
               setIsStreaming(false);
+              applyOptimisticTerminalStatus(setMessages, "failed");
               toast({
                 title: "Message failed",
                 description: String(event.error || "Unknown error"),
                 variant: "destructive",
               });
               router.refresh();
+              setTimeout(() => router.refresh(), 2000);
               return;
             }
           }
@@ -334,11 +408,14 @@ export function LiveSessionDetail({ session: initialSession, messages: initialMe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLatestInFlight, latestMessage?.id]);
 
-  // Sync server data on refresh
+  // Sync server data on refresh — merge instead of replace so an interim
+  // refresh that lands mid-finalize (DB still says running while we've
+  // already processed the runner's result event) doesn't regress the
+  // optimistic terminal badge.
   useEffect(() => {
     setSession(initialSession);
-    setMessages(initialMessages);
-    setVisibleCount((prev) => Math.max(prev, Math.min(initialMessages.length, PAGE_SIZE)));
+    setMessages((prev) => mergeServerSnapshot(prev, initialMessages));
+    setVisibleCount((prevCount) => Math.max(prevCount, Math.min(initialMessages.length, PAGE_SIZE)));
   }, [initialSession, initialMessages]);
 
   const totalMessages = messages.length;

@@ -5,11 +5,17 @@
     { "path": "/api/cron/budget-reset", "schedule": "0 0 * * *" },
     { "path": "/api/cron/scheduled-runs", "schedule": "* * * * *" },
     { "path": "/api/cron/cleanup-sessions", "schedule": "*/5 * * * *" },
-    { "path": "/api/cron/refresh-snapshot", "schedule": "0 4 * * *" }
+    { "path": "/api/cron/refresh-snapshot", "schedule": "0 4 * * *" },
+    { "path": "/api/discord/gateway", "schedule": "*/9 * * * *" },
+    { "path": "/api/cron/chat-bots-reprobe", "schedule": "0 6 * * *" },
+    { "path": "/api/cron/slack-presence", "schedule": "0 8 * * *" }
   ],
   "functions": {
     "app/api/sessions/**": { "supportsCancellation": true },
     "app/api/admin/sessions/**": { "supportsCancellation": true },
-    "app/api/a2a/**": { "supportsCancellation": true }
+    "app/api/a2a/**": { "supportsCancellation": true },
+    "app/api/discord/**": { "maxDuration": 800, "supportsCancellation": true },
+    "app/api/webhooks/discord/**": { "supportsCancellation": true },
+    "app/api/webhooks/slack/**": { "maxDuration": 800, "supportsCancellation": true }
   }
 }
